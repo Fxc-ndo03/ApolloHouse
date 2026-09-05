@@ -80,6 +80,7 @@ class AudioPlayback:
         channels: int = 1,
         chunk_size: int = 1024,
         format: int = pyaudio.paInt16,
+        on_end: Optional[Callable[[], None]] = None,
     ):
         self.sample_rate = sample_rate
         self.channels = channels
@@ -90,14 +91,15 @@ class AudioPlayback:
         self._buffer = queue.Queue()
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._on_end_callback: Optional[Callable[[], None]] = None
+        self._on_end_callback: Optional[Callable[[], None]] = on_end
 
     def start(self, on_end: Optional[Callable[[], None]] = None) -> None:
         """Start playback stream."""
         if self._running:
             return
         
-        self._on_end_callback = on_end
+        if on_end is not None:
+            self._on_end_callback = on_end
         self._running = True
         
         self._stream = self._audio.open(
@@ -165,8 +167,14 @@ class AudioPlayback:
             self._thread = None
 
     def __del__(self):
-        self.stop()
-        self._audio.terminate()
+        try:
+            self.stop()
+        except AttributeError:
+            pass
+        try:
+            self._audio.terminate()
+        except AttributeError:
+            pass
 
 
 def pcm_to_numpy(pcm_data: bytes, dtype=np.int16) -> np.ndarray:
