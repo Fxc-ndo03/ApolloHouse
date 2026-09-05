@@ -1,0 +1,172 @@
+import { describe, expect, it } from 'bun:test';
+
+import {
+  handleCodingLlmProxyRequest,
+  mintCodingProxyToken,
+  verifyCodingProxyToken,
+} from '@/coding/proxy';
+import { createFakeApolloEnvironment } from '@/configuration/testing';
+
+const GEMINI_API_KEY = 'sk-or-test-key';
+
+describe('coding proxy tokens', () => {
+  it('accepts a freshly minted token and rejects it after expiry', async () => {
+    const token = await mintCodingProxyToken({
+      instanceId: 'wf-1',
+      geminiApiKey: GEMINI_API_KEY,
+      nowMilliseconds: 1_000,
+    });
+
+    expect(
+      await verifyCodingProxyToken({
+        token,
+        geminiApiKey: GEMINI_API_KEY,
+        nowMilliseconds: 2_000,
+      }),
+    ).toBe(true);
+    expect(
+      await verifyCodingProxyToken({
+        token,
+        geminiApiKey: GEMINI_API_KEY,
+        nowMilliseconds: 1_000 + 7 * 60 * 60 * 1000,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a tampered token and a token signed with another key', async () => {
+    const token = await mintCodingProxyToken({
+      instanceId: 'wf-1',
+      geminiApiKey: GEMINI_API_KEY,
+      nowMilliseconds: 1_000,
+    });
+
+    expect(
+      await verifyCodingProxyToken({
+        token: token.replace('wf-1', 'wf-2'),
+        geminiApiKey: GEMINI_API_KEY,
+        nowMilliseconds: 2_000,
+      }),
+    ).toBe(false);
+    expect(
+      await verifyCodingProxyToken({
+        token,
+        geminiApiKey: 'sk-or-other-key',
+        nowMilliseconds: 2_000,
+      }),
+    ).toBe(false);
+    expect(
+      await verifyCodingProxyToken({
+        token: 'garbage',
+        geminiApiKey: GEMINI_API_KEY,
+        nowMilliseconds: 2_000,
+      }),
+    ).toBe(false);
+  });
+});
+
+type ProxiedChatCompletionRequestBody = {
+  readonly model?: string;
+  readonly messages: readonly { readonly role: string; readonly content: string }[];
+};
+
+describe('handleCodingLlmProxyRequest', () => {
+  async function buildAuthorizedRequest(
+    requestBody: ProxiedChatCompletionRequestBody,
+  ): Promise<Request> {
+    const token = await mintCodingProxyToken({
+      instanceId: 'wf-1',
+      geminiApiKey: TEST_GEMINI_API_KEY,
+      nowMilliseconds: Date.now(),
+    });
+    return new Request('https://apollo.example/coding-llm/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(requestBody),
+    });
+  }
+
+  const TEST_GEMINI_API_KEY = 'test-gemini-key';
+  const environment = createFakeApolloEnvironment({
+    GEMINI_API_KEY: TEST_GEMINI_API_KEY,
+    GEMINI_MODEL: 'models/gemini-3.6-flash',
+  });
+
+  it('forwards a Gemini model request to Gemini with the correct key', async () => {
+    let forwardedUrl = '';
+    let forwardedHeader = '';
+    const fakeFetch: typeof fetch = Object.assign(
+      async (url: RequestInfo | URL, init?: RequestInit) => {
+        forwardedUrl = String(url);
+        forwardedHeader = new Headers(init?.headers).get('x-goog-api-key') ?? '';
+        return new Response('{"ok":true}');
+      },
+      { preconnect: () => {} },
+    );
+
+    const geminiToken = await mintCodingProxyToken({
+      instanceId: 'wf-1',
+      geminiApiKey: TEST_GEMINI_API_KEY,
+      nowMilliseconds: Date.now(),
+    });
+    const request = new Request('https://apollo.example/coding-llm/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${geminiToken}` },
+      body: JSON.stringify({ model: 'models/gemini-3.6-flash', messages: [] }),
+    });
+    const response = await handleCodingLlmProxyRequest(
+      request,
+      new URL(request.url),
+      environment,
+      fakeFetch,
+    );
+
+    expect(response.status).toBe(200);
+    expect(forwardedUrl).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+    );
+    expect(forwardedHeader).toBe(TEST_GEMINI_API_KEY);
+  });
+
+  it('rejects a missing token, a foreign model, and a stray path', async () => {
+    const unauthorizedRequest = new Request(
+      'https://apollo.example/coding-llm/v1/chat/completions',
+      { method: 'POST', body: '{}' },
+    );
+    const unauthorizedResponse = await handleCodingLlmProxyRequest(
+      unauthorizedRequest,
+      new URL(unauthorizedRequest.url),
+      environment,
+    );
+    expect(unauthorizedResponse.status).toBe(401);
+
+    const missingModelRequest = await buildAuthorizedRequest({ messages: [] });
+    const missingModelResponse = await handleCodingLlmProxyRequest(
+      missingModelRequest,
+      new URL(missingModelRequest.url),
+      environment,
+    );
+    expect(missingModelResponse.status).toBe(400);
+
+    const foreignModelRequest = await buildAuthorizedRequest({
+      model: 'openai/gpt-5',
+      messages: [],
+    });
+    const foreignModelResponse = await handleCodingLlmProxyRequest(
+      foreignModelRequest,
+      new URL(foreignModelRequest.url),
+      environment,
+    );
+    expect(foreignModelResponse.status).toBe(403);
+
+    const strayPathRequest = new Request('https://apollo.example/coding-llm/v1/models', {
+      method: 'POST',
+      body: '{}',
+    });
+    const strayPathResponse = await handleCodingLlmProxyRequest(
+      strayPathRequest,
+      new URL(strayPathRequest.url),
+      environment,
+    );
+    expect(strayPathResponse.status).toBe(404);
+  });
+});

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "tasks": {
+    "types": {
+      "cache": true,
+      "inputs": ["wrangler.jsonc"],
+      "outputs": ["worker-configuration.d.ts"]
+    },
+    "typecheck": {
+      "dependsOn": ["types"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["types"],
+      "outputs": []
+    },
+    "test:coverage": {
+      "dependsOn": ["types"],
+      "outputs": ["coverage/**"]
+    },
+    "build": {
+      "outputs": ["dist/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "passThroughEnv": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
+    },
+    "deploy": {
+      "dependsOn": ["build"],
+      "cache": false,
+      "passThroughEnv": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
+    }
+  }
+}

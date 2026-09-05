@@ -1,0 +1,60 @@
+# Publishes create-heyapollo to npm. Normal trigger: tag.yml cuts the
+# `create-v<version>` tag when a version bump lands on main and dispatches this
+# workflow against it (a GITHUB_TOKEN tag push cannot fire the tag trigger
+# itself). Pushing the tag by hand still publishes through the tag trigger.
+# Either way the tag version must match apps/wizard/package.json.
+#
+# Auth is npm Trusted Publishing (OIDC) — no long-lived npm token secret.
+# One-time setup, after the FIRST manual publish from a logged-in machine:
+# npmjs.com → create-heyapollo → Settings → Trusted Publisher →
+# GitHub Actions, repository galfrevn/apollo, workflow publish.yml.
+name: Publish create-heyapollo
+
+on:
+  push:
+    tags:
+      - 'create-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    if: github.repository == 'galfrevn/apollo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup
+        uses: ./.github/actions/setup
+        with:
+          worker-types: 'false'
+
+      - name: Verify the tag matches the package version
+        run: |
+          packageVersion=$(bun -e "console.log(JSON.parse(await Bun.file('apps/wizard/package.json').text()).version)")
+          tagVersion="${GITHUB_REF_NAME#create-v}"
+          if [ "$packageVersion" != "$tagVersion" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package version $packageVersion" >&2
+            exit 1
+          fi
+
+      - name: Smoke-build the starter that will be embedded
+        run: bun apps/wizard/generator/build.ts --smoke
+
+      # Trusted Publishing needs a recent npm and NO configured auth token:
+      # setup-node's registry-url writes a placeholder-token .npmrc that
+      # overrides the OIDC exchange and turns the publish into a 404. The
+      # runner's preinstalled Node is enough to bootstrap npm@latest.
+      - name: Publish with provenance
+        working-directory: apps/wizard
+        run: |
+          npm install -g npm@latest
+          npm publish --provenance --access public

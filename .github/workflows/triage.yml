@@ -1,0 +1,87 @@
+name: Triage
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+concurrency:
+  group: triage-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  triage:
+    name: Triage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Assign author
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const pullRequestAuthorLogin = context.payload.pull_request.user.login;
+            if (pullRequestAuthorLogin.endsWith('[bot]')) {
+              return;
+            }
+            try {
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                assignees: [pullRequestAuthorLogin],
+              });
+            } catch (error) {
+              core.warning(`Unable to assign ${pullRequestAuthorLogin}: ${error.message}`);
+            }
+
+      - name: Label by path
+        uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: true
+
+      - name: Label by size
+        uses: codelytv/pr-size-labeler@095a41fca88b8764fd9e008ad269bcdb82bb38b9 # v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          xs_label: size/xs
+          xs_max_size: '199'
+          s_label: size/s
+          s_max_size: '499'
+          m_label: size/m
+          m_max_size: '1499'
+          l_label: size/l
+          l_max_size: '2999'
+          xl_label: size/xl
+          fail_if_xl: 'false'
+          message_if_xl: ''
+
+      - name: Comment quote
+        if: github.event.action == 'opened' || github.event.action == 'ready_for_review'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const quoteCatalog = JSON.parse(
+              fs.readFileSync('.github/quotes/catalog.json', 'utf8'),
+            );
+            const selectedQuote =
+              quoteCatalog[Math.floor(Math.random() * quoteCatalog.length)];
+            const quoteCommentBody = `> ${selectedQuote.text}\n>\n> — **${selectedQuote.author}**`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: quoteCommentBody,
+            });

@@ -1,0 +1,38 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: format
+      glob:
+        - '*.ts'
+        - '*.tsx'
+        - '*.js'
+        - '*.jsx'
+        - '*.mjs'
+        - '*.cjs'
+      exclude:
+        - '.agents/skills/**'
+        - '.claude/skills/**'
+      run: bunx oxfmt --write {staged_files}
+      stage_fixed: true
+    - name: lint
+      glob:
+        - '*.ts'
+        - '*.tsx'
+        - '*.js'
+        - '*.jsx'
+        - '*.mjs'
+        - '*.cjs'
+      exclude:
+        - '.agents/skills/**'
+        - '.claude/skills/**'
+      run: bunx oxlint --deny-warnings {staged_files}
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: bunx commitlint --edit {1}
+
+pre-push:
+  jobs:
+    - name: gate
+      run: bunx turbo run typecheck test

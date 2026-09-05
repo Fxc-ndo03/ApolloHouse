@@ -1,0 +1,91 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "apollo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-05",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Usamos el dominio workers.dev mientras no configuremos
+  // el dominio personalizado agent.heyapollo.dev.
+  "workers_dev": true,
+
+  "preview_urls": false,
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+
+  "vars": {
+    "GEMINI_MODEL": "gemini-3.6-flash",
+    "GEMINI_STT_MODEL": "gemini-3.6-flash",
+    "GEMINI_LIVE_MODEL": "gemini-3.6-flash-preview-native-audio-dialog",
+    "GEMINI_TTS_MODEL": "gemini-3.1-flash-tts-preview",
+    "GEMINI_EMBEDDING_MODEL": "text-embedding-004",
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "Apollo",
+        "class_name": "Apollo",
+      },
+      {
+        "name": "PcBridge",
+        "class_name": "PcBridge",
+      },
+    ],
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Apollo"],
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["Sandbox"],
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["PcBridge"],
+    },
+  ],
+
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "apollo-memory",
+      "remote": true,
+    },
+  ],
+
+  "queues": {
+    "producers": [
+      {
+        "binding": "APOLLO_QUEUE",
+        "queue": "apollo-jobs",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "apollo-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+      },
+    ],
+  },
+
+  "workflows": [
+    {
+      "name": "apollo-background",
+      "binding": "BACKGROUND",
+      "class_name": "ApolloBackground",
+    },
+    {
+      "name": "apollo-coding",
+      "binding": "CODING",
+      "class_name": "ApolloCoding",
+    },
+  ],
+}

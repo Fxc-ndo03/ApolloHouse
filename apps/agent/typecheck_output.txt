@@ -1,0 +1,192 @@
+$ tsc --noEmit
+src/agents/apollo.ts(969,7): error TS2322: Type 'R2Bucket' is not assignable to type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/agents/apollo.ts(1823,7): error TS2322: Type 'R2Bucket' is not assignable to type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/agents/apollo.ts(1836,11): error TS2322: Type 'R2Bucket' is not assignable to type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/agents/apollo.ts(1939,11): error TS2322: Type 'R2Bucket' is not assignable to type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/broadcast/__tests__/deliver.spec.ts(84,38): error TS2345: Argument of type 'string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>' is not assignable to parameter of type 'ArrayBuffer'.
+  Type 'string' is not assignable to type 'ArrayBuffer'.
+src/broadcast/__tests__/deliver.spec.ts(86,5): error TS2322: Type '(objectKey: string) => Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; } | null>' is not assignable to type '(key: string) => Promise<{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; } | null>'.
+  Type 'Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; } | null>' is not assignable to type 'Promise<{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; } | null>'.
+    Type '{ arrayBuffer: () => Promise<ArrayBuffer>; } | null' is not assignable to type '{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; } | null'.
+      Property 'size' is missing in type '{ arrayBuffer: () => Promise<ArrayBuffer>; }' but required in type '{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; }'.
+src/configuration/testing.ts(169,3): error TS2322: Type '{ Sandbox: DurableObjectNamespace<import("C:/Users/Admin/Documents/APOLLO~1/apps/agent/src/index").Sandbox>; DEVICE_SHARED_SECRET: string; DASHBOARD_SHARED_SECRET: string; OPENROUTER_API_KEY: string; OPENROUTER_MODEL: string; ... 21 more ...; CODING: Workflow<Parameters<import("C:/Users/Admin/Documents/APOLLO~1/apps...' is not assignable to type 'Env'.
+  Types of property 'STORAGE' are incompatible.
+    Type 'StorageBucket | undefined' is not assignable to type 'StorageBucket'.
+      Type 'undefined' is not assignable to type 'StorageBucket'.
+src/ota/__tests__/manifest.spec.ts(14,39): error TS2345: Argument of type 'R2Bucket' is not assignable to parameter of type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/ota/__tests__/manifest.spec.ts(21,39): error TS2345: Argument of type 'R2Bucket' is not assignable to parameter of type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/ota/__tests__/manifest.spec.ts(28,39): error TS2345: Argument of type 'R2Bucket' is not assignable to parameter of type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/ota/__tests__/manifest.spec.ts(39,41): error TS2345: Argument of type 'R2Bucket' is not assignable to parameter of type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/ota/__tests__/manifest.spec.ts(47,39): error TS2345: Argument of type 'R2Bucket' is not assignable to parameter of type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/ota/__tests__/routes.spec.ts(5,3): error TS2440: Import declaration conflicts with local declaration of 'createFakeMediaBucket'.
+src/ota/__tests__/routes.spec.ts(31,5): error TS2322: Type '(objectKey: string, audioBody: ArrayBuffer) => Promise<{}>' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+  Type 'Promise<{}>' is not assignable to type 'Promise<void>'.
+    Type '{}' is not assignable to type 'void'.
+src/ota/__tests__/routes.spec.ts(39,12): error TS2353: Object literal may only specify known properties, and 'bucket' does not exist in type 'StorageBucket'.
+src/ota/__tests__/routes.spec.ts(44,36): error TS2554: Expected 0 arguments, but got 1.
+src/ota/__tests__/routes.spec.ts(113,38): error TS2554: Expected 0 arguments, but got 1.
+src/ota/manifest.ts(30,82): error TS2339: Property 'json' does not exist on type '{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; }'.
+src/ota/routes.ts(63,23): error TS2345: Argument of type 'Promise<ArrayBuffer>' is not assignable to parameter of type 'BodyInit | null | undefined'.
+  Type 'Promise<ArrayBuffer>' is missing the following properties from type 'ArrayBuffer': byteLength, slice, resize
+src/storage/local.ts(5,15): error TS2300: Duplicate identifier 'R2Bucket'.
+src/storage/local.ts(5,35): error TS2300: Duplicate identifier 'R2PutOptions'.
+src/storage/local.ts(102,34): error TS7006: Parameter 'row' implicitly has an 'any' type.
+src/storage/local.ts(130,28): error TS2693: 'ArrayBufferView' only refers to a type, but is being used as a value here.
+src/storage/local.ts(131,19): error TS2339: Property 'buffer' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'buffer' does not exist on type 'string'.
+src/storage/local.ts(131,38): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/storage/local.ts(131,56): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/storage/local.ts(131,75): error TS2339: Property 'byteLength' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteLength' does not exist on type 'string'.
+src/storage/local.ts(195,15): error TS2300: Duplicate identifier 'R2Bucket'.
+src/storage/local.ts(195,25): error TS2300: Duplicate identifier 'R2PutOptions'.
+src/voice/__tests__/ttscache.spec.ts(18,5): error TS2322: Type '(objectKey: string) => Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; } | null>' is not assignable to type '(key: string) => Promise<{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; } | null>'.
+  Type 'Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; } | null>' is not assignable to type 'Promise<{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; } | null>'.
+    Type '{ arrayBuffer: () => Promise<ArrayBuffer>; } | null' is not assignable to type '{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; } | null'.
+      Property 'size' is missing in type '{ arrayBuffer: () => Promise<ArrayBuffer>; }' but required in type '{ arrayBuffer(): Promise<ArrayBuffer>; size: number; httpMetadata?: { contentType?: string | undefined; } | undefined; }'.
+src/voice/__tests__/ttscache.spec.ts(31,12): error TS2353: Object literal may only specify known properties, and 'bucket' does not exist in type 'StorageBucket'.
+src/voice/__tests__/ttscache.spec.ts(36,13): error TS2339: Property 'bucket' does not exist on type 'StorageBucket'.
+src/voice/__tests__/ttscache.spec.ts(36,21): error TS2339: Property 'storedKeyList' does not exist on type 'StorageBucket'.
+src/voice/synthesize.ts(12,5): error TS2322: Type 'R2Bucket' is not assignable to type 'StorageBucket'.
+  Types of property 'put' are incompatible.
+    Type '{ (key: string, value: string | ArrayBuffer | ReadableStream<any> | ArrayBufferView<ArrayBufferLike> | Blob | null, options?: (R2PutOptions & { ...; }) | undefined): Promise<...>; (key: string, value: string | ... 4 more ... | null, options?: R2PutOptions | undefined): Promise<...>; (key: string, value: string | ......' is not assignable to type '(key: string, value: string | ArrayBuffer | ArrayBufferView<ArrayBufferLike>, options?: { httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { ...; } | undefined; } | undefined) => Promise<...>'.
+      Types of parameters 'options' and 'options' are incompatible.
+        Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; } | undefined' is not assignable to type '(R2PutOptions & { onlyIf: Headers | R2Conditional; }) | undefined'.
+          Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type 'R2PutOptions & { onlyIf: Headers | R2Conditional; }'.
+            Type '{ httpMetadata?: { contentType?: string | undefined; } | undefined; onlyIf?: { etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined; }' is not assignable to type '{ onlyIf: Headers | R2Conditional; }'.
+              Types of property 'onlyIf' are incompatible.
+                Type '{ etag?: string | undefined; uploadedBefore?: Date | undefined; uploadedAfter?: Date | undefined; } | undefined' is not assignable to type 'Headers | R2Conditional'.
+                  Type 'undefined' is not assignable to type 'Headers | R2Conditional'.
+src/workflows/background.ts(23,7): error TS2300: Duplicate identifier 'storageBucket'.
+src/workflows/background.ts(31,22): error TS2339: Property 'sql' does not exist on type 'ApolloBackground'.
+src/workflows/background.ts(51,30): error TS2693: 'ArrayBufferView' only refers to a type, but is being used as a value here.
+src/workflows/background.ts(52,21): error TS2339: Property 'buffer' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'buffer' does not exist on type 'string'.
+src/workflows/background.ts(52,40): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/workflows/background.ts(52,58): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/workflows/background.ts(52,77): error TS2339: Property 'byteLength' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteLength' does not exist on type 'string'.
+src/workflows/background.ts(57,14): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/background.ts(66,14): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/background.ts(70,29): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/background.ts(74,49): error TS7006: Parameter 'row' implicitly has an 'any' type.
+src/workflows/background.ts(79,3): error TS2300: Duplicate identifier '#storageBucket'.
+src/workflows/background.ts(81,7): error TS2300: Duplicate identifier 'storageBucket'.
+src/workflows/coding.ts(59,7): error TS2300: Duplicate identifier 'storageBucket'.
+src/workflows/coding.ts(66,3): error TS2393: Duplicate function implementation.
+src/workflows/coding.ts(67,22): error TS2339: Property 'sql' does not exist on type 'ApolloCoding'.
+src/workflows/coding.ts(87,30): error TS2693: 'ArrayBufferView' only refers to a type, but is being used as a value here.
+src/workflows/coding.ts(88,21): error TS2339: Property 'buffer' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'buffer' does not exist on type 'string'.
+src/workflows/coding.ts(88,40): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/workflows/coding.ts(88,58): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/workflows/coding.ts(88,77): error TS2339: Property 'byteLength' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteLength' does not exist on type 'string'.
+src/workflows/coding.ts(93,14): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/coding.ts(102,14): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/coding.ts(106,29): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/coding.ts(110,49): error TS7006: Parameter 'row' implicitly has an 'any' type.
+src/workflows/coding.ts(115,3): error TS2300: Duplicate identifier '#storageBucket'.
+src/workflows/coding.ts(117,7): error TS2300: Duplicate identifier 'storageBucket'.
+src/workflows/coding.ts(124,3): error TS2393: Duplicate function implementation.
+src/workflows/coding.ts(125,22): error TS2339: Property 'sql' does not exist on type 'ApolloCoding'.
+src/workflows/coding.ts(145,30): error TS2693: 'ArrayBufferView' only refers to a type, but is being used as a value here.
+src/workflows/coding.ts(146,21): error TS2339: Property 'buffer' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'buffer' does not exist on type 'string'.
+src/workflows/coding.ts(146,40): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/workflows/coding.ts(146,58): error TS2339: Property 'byteOffset' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteOffset' does not exist on type 'string'.
+src/workflows/coding.ts(146,77): error TS2339: Property 'byteLength' does not exist on type 'string | ArrayBufferView<ArrayBufferLike>'.
+  Property 'byteLength' does not exist on type 'string'.
+src/workflows/coding.ts(151,14): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/coding.ts(160,14): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/coding.ts(164,29): error TS2339: Property 'sql' does not exist on type 'StorageBucket'.
+src/workflows/coding.ts(168,49): error TS7006: Parameter 'row' implicitly has an 'any' type.

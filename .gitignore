@@ -1,0 +1,62 @@
+# dependencies
+node_modules/
+
+# build
+dist/
+*.tsbuildinfo
+.turbo/
+
+# development
+.sandbox/
+worker-configuration.d.ts
+.wrangler/
+.evlog/
+.superpowers/
+*.local
+
+# testing
+coverage/
+
+# environment
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# os
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# editor
+*.swp
+*.swo
+*~
+.idea/
+
+# claude code
+.claude/worktrees/
+.claude/checkpoints/
+.claude/mailbox/
+.claude/routines/.state/
+.claude/agent-memory-local/
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.lock
+.claude/agent-registry.json
+.claude/assistant-daemon-state.json
+.claude/first-run
+.claude/settings.local.json
+
+# skills
+.impeccable/
+"android/" 
+"*.zip" 
+"node_modules/" 
