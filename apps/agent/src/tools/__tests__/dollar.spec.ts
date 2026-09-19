@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createFakeApolloEnvironment } from '@/configuration/testing';
 import type { DollarRate } from '@/rates/dollar';
+import { fetchDollarRateList } from '@/rates/dollar';
 import {
   dollarRateTool,
   formatDollarRateForSpeech,
@@ -78,6 +79,21 @@ describe('dollarRateTool fallback responses', () => {
 
     expect(response.ok).toBe(false);
     expect(response.summary).toContain('No pude traer la cotización');
+  });
+
+  it('fails loud instead of hanging when the upstream stalls', async () => {
+    const hangingFetch = (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('Aborted', 'AbortError'));
+        });
+      });
+    globalThis.fetch = Object.assign(hangingFetch, { preconnect: () => {} });
+
+    await expect(fetchDollarRateList({ timeoutMilliseconds: 50 })).rejects.toThrow();
   });
 });
 

@@ -8,6 +8,12 @@ import { handleOtaRequest } from '@/ota/routes';
 import { consumeApolloQueueBatch } from '@/queues/consume';
 import { ApolloBackground } from '@/workflows/background';
 import { ApolloCoding } from '@/workflows/coding';
+import { isDeviceSharedSecretValid, readDeviceTokenFromRequestUrl } from '@/auth/token';
+import { listPcToolDefinitionList } from '@/tools/pc';
+import { buildToolDefinitionMap } from '@/tools/router';
+import type { ToolDefinition } from '@/tools/types';
+import { chatWithGemini } from '@/voice/llm';
+import { chatWithFallbackLlm } from '@/voice/provider';
 
 export { Apollo, ApolloBackground, ApolloCoding, Sandbox, PcBridge };
 
@@ -20,6 +26,11 @@ const CONSOLE_CORS_HEADER_MAP = {
   'Access-Control-Allow-Headers': 'Content-Type',
   'Access-Control-Max-Age': '86400',
 } as const;
+
+async function requireInternalToken(request: Request, env: Env): Promise<boolean> {
+  const token = request.headers.get('X-Internal-Token');
+  return token === env.INTERNAL_CORE_TOKEN;
+}
 
 export default {
   async fetch(request: Request, environment: Env): Promise<Response> {
@@ -44,6 +55,39 @@ export default {
         },
         { headers: CONSOLE_CORS_HEADER_MAP },
       );
+    }
+
+    // TEMP-DIAG: listar modelos con bidiGenerateContent para esta key. Borrar.
+    if (requestUrl.pathname === '/debug/live-models') {
+      const presentedToken = readDeviceTokenFromRequestUrl(requestUrl);
+      const tokenOk = await isDeviceSharedSecretValid(
+        presentedToken,
+        environment.DEVICE_SHARED_SECRET,
+      );
+      if (!tokenOk) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(environment.GEMINI_API_KEY ?? '')}&pageSize=100`;
+      const listResponse = await fetch(listUrl);
+      if (!listResponse.ok) {
+        return Response.json(
+          { error: `ListModels falló ${listResponse.status}` },
+          { status: 502 },
+        );
+      }
+      const listPayload = (await listResponse.json()) as {
+        models?: {
+          name?: string;
+          displayName?: string;
+          supportedGenerationMethods?: string[];
+        }[];
+      };
+      const liveModelList = (listPayload.models ?? [])
+        .filter((model) =>
+          (model.supportedGenerationMethods ?? []).includes('bidiGenerateContent'),
+        )
+        .map((model) => model.name ?? '?');
+      return Response.json({ liveModels: liveModelList });
     }
 
     if (requestUrl.pathname.startsWith('/ota/')) {
@@ -77,6 +121,91 @@ export default {
 
     if (requestUrl.pathname.startsWith(`${CODING_PROXY_PATH_PREFIX}/`)) {
       return handleCodingLlmProxyRequest(request, requestUrl, environment);
+    }
+
+    // Internal endpoint: PcBridge commands from Apollo Core
+    if (requestUrl.pathname === '/api/internal/pc-bridge') {
+      if (!(await requireInternalToken(request, environment))) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      if (request.method !== 'POST') {
+        return new Response('Method Not Allowed', { status: 405 });
+      }
+      try {
+        const body = (await request.json()) as { command: string; args: Record<string, unknown> };
+        const pcBridge = environment.PcBridge.get(environment.PcBridge.idFromName('pc-bridge'));
+        const result = await pcBridge.sendCommand(body.command as any, body.args);
+        return Response.json({ ok: true, result });
+      } catch (error) {
+        return Response.json(
+          { ok: false, error: error instanceof Error ? error.message : String(error) },
+          { status: 500 },
+        );
+      }
+    }
+
+    // Internal endpoint: Gemini chat from Apollo Core
+    if (requestUrl.pathname === '/api/internal/gemini-chat') {
+      if (!(await requireInternalToken(request, environment))) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      if (request.method !== 'POST') {
+        return new Response('Method Not Allowed', { status: 405 });
+      }
+      try {
+        const body = (await request.json()) as {
+          messages: Array<{ role: string; content: string | null }>;
+          tools?: Array<{ name: string; description: string; parameters: unknown }>;
+        };
+        
+        // Build tool definition map from available PC tools
+        const toolDefs = listPcToolDefinitionList();
+        const toolMap = buildToolDefinitionMap(toolDefs);
+        const toolDefList = (body.tools?.length ? body.tools : Array.from(toolMap.values()).map(t => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters as ToolDefinition['parameters'],
+        }))) as Array<{ name: string; description: string; parameters: ToolDefinition['parameters'] }>;
+        
+        // Try Gemini first, fallback if configured
+        let result: { text: string; toolCallList: Array<{ name: string; args: unknown }> };
+        try {
+          const geminiResult = await chatWithGemini({
+            geminiApiKey: environment.GEMINI_API_KEY ?? '',
+            modelId: environment.GEMINI_MODEL ?? 'gemini-2.5-flash',
+            messageList: body.messages as any,
+            toolDefinitionList: toolDefList,
+          });
+          result = {
+            text: geminiResult.text,
+            toolCallList: geminiResult.toolCallList.map(tc => ({ name: tc.name, args: tc.args })),
+          };
+        } catch (e) {
+          if (environment.LLM_FALLBACK_API_KEY && environment.LLM_FALLBACK_BASE_URL && environment.LLM_FALLBACK_MODEL) {
+            const fallbackResult = await chatWithFallbackLlm({
+              environment,
+              messageList: body.messages as any,
+              toolDefinitionList: toolDefList,
+            });
+            result = {
+              text: fallbackResult.text,
+              toolCallList: fallbackResult.toolCallList.map(tc => ({ name: tc.name, args: tc.args })),
+            };
+          } else {
+            throw e;
+          }
+        }
+        
+        return Response.json({
+          text: result.text,
+          toolCalls: result.toolCallList.map(tc => ({ name: tc.name, args: tc.args })),
+        });
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 500 },
+        );
+      }
     }
 
     const agentResponse = await routeAgentRequest(request, environment, {

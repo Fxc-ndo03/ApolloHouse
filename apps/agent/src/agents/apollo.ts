@@ -364,12 +364,15 @@ export class Apollo extends Agent<Env, ApolloState> {
     readonly receivedAtMilliseconds: number;
   } | null = null;
 
-  // Rate limiter for Gemini 3.6 Flash (5 RPM = 1 req per 12s)
+  // Rate limiter for Gemini calls (la API observada permite 20 RPM por
+  // modelo; se usa la mitad como margen porque STT/TTS/embeddings comparten
+  // este balde). Solo protege llamadas a Gemini: los fallbacks (Groq,
+  // Workers AI) no consumen token porque no tocan esa cuota.
   #geminiRateLimiter = {
-    tokens: 5,
+    tokens: 10,
     lastRefill: Date.now(),
-    maxTokens: 5,
-    refillIntervalMs: 12000, // 12 seconds = 5 RPM
+    maxTokens: 10,
+    refillIntervalMs: 6000, // 6 seconds = 10 RPM
     queue: [] as Array<() => void>,
     processing: false,
   };
@@ -539,15 +542,36 @@ export class Apollo extends Agent<Env, ApolloState> {
     this.#geminiRateLimiter.processing = false;
   }
 
-  async acquireGeminiToken(): Promise<void> {
+  async acquireGeminiToken(timeoutMs = 60_000): Promise<void> {
     await this.#refillRateLimiterTokens();
     if (this.#geminiRateLimiter.tokens >= 1) {
       this.#geminiRateLimiter.tokens -= 1;
       return;
     }
-    // Queue the request
-    await new Promise<void>((resolve) => {
-      this.#geminiRateLimiter.queue.push(resolve);
+    // Sin token: el turno espera en cola en vez de quemar la cuota de la
+    // API. Con timeout para que una ráfaga falle ruidoso en vez de colgar
+    // el turno en silencio para siempre.
+    console.log(
+      JSON.stringify({
+        level: 'warn',
+        message: 'ApolloGemini: rate limiter esperando token',
+        queueLength: this.#geminiRateLimiter.queue.length + 1,
+      }),
+    );
+    await new Promise<void>((resolve, reject) => {
+      let waiter: () => void = () => {};
+      const timer = setTimeout(() => {
+        const waiterIndex = this.#geminiRateLimiter.queue.indexOf(waiter);
+        if (waiterIndex >= 0) {
+          this.#geminiRateLimiter.queue.splice(waiterIndex, 1);
+        }
+        reject(new Error('Timeout esperando token del rate limiter de Gemini'));
+      }, timeoutMs);
+      waiter = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.#geminiRateLimiter.queue.push(waiter);
     });
     // Process queue (this will wait for token)
     await this.#processRateLimiterQueue();
@@ -2686,6 +2710,9 @@ export class Apollo extends Agent<Env, ApolloState> {
           code: 'turn_failed',
           message: error instanceof Error ? error.message : 'Error desconocido',
         }),
+      );
+      connection.send(
+        encodeServerToDeviceMessage({ type: 'turn_end', expectsReply: false }),
       );
     }
     this.#pushUiState(connection);

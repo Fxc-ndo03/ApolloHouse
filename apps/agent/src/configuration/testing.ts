@@ -208,7 +208,7 @@ export function createFakeApolloEnvironment(overrides: Partial<Env> = {}): Env {
   return {
     GEMINI_MODEL: 'models/gemini-3.6-flash',
     GEMINI_STT_MODEL: 'models/gemini-3.6-flash',
-    GEMINI_LIVE_MODEL: 'models/gemini-3.6-flash-preview-native-audio-dialog',
+    GEMINI_LIVE_MODEL: 'models/gemini-3.1-flash-live-preview',
     GEMINI_TTS_MODEL: 'models/gemini-2.5-flash-preview-tts',
     GEMINI_EMBEDDING_MODEL: 'text-embedding-004',
     DEVICE_SHARED_SECRET: 'secret',

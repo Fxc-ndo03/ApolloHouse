@@ -14,8 +14,15 @@ describe('apollo soul prompt', () => {
     expect(soulPrompt).not.toContain('gmail');
   });
 
-  it('includes nerd technical register', () => {
-    expect(buildApolloSoulPrompt('nerd')).toContain('Modo nerd');
+  it('names PC tools and mandates a spoken confirmation after PC actions', () => {
+    const soulPrompt = buildApolloSoulPrompt('default');
+    expect(soulPrompt).toContain('open_pc_app');
+    expect(soulPrompt).toContain('brave_search');
+    expect(soulPrompt).toContain('Abriendo Discord');
+    expect(soulPrompt).toContain('Nunca dejes una acción en la PC sin confirmación hablada');
+  });
+
+  it('includes nerd technical register', () => {    expect(buildApolloSoulPrompt('nerd')).toContain('Modo nerd');
     expect(buildApolloSoulPrompt('nerd')).toContain('técnico');
   });
 

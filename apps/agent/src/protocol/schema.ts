@@ -271,6 +271,12 @@ export const serverToPcMessageSchema = z.discriminatedUnion('type', [
     id: z.string().min(1),
   }),
   z.object({
+    type: z.literal('apps_open'),
+    id: z.string().min(1),
+    appName: z.string().min(1),
+    args: z.string().optional(),
+  }),
+  z.object({
     type: z.literal('apps_focus'),
     id: z.string().min(1),
     appName: z.string().min(1),

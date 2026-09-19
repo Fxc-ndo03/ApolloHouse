@@ -121,11 +121,14 @@ export async function executeApolloTurn(
   );
 
   // Gemini Live: audio → Gemini → audio (bypass STT/LLM/TTS)
+  // Si el setup viene fallando (esta key no tiene Live), se salta directo
+  // a la rama clásica hasta que expire el cooldown.
   if (
     !isMockVoice &&
     isGeminiLiveAvailable(dependencies.environment) &&
     turnPart.audioBuffer !== undefined &&
-    turnPart.audioBuffer.byteLength >= 8000
+    turnPart.audioBuffer.byteLength >= 8000 &&
+    (await shouldAttemptLiveTurn(dependencies))
   ) {
     console.log(
       JSON.stringify({ level: 'info', message: 'ApolloGemini: TURN_START gemini live' }),
@@ -247,8 +250,14 @@ export async function executeApolloTurn(
           createdAt: new Date(),
         });
       }
+      trackLiveOutcome(() =>
+        clearLiveSetupFailure(dependencies.sqlExecutor),
+      );
       return;
     } catch (error) {
+      trackLiveOutcome(() =>
+        recordLiveSetupFailure(dependencies.sqlExecutor),
+      );
       console.error(
         JSON.stringify({
           level: 'error',
@@ -275,38 +284,234 @@ export async function executeApolloTurn(
       }
     : {
         stt: async (audioBuffer) => {
-          await dependencies.acquireGeminiToken();
-          const { transcribeAudioWithGemini } = await import('@/voice/gemini');
-          return transcribeAudioWithGemini({
-            audioBuffer,
-            geminiApiKey: dependencies.environment.GEMINI_API_KEY ?? '',
-            modelId:
-              dependencies.environment.GEMINI_STT_MODEL ?? 'models/gemini-2.0-flash',
-          });
+          const { transcribeAudioWithGemini, isGeminiSttQuotaExceededError } =
+            await import('@/voice/gemini');
+          const {
+            isLlmFallbackConfigured,
+            transcribeWithFallbackStt,
+            isLlmQuotaCooldownActive,
+          } = await import('@/voice/provider');
+          const useFallbackStt = async (reason: string) => {
+            console.log(
+              JSON.stringify({ level: 'warn', message: reason }),
+            );
+            return transcribeWithFallbackStt({
+              environment: dependencies.environment,
+              audioBuffer,
+            });
+          };
+          if (
+            isLlmFallbackConfigured(dependencies.environment) &&
+            isLlmQuotaCooldownActive(dependencies.sqlExecutor, dependencies.environment)
+          ) {
+            return useFallbackStt(
+              'ApolloGemini: STT skipping Gemini, quota cooldown active',
+            );
+          }
+          try {
+            await dependencies.acquireGeminiToken();
+            return await transcribeAudioWithGemini({
+              audioBuffer,
+              geminiApiKey: dependencies.environment.GEMINI_API_KEY ?? '',
+              modelId:
+                dependencies.environment.GEMINI_STT_MODEL ?? 'models/gemini-3.6-flash',
+            });
+          } catch (sttError) {
+            if (
+              isGeminiSttQuotaExceededError(sttError) &&
+              isLlmFallbackConfigured(dependencies.environment)
+            ) {
+              return useFallbackStt(
+                'ApolloGemini: STT_QUOTA_EXCEEDED using STT fallback for this turn',
+              );
+            }
+            throw sttError;
+          }
         },
         llm: async ({ messageList, toolDefinitionList, onTextDelta }) => {
           await dependencies.acquireGeminiToken();
-          const { chatWithGemini } = await import('@/voice/gemini');
-          return chatWithGemini({
-            geminiApiKey: dependencies.environment.GEMINI_API_KEY ?? '',
-            modelId: dependencies.environment.GEMINI_MODEL ?? 'models/gemini-3.6-flash',
-            messageList: messageList as unknown as {
-              role: string;
-              content: string | null;
-            }[],
-            toolDefinitionList,
-            onTextDelta,
-          });
+          const {
+            isLlmFallbackConfigured,
+            chatWithFallbackLlm,
+            isLlmQuotaCooldownActive,
+            recordLlmQuotaFailure,
+            clearLlmQuotaFailure,
+          } = await import('@/voice/provider');
+          const fallbackMessageList = messageList as unknown as Parameters<
+            typeof chatWithFallbackLlm
+          >[0]['messageList'];
+          const useFallbackForTurn = async (reason: string) => {
+            console.log(
+              JSON.stringify({ level: 'warn', message: reason }),
+            );
+            return chatWithFallbackLlm({
+              environment: dependencies.environment,
+              messageList: fallbackMessageList,
+              toolDefinitionList,
+              onTextDelta,
+            });
+          };
+          if (
+            dependencies.environment.LLM_FALLBACK_FORCE === '1' &&
+            isLlmFallbackConfigured(dependencies.environment)
+          ) {
+            return useFallbackForTurn(
+              'ApolloGemini: LLM_FALLBACK_FORCE active, skipping Gemini for this turn',
+            );
+          }
+          if (
+            isLlmFallbackConfigured(dependencies.environment) &&
+            isLlmQuotaCooldownActive(
+              dependencies.sqlExecutor,
+              dependencies.environment,
+            )
+          ) {
+            return useFallbackForTurn(
+              'ApolloGemini: quota cooldown active, skipping Gemini for this turn',
+            );
+          }
+          const {
+            chatWithGemini,
+            isGeminiQuotaExceededError,
+            needsThoughtSignatureRetry,
+          } = await import('@/voice/gemini');
+          const runGeminiLlm = (
+            modelId: string,
+            streamDeltas: boolean,
+          ): Promise<Awaited<ReturnType<typeof chatWithGemini>>> =>
+            chatWithGemini({
+              geminiApiKey: dependencies.environment.GEMINI_API_KEY ?? '',
+              modelId,
+              messageList: messageList as unknown as {
+                role: string;
+                content: string | null;
+              }[],
+              toolDefinitionList,
+              onTextDelta: streamDeltas ? onTextDelta : undefined,
+            });
+          const defaultModelId =
+            dependencies.environment.GEMINI_MODEL ?? 'models/gemini-3.6-flash';
+          try {
+            let geminiResult = await runGeminiLlm(defaultModelId, true);
+            if (
+              needsThoughtSignatureRetry(geminiResult) &&
+              !geminiResult.hadAvailabilityRetry
+            ) {
+              console.log(
+                JSON.stringify({
+                  level: 'warn',
+                  message:
+                    'ApolloGemini: TOOL_CALL sin firma, reintentando el request',
+                }),
+              );
+              geminiResult = await runGeminiLlm(defaultModelId, false);
+            }
+            if (needsThoughtSignatureRetry(geminiResult)) {
+              if (!isLlmFallbackConfigured(dependencies.environment)) {
+                console.log(
+                  JSON.stringify({
+                    level: 'warn',
+                    message:
+                      'ApolloGemini: sin firma y sin fallback configurado, sigue el turno',
+                  }),
+                );
+              } else {
+                return useFallbackForTurn(
+                  'ApolloGemini: sin firma de pensamiento, usando fallback para este turno',
+                );
+              }
+            }
+            trackQuotaOutcome(() =>
+              clearLlmQuotaFailure(dependencies.sqlExecutor),
+            );
+            return geminiResult;
+          } catch (llmError) {
+            const isThoughtSig400 =
+              llmError instanceof Error &&
+              llmError.message.includes('thought_signature');
+            if (isThoughtSig400 && isLlmFallbackConfigured(dependencies.environment)) {
+              return useFallbackForTurn(
+                'ApolloGemini: 400 sin firma (historial Groq→Gemini), usando fallback',
+              );
+            }
+            if (isGeminiQuotaExceededError(llmError)) {
+              trackQuotaOutcome(() =>
+                recordLlmQuotaFailure(dependencies.sqlExecutor),
+              );
+              if (isLlmFallbackConfigured(dependencies.environment)) {
+                return useFallbackForTurn(
+                  'ApolloGemini: QUOTA_EXCEEDED using LLM fallback for this turn',
+                );
+              }
+            }
+            throw llmError;
+          }
         },
         tts: async (text) => {
-          const { synthesizeWithGemini } = await import('@/voice/gemini');
-          return synthesizeWithGemini({
-            text,
-            geminiApiKey: dependencies.environment.GEMINI_API_KEY ?? '',
-            modelId:
-              dependencies.environment.GEMINI_TTS_MODEL ??
-              'models/gemini-2.5-flash-preview-tts',
-          });
+          const { shouldUseFallbackTts, recordGeminiTtsUsageCharCount } = await import(
+            '@/voice/quota'
+          );
+          const { isWorkersAiTtsAvailable, synthesizeWithWorkersAi } = await import(
+            '@/voice/fallback'
+          );
+          const tryWorkersAiTts = async (): Promise<ArrayBuffer | null> => {
+            if (!isWorkersAiTtsAvailable(dependencies.environment)) {
+              return null;
+            }
+            try {
+              return await synthesizeWithWorkersAi({
+                text,
+                environment: dependencies.environment,
+              });
+            } catch (fallbackTtsError) {
+              console.error(
+                JSON.stringify({
+                  level: 'error',
+                  message: 'apollo_tts_fallback_failed, reintentando con Gemini',
+                  error:
+                    fallbackTtsError instanceof Error
+                      ? fallbackTtsError.message
+                      : String(fallbackTtsError),
+                }),
+              );
+              return null;
+            }
+          };
+          if (shouldUseFallbackTts(dependencies.sqlExecutor, dependencies.environment)) {
+            const fallbackAudio = await tryWorkersAiTts();
+            if (fallbackAudio !== null) {
+              return fallbackAudio;
+            }
+          }
+          const { synthesizeWithGemini, isGeminiTtsQuotaExceededError } = await import(
+            '@/voice/gemini'
+          );
+          try {
+            const geminiAudio = await synthesizeWithGemini({
+              text,
+              geminiApiKey: dependencies.environment.GEMINI_API_KEY ?? '',
+              modelId:
+                dependencies.environment.GEMINI_TTS_MODEL ??
+                'models/gemini-2.5-flash-preview-tts',
+            });
+            recordGeminiTtsUsageCharCount(dependencies.sqlExecutor, text.length);
+            return geminiAudio;
+          } catch (ttsError) {
+            if (isGeminiTtsQuotaExceededError(ttsError)) {
+              console.log(
+                JSON.stringify({
+                  level: 'warn',
+                  message:
+                    'ApolloGemini: TTS_QUOTA_EXCEEDED using TTS fallback for this turn',
+                }),
+              );
+              const fallbackAudio = await tryWorkersAiTts();
+              if (fallbackAudio !== null) {
+                return fallbackAudio;
+              }
+            }
+            throw ttsError;
+          }
         },
       };
 
@@ -551,9 +756,56 @@ export async function executeApolloTurn(
     });
   }
 }
+function trackLiveOutcome(record: () => void): void {
+  try {
+    record();
+  } catch (trackingError) {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        message: 'apollo_live_tracking_failed',
+        error:
+          trackingError instanceof Error ? trackingError.message : String(trackingError),
+      }),
+    );
+  }
+}
 
-function encodeMockSpeechAudio(spokenText: string): ArrayBuffer {
-  const encodedSpokenTextBytes = new TextEncoder().encode(spokenText);
+function trackQuotaOutcome(record: () => void): void {
+  try {
+    record();
+  } catch (quotaError) {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        message: 'apollo_llm_quota_tracking_failed',
+        error:
+          quotaError instanceof Error ? quotaError.message : String(quotaError),
+      }),
+    );
+  }
+}
+async function shouldAttemptLiveTurn(
+  dependencies: Pick<ApolloTurnRuntimeDependencies, 'environment' | 'sqlExecutor'>,
+): Promise<boolean> {
+  try {
+    const { isLiveSkipActive } = await import('@/voice/provider');
+    if (isLiveSkipActive(dependencies.sqlExecutor, dependencies.environment)) {
+      console.log(
+        JSON.stringify({
+          level: 'warn',
+          message: 'ApolloGemini: live skip active (sin Live en esta key), usando rama clásica',
+        }),
+      );
+      return false;
+    }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function encodeMockSpeechAudio(spokenText: string): ArrayBuffer {  const encodedSpokenTextBytes = new TextEncoder().encode(spokenText);
   const mockSpeechAudioBuffer = new ArrayBuffer(encodedSpokenTextBytes.byteLength);
   new Uint8Array(mockSpeechAudioBuffer).set(encodedSpokenTextBytes);
   return mockSpeechAudioBuffer;

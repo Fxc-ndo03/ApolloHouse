@@ -8,6 +8,7 @@ export type GeminiToolCall = {
   readonly id: string;
   readonly name: string;
   readonly args: JsonSerializableValue;
+  readonly thoughtSignature?: string;
 };
 
 export type GeminiChatMessage =
@@ -22,6 +23,7 @@ export type GeminiChatMessage =
         readonly function: {
           readonly name: string;
           readonly arguments: string;
+          readonly thoughtSignature?: string;
         };
       }[];
     }
@@ -34,6 +36,7 @@ export type GeminiChatMessage =
 export type GeminiChatResult = {
   readonly text: string;
   readonly toolCallList: readonly GeminiToolCall[];
+  readonly hadAvailabilityRetry?: boolean;
 };
 
 export function buildGeminiSystemPrompt(input: {
@@ -68,7 +71,10 @@ export async function chatWithGemini(input: {
   readonly fetchImplementation?: typeof fetch;
 }): Promise<GeminiChatResult> {
   const geminiApiKey = input.geminiApiKey;
-  const geminiModelId = 'models/gemini-3.6-flash';
+  const geminiModelId =
+    input.modelId.replace(/^models\//, '').length > 0
+      ? input.modelId.replace(/^models\//, '')
+      : 'gemini-2.5-flash';
   return chatWithGeminiImpl({
     geminiApiKey,
     modelId: geminiModelId,

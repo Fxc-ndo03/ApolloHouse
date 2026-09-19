@@ -112,6 +112,9 @@ function buildAssistantToolCallMessage(
       function: {
         name: toolCall.name,
         arguments: JSON.stringify(toolCall.args),
+        ...(toolCall.thoughtSignature !== undefined
+          ? { thoughtSignature: toolCall.thoughtSignature }
+          : {}),
       },
     })),
   };

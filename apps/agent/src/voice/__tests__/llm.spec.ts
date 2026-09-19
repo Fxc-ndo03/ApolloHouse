@@ -106,9 +106,40 @@ describe('chatWithGemini', () => {
     expect(result.toolCallList).toEqual([]);
     expect(callList).toHaveLength(1);
     expect(callList[0].url).toContain('generativelanguage.googleapis.com');
-    expect(callList[0].url).toContain('gemini-3.6-flash');
+    expect(callList[0].url).toContain('deepseek%2Fdeepseek-v4-flash-0731');
     const requestBody = parseCapturedChatRequestBody(callList[0]);
     expect(requestBody.tools).toBeUndefined();
+  });
+
+  it('honors the passed model instead of a hardcoded one', async () => {
+    const { fetchImplementation, callList } = createCapturingFetchMock({
+      candidates: [{ content: { parts: [{ text: 'hola' }] } }],
+    });
+
+    await chatWithGemini({
+      geminiApiKey: 'key-123',
+      modelId: 'gemini-2.5-flash',
+      messageList: [{ role: 'user', content: 'hola' }],
+      fetchImplementation,
+    });
+
+    expect(callList[0].url).toContain('models/gemini-2.5-flash:');
+  });
+
+  it('normalizes a models/ prefixed id instead of doubling it', async () => {
+    const { fetchImplementation, callList } = createCapturingFetchMock({
+      candidates: [{ content: { parts: [{ text: 'hola' }] } }],
+    });
+
+    await chatWithGemini({
+      geminiApiKey: 'key-123',
+      modelId: 'models/gemini-2.5-flash',
+      messageList: [{ role: 'user', content: 'hola' }],
+      fetchImplementation,
+    });
+
+    expect(callList[0].url).toContain('models/gemini-2.5-flash:');
+    expect(callList[0].url).not.toContain('models%2F');
   });
 
   it('includes a tools payload when tool definitions are given', async () => {
@@ -130,8 +161,7 @@ describe('chatWithGemini', () => {
     expect(requestBody.tools?.[0]?.functionDeclarations?.[0]?.name).toBe('weather_now');
   });
 
-  it('maps Gemini functionCall into toolCallList with parsed args', async () => {
-    const { fetchImplementation } = createCapturingFetchMock({
+  it('maps Gemini functionCall into toolCallList with parsed args', async () => {    const { fetchImplementation } = createCapturingFetchMock({
       candidates: [
         {
           content: {
@@ -156,6 +186,109 @@ describe('chatWithGemini', () => {
     expect(result.toolCallList).toEqual([
       { id: expect.any(String), name: 'weather_now', args: { locationQuery: 'Rosario' } },
     ]);
+  });
+
+  it('serializes tool results with user role, never function role', async () => {
+    const { fetchImplementation, callList } = createCapturingFetchMock({
+      candidates: [{ content: { parts: [{ text: 'listo' }] } }],
+    });
+
+    await chatWithGemini({
+      geminiApiKey: 'key-123',
+      modelId: 'model-x',
+      messageList: [
+        { role: 'user', content: 'clima en Rosario' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call-1',
+              type: 'function',
+              function: {
+                name: 'weather_now',
+                arguments: '{"locationQuery":"Rosario"}',
+              },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"summary":"soleado"}' },
+      ],
+      fetchImplementation,
+    });
+
+    const requestBody = JSON.parse(String(callList[0].init.body)) as {
+      contents: { role: string; parts: unknown[] }[];
+    };
+    const roles = requestBody.contents.map((content) => content.role);
+    expect(roles).toEqual(['user', 'model', 'user']);
+    expect(roles).not.toContain('function');
+    expect(requestBody.contents[2].parts).toEqual([
+      { functionResponse: { name: 'weather_now', response: { summary: 'soleado' } } },
+    ]);
+  });
+
+  it('round-trips thoughtSignature inside rebuilt functionCall parts', async () => {
+    const { fetchImplementation, callList } = createCapturingFetchMock({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: {
+                  name: 'weather_now',
+                  args: { locationQuery: 'Rosario' },
+                  thoughtSignature: 'firma-pensada',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const firstResult = await chatWithGemini({
+      geminiApiKey: 'key-123',
+      modelId: 'model-x',
+      messageList: [{ role: 'user', content: 'clima' }],
+      fetchImplementation,
+    });
+    expect(firstResult.toolCallList[0].thoughtSignature).toBe('firma-pensada');
+
+    const { fetchImplementation: secondFetch, callList: secondCallList } =
+      createCapturingFetchMock({
+        candidates: [{ content: { parts: [{ text: 'listo' }] } }],
+      });
+    await chatWithGemini({
+      geminiApiKey: 'key-123',
+      modelId: 'model-x',
+      messageList: [
+        { role: 'user', content: 'clima' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: firstResult.toolCallList[0].id,
+              type: 'function',
+              function: {
+                name: 'weather_now',
+                arguments: '{"locationQuery":"Rosario"}',
+                thoughtSignature: firstResult.toolCallList[0].thoughtSignature,
+              },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: firstResult.toolCallList[0].id, content: '{}' },
+      ],
+      fetchImplementation: secondFetch,
+    });
+
+    const secondBody = JSON.parse(String(secondCallList[0].init.body)) as {
+      contents: { role: string; parts: { functionCall?: { thoughtSignature?: string } }[] }[];
+    };
+    const rebuiltCall = secondBody.contents[1].parts[0].functionCall;
+    expect(rebuiltCall?.thoughtSignature).toBe('firma-pensada');
   });
 
   it('throws on a non-ok response', async () => {

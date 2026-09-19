@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { synthesizeWithGemini } from '@/voice/elevenlabs';
+import { isGeminiTtsQuotaExceededError } from '@/voice/gemini';
 
 type CapturedFetchCall = {
   readonly url: string;
@@ -126,4 +127,15 @@ describe('synthesizeWithGemini', () => {
       }),
     ).rejects.toThrow('Gemini TTS falló 500');
   });
+
+  it('throws a quota error after repeated 429s', async () => {
+    const { fetchImplementation } = createCapturingFetchMock(buildArrayBuffer([]), 429);
+    const thrown = await synthesizeWithGemini({
+      text: 'hola',
+      geminiApiKey: 'key-123',
+      modelId: 'models/gemini-3.6-flash-preview-tts',
+      fetchImplementation,
+    }).catch((error: unknown) => error);
+    expect(isGeminiTtsQuotaExceededError(thrown)).toBe(true);
+  }, 15000);
 });

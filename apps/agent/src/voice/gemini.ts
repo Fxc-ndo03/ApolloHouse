@@ -22,8 +22,61 @@ export type GeminiChatResult = {
     id: string;
     name: string;
     args: JsonSerializableValue;
+    thoughtSignature?: string;
   }[];
+  readonly hadAvailabilityRetry?: boolean;
 };
+
+export class GeminiQuotaExceededError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super(`Gemini falló con status ${status}: ${detail.slice(0, 500)}`);
+    this.name = 'GeminiQuotaExceededError';
+    this.status = status;
+  }
+}
+
+export function isGeminiQuotaExceededError(error: unknown): boolean {
+  return error instanceof GeminiQuotaExceededError;
+}
+
+export class GeminiSttQuotaExceededError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super(`Gemini STT falló ${status}: ${detail.slice(0, 500)}`);
+    this.name = 'GeminiSttQuotaExceededError';
+    this.status = status;
+  }
+}
+
+export function isGeminiSttQuotaExceededError(error: unknown): boolean {
+  return error instanceof GeminiSttQuotaExceededError;
+}
+
+export class GeminiTtsQuotaExceededError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super(`Gemini TTS falló ${status}: ${detail.slice(0, 500)}`);
+    this.name = 'GeminiTtsQuotaExceededError';
+    this.status = status;
+  }
+}
+
+export function isGeminiTtsQuotaExceededError(error: unknown): boolean {
+  return error instanceof GeminiTtsQuotaExceededError;
+}
+
+export function needsThoughtSignatureRetry(result: {
+  readonly toolCallList: readonly { readonly thoughtSignature?: string }[];
+}): boolean {
+  return (
+    result.toolCallList.length > 0 &&
+    result.toolCallList.every((toolCall) => toolCall.thoughtSignature === undefined)
+  );
+}
 
 const geminiGenerateContentResponseSchema = z.object({
   candidates: z
@@ -38,6 +91,7 @@ const geminiGenerateContentResponseSchema = z.object({
                   .object({
                     name: z.string(),
                     args: z.unknown().optional(),
+                    thoughtSignature: z.string().optional(),
                   })
                   .optional(),
                 inlineData: z
@@ -131,7 +185,7 @@ export async function chatWithGemini(input: {
         msg as unknown as {
           tool_calls?: readonly {
             id: string;
-            function: { name: string; arguments: string };
+            function: { name: string; arguments: string; thoughtSignature?: string };
           }[];
         }
       ).tool_calls;
@@ -141,7 +195,23 @@ export async function chatWithGemini(input: {
           try {
             args = JSON.parse(tc.function.arguments) as JsonSerializableValue;
           } catch {}
-          parts.push({ functionCall: { name: tc.function.name, args } });
+          const rebuiltCall: {
+            name: string;
+            args: JsonSerializableValue;
+            thoughtSignature?: string;
+          } = { name: tc.function.name, args };
+          if (tc.function.thoughtSignature !== undefined) {
+            rebuiltCall.thoughtSignature = tc.function.thoughtSignature;
+          }
+          console.log(
+            JSON.stringify({
+              level: 'info',
+              message: 'ApolloGemini: TOOL_CALL_REPLAY',
+              toolName: rebuiltCall.name,
+              hasThoughtSignature: rebuiltCall.thoughtSignature !== undefined,
+            }),
+          );
+          parts.push({ functionCall: rebuiltCall });
         }
       }
       if (parts.length > 0) {
@@ -159,8 +229,9 @@ export async function chatWithGemini(input: {
       }
       const toolName = toolCallIdToName.get(toolMsg.tool_call_id) ?? toolMsg.tool_call_id;
       geminiContents.push({
-        // Gemini API v1beta uses 'function' role, not 'tool'
-        role: 'function',
+        // La API v1beta solo acepta roles user/model: el resultado de una
+        // tool va como functionResponse dentro de un content rol 'user'.
+        role: 'user',
         parts: [{ functionResponse: { name: toolName, response } }],
       });
       continue;
@@ -214,6 +285,7 @@ export async function chatWithGemini(input: {
   // Retry con backoff exponencial para 429 (rate limit)
   const maxRetries = 3;
   let lastError: Error | null = null;
+  let availabilityRetried = false;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const response = await fetchImpl(url, {
@@ -227,26 +299,44 @@ export async function chatWithGemini(input: {
 
     if (response.ok) {
       if (isStreaming) {
-        return consumeGeminiStream(response, input.onTextDelta!);
+        const streamedResult = await consumeGeminiStream(response, input.onTextDelta!);
+        return { ...streamedResult, hadAvailabilityRetry: availabilityRetried };
       }
 
       const payload = geminiGenerateContentResponseSchema.parse(await response.json());
       const candidate = payload.candidates?.[0];
       const parts = candidate?.content?.parts ?? [];
       let text = '';
-      const toolCallList: { id: string; name: string; args: JsonSerializableValue }[] =
+      const toolCallList: { id: string; name: string; args: JsonSerializableValue; thoughtSignature?: string }[] =
         [];
       for (const part of parts) {
         if (part.text !== undefined) text += part.text;
         if (part.functionCall !== undefined) {
-          toolCallList.push({
+          const toolCall: {
+            id: string;
+            name: string;
+            args: JsonSerializableValue;
+            thoughtSignature?: string;
+          } = {
             id: crypto.randomUUID(),
             name: part.functionCall.name,
             args: (part.functionCall.args ?? {}) as JsonSerializableValue,
-          });
+          };
+          if (typeof part.functionCall.thoughtSignature === 'string') {
+            toolCall.thoughtSignature = part.functionCall.thoughtSignature;
+          }
+          console.log(
+            JSON.stringify({
+              level: 'info',
+              message: 'ApolloGemini: TOOL_CALL_RECEIVED',
+              toolName: toolCall.name,
+              hasThoughtSignature: toolCall.thoughtSignature !== undefined,
+            }),
+          );
+          toolCallList.push(toolCall);
         }
       }
-      return { text: text.trim(), toolCallList };
+      return { text: text.trim(), toolCallList, hadAvailabilityRetry: availabilityRetried };
     }
 
     const detail = await response.text().catch(() => '');
@@ -263,6 +353,7 @@ export async function chatWithGemini(input: {
 
     // Si es 429 (rate limit) o 503 (servicio no disponible temporalmente), reintentar con backoff exponencial
     if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
+      availabilityRetried = true;
       const retryAfterMs =
         parseRetryAfter(response.headers.get('retry-after')) ??
         1000 * Math.pow(2, attempt);
@@ -276,9 +367,13 @@ export async function chatWithGemini(input: {
       continue;
     }
 
-    lastError = new Error(
-      `Gemini falló con status ${response.status}: ${detail.slice(0, 500)}`,
-    );
+    if (response.status === 429) {
+      lastError = new GeminiQuotaExceededError(response.status, detail);
+    } else {
+      lastError = new Error(
+        `Gemini falló con status ${response.status}: ${detail.slice(0, 500)}`,
+      );
+    }
     break; // No reintentar en otros errores
   }
 
@@ -292,7 +387,12 @@ async function consumeGeminiStream(
   const reader = response.body?.getReader();
   if (reader === undefined) throw new Error('Gemini stream sin body');
   let fullText = '';
-  const toolCalls: { id: string; name: string; args: JsonSerializableValue }[] = [];
+  const toolCalls: {
+    id: string;
+    name: string;
+    args: JsonSerializableValue;
+    thoughtSignature?: string;
+  }[] = [];
   let buffer = '';
   const decoder = new TextDecoder();
 
@@ -308,11 +408,28 @@ async function consumeGeminiStream(
             onTextDelta(part.text);
           }
           if (part.functionCall !== undefined) {
-            toolCalls.push({
+            const streamedCall: {
+              id: string;
+              name: string;
+              args: JsonSerializableValue;
+              thoughtSignature?: string;
+            } = {
               id: crypto.randomUUID(),
               name: part.functionCall.name,
               args: (part.functionCall.args ?? {}) as JsonSerializableValue,
-            });
+            };
+            if (typeof part.functionCall.thoughtSignature === 'string') {
+              streamedCall.thoughtSignature = part.functionCall.thoughtSignature;
+            }
+            console.log(
+              JSON.stringify({
+                level: 'info',
+                message: 'ApolloGemini: TOOL_CALL_RECEIVED',
+                toolName: streamedCall.name,
+                hasThoughtSignature: streamedCall.thoughtSignature !== undefined,
+              }),
+            );
+            toolCalls.push(streamedCall);
           }
         }
       }
@@ -434,7 +551,11 @@ export async function transcribeAudioWithGemini(input: {
       continue;
     }
 
-    lastError = new Error(`Gemini STT falló ${response.status}: ${detail.slice(0, 500)}`);
+    if (response.status === 429) {
+      lastError = new GeminiSttQuotaExceededError(response.status, detail);
+    } else {
+      lastError = new Error(`Gemini STT falló ${response.status}: ${detail.slice(0, 500)}`);
+    }
     break; // No reintentar en otros errores
   }
 
@@ -568,7 +689,13 @@ export async function synthesizeWithGemini(input: {
       continue;
     }
 
-    lastError = new Error(`Gemini TTS falló ${response.status}: ${detail.slice(0, 500)}`);
+    if (response.status === 429) {
+      lastError = new GeminiTtsQuotaExceededError(response.status, detail);
+    } else {
+      lastError = new Error(
+        `Gemini TTS falló ${response.status}: ${detail.slice(0, 500)}`,
+      );
+    }
     break; // No reintentar en otros errores
   }
 

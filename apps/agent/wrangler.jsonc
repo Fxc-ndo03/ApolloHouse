@@ -19,13 +19,16 @@
   "vars": {
     "GEMINI_MODEL": "gemini-3.6-flash",
     "GEMINI_STT_MODEL": "gemini-3.6-flash",
-    "GEMINI_LIVE_MODEL": "gemini-3.6-flash-preview-native-audio-dialog",
+    "GEMINI_LIVE_MODEL": "gemini-3.1-flash-live-preview",
     "GEMINI_TTS_MODEL": "gemini-3.1-flash-tts-preview",
     "GEMINI_EMBEDDING_MODEL": "text-embedding-004",
   },
 
-  "durable_objects": {
-    "bindings": [
+  "ai": {
+    "binding": "AI"
+  },
+
+  "durable_objects": {    "bindings": [
       {
         "name": "Apollo",
         "class_name": "Apollo",

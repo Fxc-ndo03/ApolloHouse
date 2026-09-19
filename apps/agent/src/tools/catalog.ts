@@ -16,6 +16,7 @@ import { translateTool } from '@/tools/translate';
 import { webSearchTool } from '@/tools/web';
 import type { ToolDefinition } from '@/tools/types';
 import { weatherNowTool } from '@/tools/weather';
+import { listPcToolDefinitionList } from '@/tools/pc';
 
 export function listBuiltinToolDefinitionList(): readonly ToolDefinition[] {
   return [
@@ -48,6 +49,7 @@ export function listBuiltinToolDefinitionList(): readonly ToolDefinition[] {
     sandboxExecTool,
     listCodingRepositoriesTool,
     startCodingTaskTool,
+    ...listPcToolDefinitionList(),
   ];
 }
 

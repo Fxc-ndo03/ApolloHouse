@@ -3,6 +3,8 @@
 // optional here and every consumer degrades when it is absent.
 interface Env {
   Sandbox?: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
+  Apollo: DurableObjectNamespace<import('@/agents/apollo').Apollo>;
+  PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
   DEVICE_SHARED_SECRET: string;
   DASHBOARD_SHARED_SECRET: string;
   GEMINI_API_KEY: string;
@@ -24,11 +26,24 @@ interface Env {
   SPOTIFY_CLIENT_ID: string;
   SPOTIFY_CLIENT_SECRET: string;
   SPOTIFY_REDIRECT_URI: string;
+  LLM_FALLBACK_API_KEY?: string;
+  LLM_FALLBACK_BASE_URL?: string;
+  LLM_FALLBACK_MODEL?: string;
+  LLM_FALLBACK_FORCE?: string;
+  LLM_QUOTA_COOLDOWN_MS?: string;
+  LIVE_SKIP_COOLDOWN_MS?: string;
+  TTS_FALLBACK_DAILY_CHAR_LIMIT?: string;
+  INTERNAL_CORE_TOKEN: string;
+  AI?: {
+    run(modelName: string, inputs: Record<string, string | number>): Promise<unknown>;
+  };
 }
 
 declare namespace Cloudflare {
   interface Env {
     Sandbox?: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
+    Apollo: DurableObjectNamespace<import('@/agents/apollo').Apollo>;
+    PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
     DEVICE_SHARED_SECRET: string;
     DASHBOARD_SHARED_SECRET: string;
     GEMINI_API_KEY: string;
@@ -50,5 +65,16 @@ declare namespace Cloudflare {
     SPOTIFY_CLIENT_ID: string;
     SPOTIFY_CLIENT_SECRET: string;
     SPOTIFY_REDIRECT_URI: string;
+    LLM_FALLBACK_API_KEY?: string;
+    LLM_FALLBACK_BASE_URL?: string;
+    LLM_FALLBACK_MODEL?: string;
+    LLM_FALLBACK_FORCE?: string;
+    LLM_QUOTA_COOLDOWN_MS?: string;
+    LIVE_SKIP_COOLDOWN_MS?: string;
+    TTS_FALLBACK_DAILY_CHAR_LIMIT?: string;
+    INTERNAL_CORE_TOKEN: string;
+    AI?: {
+      run(modelName: string, inputs: Record<string, string | number>): Promise<unknown>;
+    };
   }
 }

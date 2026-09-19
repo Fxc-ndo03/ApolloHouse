@@ -70,9 +70,11 @@ export async function handleGeminiLiveTurn(input: {
     throw new Error('GEMINI_API_KEY no configurado');
   }
 
-  const modelId =
-    input.environment.GEMINI_LIVE_MODEL ??
-    'models/gemini-3.6-flash-preview-native-audio-dialog';
+  const configuredModelId =
+    input.environment.GEMINI_LIVE_MODEL ?? 'gemini-3.1-flash-live-preview';
+  // El setup de Live quiere el ID corto ("gemini-..."), no el path
+  // "models/..." de generateContent: con prefijo el servidor cierra 1008.
+  const modelId = configuredModelId.replace(/^models\//, '');
 
   const wsUrl = `${GEMINI_LIVE_WS_URL}?key=${encodeURIComponent(apiKey)}`;
 
