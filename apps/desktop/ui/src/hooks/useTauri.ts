@@ -329,6 +329,10 @@ export function useTauriCommands() {
     await invoke('set_autostart_enabled', { enabled });
   }, []);
 
+  const setResponseOutputTarget = useCallback(async (target: 'pc' | 'server') => {
+    await invoke('set_response_output_target', { target });
+  }, []);
+
   const pcbridgeStatus = useCallback(async () => {
     return await invoke<{ running: boolean; connected: boolean }>('pcbridge_status');
   }, []);
@@ -412,6 +416,7 @@ export function useTauriCommands() {
     updateSettings,
     getAutostartEnabled,
     setAutostartEnabled,
+    setResponseOutputTarget,
     pcbridgeStatus,
     // Sidecar status
     getSidecarStatus,

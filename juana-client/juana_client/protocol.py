@@ -1,6 +1,6 @@
 """Protocol message types for Juana client."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, Optional
 import json
@@ -216,23 +216,27 @@ def parse_server_message(data: str | bytes) -> Optional[Any]:
     try:
         msg = json.loads(data)
         msg_type = msg.get('type')
-        
+
+        def _build(cls):
+            allowed = {f.name: msg[f.name] for f in fields(cls) if f.name in msg}
+            return cls(**allowed)
+
         if msg_type == ServerMessageType.TTS_START:
-            return TtsStartMessage(**msg)
+            return _build(TtsStartMessage)
         elif msg_type == ServerMessageType.TTS_END:
-            return TtsEndMessage(**msg)
+            return _build(TtsEndMessage)
         elif msg_type == ServerMessageType.TTS_ABORTED:
-            return TtsAbortedMessage(**msg)
+            return _build(TtsAbortedMessage)
         elif msg_type == ServerMessageType.TURN_END:
-            return TurnEndMessage(**msg)
+            return _build(TurnEndMessage)
         elif msg_type == ServerMessageType.UI_STATE:
-            return UiStateMessage(**msg)
+            return _build(UiStateMessage)
         elif msg_type == ServerMessageType.CONFIRM_REQUEST:
-            return ConfirmRequestMessage(**msg)
+            return _build(ConfirmRequestMessage)
         elif msg_type == ServerMessageType.ERROR:
-            return ErrorMessage(**msg)
+            return _build(ErrorMessage)
         elif msg_type == ServerMessageType.TEXT_RESPONSE:
-            return TextResponseMessage(**msg)
+            return _build(TextResponseMessage)
         else:
             return msg
     except Exception:

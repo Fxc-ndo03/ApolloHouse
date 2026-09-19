@@ -79,6 +79,7 @@ pub fn run() {
                 let model_dir = settings.wake_model_dir.clone();
                 let use_local_core = settings.use_local_core;
                 let core_lan_url = settings.core_lan_url.clone();
+                let response_output_target = settings.response_output_target.clone();
                 tauri::async_runtime::spawn(async move {
                     match sidecar_manager_for_start
                         .start(
@@ -90,6 +91,7 @@ pub fn run() {
                             app_handle_for_sidecar,
                             use_local_core,
                             core_lan_url,
+                            response_output_target,
                         )
                         .await
                     {
@@ -152,6 +154,7 @@ pub fn run() {
             set_autostart_enabled,
             set_mic_muted,
             set_tts_muted,
+            set_response_output_target,
             // PC commands (send to sidecar)
             pc_open_app,
             pc_focus_app,

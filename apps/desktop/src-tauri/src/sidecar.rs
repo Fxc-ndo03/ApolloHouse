@@ -121,6 +121,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
         app_handle: AppHandle,
         use_local_core: bool,
         core_lan_url: String,
+        response_output_target: String,
     ) -> Result<()> {
         // Check if already running
         let mut child_lock = self.child.lock().await;
@@ -159,6 +160,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
             .env("CORE_LAN_URL", &core_lan_url)
             .env("WAKE_WORDS", &wake_words_str)
             .env("USE_VOSK_WAKE", if use_vosk { "true" } else { "false" })
+            .env("RESPONSE_OUTPUT_TARGET", &response_output_target)
             .env("WAKE_MODEL_DIR", &model_dir)
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONIOENCODING", "utf-8")

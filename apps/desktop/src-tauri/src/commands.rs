@@ -76,6 +76,7 @@ pub async fn start_sidecar(
     let model_dir = config.wake_model_dir.clone();
     let use_local_core = config.use_local_core;
     let core_lan_url = config.core_lan_url.clone();
+    let response_output_target = config.response_output_target.clone();
 
     if worker_url.is_empty() || device_secret.is_empty() {
         return Err("Worker URL y Device Shared Secret son requeridos".into());
@@ -91,6 +92,7 @@ pub async fn start_sidecar(
             app.clone(),
             use_local_core,
             core_lan_url,
+            response_output_target,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -631,6 +633,7 @@ pub async fn get_settings(settings: State<'_, Mutex<AppSettings>>) -> Result<App
 pub async fn update_settings(
     app: AppHandle,
     settings: State<'_, Mutex<AppSettings>>,
+    sidecar: State<'_, SidecarManager>,
     data: AppSettingsData,
 ) -> Result<(), String> {
     let mut updated = settings.lock().unwrap().clone();
@@ -642,7 +645,48 @@ pub async fn update_settings(
     updated.response_output_target = data.response_output_target;
     updated.autostart_enabled = data.autostart_enabled;
     updated.save(&app).await.map_err(|e| e.to_string())?;
-    *settings.lock().unwrap() = updated;
+    *settings.lock().unwrap() = updated.clone();
+    // Propagar el target de audio al sidecar en vivo (aplica sin reiniciar).
+    sidecar
+        .send_json(&serde_json::json!({
+            "action": "set_response_output_target",
+            "target": updated.response_output_target,
+        }))
+        .await
+        .or_else(|_| {
+            // Sidecar puede no estar corriendo; se aplica al conectar vía env.
+            Ok::<(), String>(())
+        })?;
+    Ok(())
+}
+
+/// Aplica el target de salida de audio al instante (radios de Settings).
+#[tauri::command]
+pub async fn set_response_output_target(
+    app: AppHandle,
+    settings: State<'_, Mutex<AppSettings>>,
+    sidecar: State<'_, SidecarManager>,
+    target: String,
+) -> Result<(), String> {
+    if target != "pc" && target != "server" {
+        return Err(format!("target '{target}' inválido (pc o server)"));
+    }
+    {
+        let mut stored = settings.lock().unwrap().clone();
+        stored.response_output_target = target.clone();
+        stored.save(&app).await.map_err(|e| e.to_string())?;
+        *settings.lock().unwrap() = stored;
+    }
+    sidecar
+        .send_json(&serde_json::json!({
+            "action": "set_response_output_target",
+            "target": target,
+        }))
+        .await
+        .or_else(|_| {
+            // Sidecar puede no estar corriendo; se aplica al conectar vía env.
+            Ok::<(), String>(())
+        })?;
     Ok(())
 }
 

@@ -263,8 +263,12 @@ async def handle_intent_C(user_text: str, qwen_provider, history: list[dict]) ->
     try:
         response = await qwen_provider.chat_local(user_text, history)
         return response, {"ok": True}
-    except Exception as e:
-        return f"Error local: {e}", {"ok": False}
+    except Exception:
+        # Cuando llama-server no está disponible, respuesta genérica amable.
+        lowered = user_text.lower()
+        if any(w in lowered for w in ["hola", "buenos", "qué tal", "hey", "saludos"]):
+            return "¡Hola! Puedo ayudarte con tareas de la PC (abrir apps, consultar hora/fecha).", {"ok": False}
+        return "Puedo ayudarte abriendo apps, consultando hora o fecha. ¿En qué te puedo ayudar?", {"ok": False}
 
 
 async def handle_intent_D(user_text: str, history: list[dict]) -> tuple[str, dict]:

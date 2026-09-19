@@ -94,6 +94,7 @@ export function SettingsWindow() {
     updateSettings,
     getAutostartEnabled,
     setAutostartEnabled,
+    setResponseOutputTarget,
     startSidecar,
     stopSidecar,
   } = useTauriCommands();
@@ -201,6 +202,19 @@ export function SettingsWindow() {
     } catch (e) {
       setTesting(false);
       setTestResult('❌ Falló: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const changeOutputTarget = async (target: 'pc' | 'server') => {
+    setSettings({ ...settings, responseOutputTarget: target });
+    try {
+      await setResponseOutputTarget(target);
+      setTestResult(`✓ Apolo responderá por ${target === 'pc' ? 'PC' : 'Juana Manso'}.`);
+    } catch (e) {
+      console.error('Failed to apply output target:', e);
+      setTestResult(
+        '❌ Error al aplicar salida: ' + (e instanceof Error ? e.message : String(e)),
+      );
     }
   };
 
@@ -536,9 +550,7 @@ export function SettingsWindow() {
                   type="radio"
                   name="outputTarget"
                   checked={settings.responseOutputTarget === 'pc'}
-                  onChange={() =>
-                    setSettings({ ...settings, responseOutputTarget: 'pc' })
-                  }
+                  onChange={() => changeOutputTarget('pc')}
                   style={{ width: 18, height: 18, accentColor: theme.color.primary }}
                 />
                 <div>
@@ -570,9 +582,7 @@ export function SettingsWindow() {
                   type="radio"
                   name="outputTarget"
                   checked={settings.responseOutputTarget === 'server'}
-                  onChange={() =>
-                    setSettings({ ...settings, responseOutputTarget: 'server' })
-                  }
+                  onChange={() => changeOutputTarget('server')}
                   style={{ width: 18, height: 18, accentColor: theme.color.primary }}
                 />
                 <div>

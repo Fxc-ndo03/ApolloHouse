@@ -475,6 +475,10 @@ class JuanaClient:
                     self.set_mic_muted(bool(payload.get("muted", False)))
                 elif action == "set_tts_muted":
                     self.set_tts_muted(bool(payload.get("muted", False)))
+                elif action == "set_response_output_target":
+                    target = payload.get("target", "pc")
+                    if target in ("pc", "server"):
+                        self._run_on_loop(self.set_response_output_target(target))
         except Exception:
             pass
 
@@ -535,11 +539,16 @@ async def main():
     client.on_text_response = on_text_response
     
     try:
+        # El target de salida viene de la UI (settings → env RESPONSE_OUTPUT_TARGET).
+        # "pc" → el core streamea el TTS al sidecar (suena en esta PC);
+        # "server" → el core reproduce en el dispositivo (aplay local).
+        response_output_target = os.getenv("RESPONSE_OUTPUT_TARGET", "pc")
         await client.connect()
         print("Connected!")
-        
-        # Set output target to PC
-        await client.set_response_output_target("pc")
+
+        # Set output target chosen in settings
+        await client.set_response_output_target(response_output_target)
+        print(f"response_output_target={response_output_target}")
         
         # Keep running
         while client.is_connected:

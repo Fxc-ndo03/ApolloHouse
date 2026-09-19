@@ -143,9 +143,15 @@ class AudioPlayback:
             self._on_end_callback()
 
     def write(self, data: bytes) -> None:
-        """Write audio data to playback buffer."""
-        if self._running:
-            self._buffer.put(data)
+        """Write audio data to playback buffer, chunked per callback frame."""
+        if not self._running:
+            return
+        # PortAudio espera exactamente frame_count bytes por callback: si
+        # metemos un buffer gigante de un solo websocket message, solo se
+        # reproduce el primer frame y el resto se pierde silenciosamente.
+        frame_bytes = self.chunk_size * 2 * self.channels
+        for i in range(0, len(data), frame_bytes):
+            self._buffer.put(data[i:i + frame_bytes])
 
     def stop(self) -> None:
         """Stop playback."""
