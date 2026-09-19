@@ -1,0 +1,98 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Apollo Desktop",
+  "version": "0.1.0",
+  "identifier": "com.apollo.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": {
+      "script": "bun run dev",
+      "cwd": "../ui"
+    },
+    "beforeBuildCommand": {
+      "script": "bun run build && bun ../src-tauri/bundle-resources.mjs && bun ../src-tauri/bundle-python-runtime.mjs",
+      "cwd": "../ui"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Apollo",
+        "url": "/",
+        "width": 900,
+        "height": 560,
+        "minWidth": 700,
+        "minHeight": 500,
+        "maxWidth": 1400,
+        "maxHeight": 900,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": true,
+        "visible": true,
+        "center": true
+      },
+      {
+        "label": "chat",
+        "title": "Apollo Chat",
+        "url": "/chat.html",
+        "width": 480,
+        "height": 640,
+        "minWidth": 400,
+        "minHeight": 500,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": true,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "settings",
+        "title": "Apollo Settings",
+        "url": "/settings.html",
+        "width": 640,
+        "height": 720,
+        "minWidth": 560,
+        "minHeight": 600,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": false,
+        "resizable": true,
+        "visible": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": [
+      "resources/juana-client",
+      "resources/python-runtime"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "allowDowngrades": true
+    }
+  },
+  "plugins": {}
+}

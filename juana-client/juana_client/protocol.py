@@ -43,12 +43,14 @@ class ServerMessageType(str, Enum):
     MCP = "mcp"
     ALARM_RING = "alarm_ring"
     SET_RESPONSE_OUTPUT_TARGET = "set_response_output_target"
+    TEXT_RESPONSE = "text_response"
 
 
 @dataclass
 class HelloMessage:
     """Initial hello message to establish connection."""
     type: str = "hello"
+    deviceId: str = "juana-client"
     hostname: str = "juana-client"
     ts: int = 0
 
@@ -198,6 +200,15 @@ class ErrorMessage:
     message: str = ""
 
 
+@dataclass
+class TextResponseMessage:
+    """Text response from Core (local Qwen or escalated)."""
+    type: str = "text_response"
+    text: str = ""
+    session_id: str = ""
+    ts: int = 0
+
+
 def parse_server_message(data: str | bytes) -> Optional[Any]:
     """Parse a server message from JSON."""
     if isinstance(data, bytes):
@@ -220,6 +231,8 @@ def parse_server_message(data: str | bytes) -> Optional[Any]:
             return ConfirmRequestMessage(**msg)
         elif msg_type == ServerMessageType.ERROR:
             return ErrorMessage(**msg)
+        elif msg_type == ServerMessageType.TEXT_RESPONSE:
+            return TextResponseMessage(**msg)
         else:
             return msg
     except Exception:

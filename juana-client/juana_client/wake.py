@@ -1,8 +1,10 @@
 """Wake word detection for Juana client using Vosk (offline, no account needed)."""
 
+import difflib
 import json
 import os
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -12,6 +14,14 @@ import pyaudio
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
 SetLogLevel(-1)  # Suppress Vosk logs
+
+
+def _log(msg: str) -> None:
+    """Print timestamped log message to stdout (never raises)."""
+    try:
+        print(f"[WAKE] {msg}", flush=True)
+    except OSError:
+        pass
 
 
 class VoskWakeWordDetector:
@@ -33,6 +43,11 @@ class VoskWakeWordDetector:
             sensitivity: Detection threshold (0.0-1.0), higher = more sensitive
             on_detected: Callback when wake word is detected
         """
+        # Strip Windows extended-length path prefix (\\?\) that Rust's
+        # canonicalize() adds — Vosk's C library doesn't handle it.
+        if os.name == 'nt' and model_path.startswith('\\\\?\\'):
+            model_path = model_path[4:]
+
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Vosk model not found at: {model_path}")
 
@@ -49,7 +64,9 @@ class VoskWakeWordDetector:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._last_detection_time = 0.0
-        self._cooldown = 2.0  # seconds between detections
+        self._cooldown = 3.0  # seconds between detections (evita re-disparo al decir "trae abrir...")
+
+        _log(f"Wake word detector inicializado: Vosk (modelo={os.path.basename(model_path)}, words={self.wake_words})")
 
     def start(self) -> None:
         """Start listening for wake word."""
@@ -66,6 +83,7 @@ class VoskWakeWordDetector:
             stream_callback=self._audio_callback,
         )
         self._stream.start_stream()
+        _log("Escuchando wake word...")
 
     def _audio_callback(
         self,
@@ -79,24 +97,82 @@ class VoskWakeWordDetector:
             result = json.loads(self.recognizer.Result())
             text = result.get("text", "").lower().strip()
             if text:
+                _log(f"Texto detectado: {text}")
                 self._check_wake_word(text)
         return (in_data, pyaudio.paContinue)
 
+    def _fuzzy_match(self, token: str, target: str) -> bool:
+        """True si token es 'trae' mal transcripto: 'traer'/'tra' sí, 'extrae' no."""
+        if token == target:
+            return True
+        if abs(len(token) - len(target)) > 1:
+            return False
+        return difflib.SequenceMatcher(None, token, target).ratio() >= 0.82
+
+    def _is_okey_variant(self, token: str) -> bool:
+        """Variantes que Vosk puede transcribir para 'okey': ok/okay/okey."""
+        return token in ("ok", "okay", "okey") or self._fuzzy_match(token, "okey")
+
     def _check_wake_word(self, text: str) -> None:
-        """Check if any wake word is in the recognized text."""
+        """Exige frase 'okey trae' (con tolerancia ok/okay/okey). 'trae' solo no dispara."""
         now = time.time()
         if now - self._last_detection_time < self._cooldown:
             return
 
+        norm = text.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
+        tokens = re.findall(r'\b\w+\b', norm)
+
         for wake_word in self.wake_words:
-            if wake_word in text:
-                self._last_detection_time = now
-                if self.on_detected:
-                    try:
-                        self.on_detected(wake_word)
-                    except Exception:
-                        pass
-                break
+            # Soporta tanto "okey trae" como el viejo "trae" si queda en config vieja:
+            # pero la regla nueva es exigir prefijo okey.
+            needs_okey = ' ' in wake_word and wake_word.split()[0] in ("ok", "okay", "okey")
+            if needs_okey:
+                # 1) exacto: "okey trae" / "ok trae" / "okay trae"
+                if re.search(r'\b(okey|ok|okay)\s+trae\b', norm):
+                    self._last_detection_time = now
+                    _log(f"Wake word coincide: {wake_word} (texto: '{text}')")
+                    if self.on_detected:
+                        try:
+                            self.on_detected(wake_word)
+                        except Exception:
+                            pass
+                    return
+                # 2) difuso: "okey traeer" / "ok tra" etc. — exige que la palabra anterior a "trae" sea variante okey
+                for idx, tok in enumerate(tokens):
+                    is_trae = tok == "trae" or self._fuzzy_match(tok, "trae")
+                    if not is_trae or idx == 0:
+                        continue
+                    prev = tokens[idx - 1]
+                    if prev in ("ok", "okay", "okey") or self._fuzzy_match(prev, "okey"):
+                        self._last_detection_time = now
+                        _log(f"Wake word difuso: '{prev} {tok}' ~ '{wake_word}' (texto: '{text}')")
+                        if self.on_detected:
+                            try:
+                                self.on_detected(wake_word)
+                            except Exception:
+                                pass
+                        return
+            else:
+                # Wake de 1 palabra legacy (ej. "trae" suelto): mantener compat pero ya no es el default
+                if re.search(r'\b' + re.escape(wake_word) + r'\b', norm):
+                    self._last_detection_time = now
+                    _log(f"Wake word coincide: {wake_word} (texto: '{text}')")
+                    if self.on_detected:
+                        try:
+                            self.on_detected(wake_word)
+                        except Exception:
+                            pass
+                    return
+                for tok in tokens:
+                    if self._fuzzy_match(tok, wake_word):
+                        self._last_detection_time = now
+                        _log(f"Wake word difuso: '{tok}' ~ '{wake_word}' (texto: '{text}')")
+                        if self.on_detected:
+                            try:
+                                self.on_detected(wake_word)
+                            except Exception:
+                                pass
+                        return
 
     def stop(self) -> None:
         """Stop listening."""
@@ -105,6 +181,7 @@ class VoskWakeWordDetector:
             self._stream.stop_stream()
             self._stream.close()
             self._stream = None
+        _log("Wake word detector detenido")
 
     def __del__(self):
         self.stop()
@@ -122,21 +199,25 @@ class ManualWakeWordDetector:
         self.wake_words = wake_words
         self.on_detected = on_detected
         self._running = False
+        _log(f"Wake word detector inicializado: Manual (words={wake_words})")
 
     def start(self) -> None:
         """Start manual detection (simulated with a simple interface)."""
         self._running = True
+        _log("Modo manual activo - usa .trigger('palabra') para activar")
 
     def trigger(self, wake_word: Optional[str] = None) -> None:
         """Manually trigger wake word detection (for testing/fallback)."""
         if not self._running:
             return
         word = wake_word or self.wake_words[0]
+        _log(f"Wake word manual activado: {word}")
         if self.on_detected:
             self.on_detected(word)
 
     def stop(self) -> None:
         self._running = False
+        _log("Wake word detector manual detenido")
 
 
 def create_wake_detector(
@@ -157,7 +238,7 @@ def create_wake_detector(
     Returns:
         Wake word detector instance
     """
-    wake_words = wake_words or ["juana", "hey juana"]
+    wake_words = wake_words or ["okey trae"]
     model_dir = model_dir or os.path.join(os.path.dirname(__file__), "models")
 
     if prefer_vosk:
@@ -171,13 +252,16 @@ def create_wake_detector(
             model_path = os.path.join(model_dir, model_name)
             if os.path.exists(model_path):
                 try:
+                    _log(f"Modelo Vosk encontrado: {model_name}")
                     return VoskWakeWordDetector(
                         model_path=model_path,
                         wake_words=wake_words,
                         on_detected=on_detected,
                     )
-                except Exception:
+                except Exception as e:
+                    _log(f"Error cargando modelo {model_name}: {e}")
                     continue
+        _log("No se encontró modelo Vosk válido, usando detector manual")
 
     # Fallback to manual
     return ManualWakeWordDetector(wake_words=wake_words, on_detected=on_detected)

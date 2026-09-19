@@ -1,0 +1,308 @@
+.assistant-root {
+  --ap-bg: #121212;
+  --ap-surface: #1a1a1a;
+  --ap-surface-2: #181818;
+  --ap-border: #2a2a2a;
+  --ap-text: #f2f0ea;
+  --ap-text-2: #8c8a82;
+  --ap-text-muted: #6b6963;
+
+  --c-reposo: #3fe0c9;
+  --c-escuchando: #35e08a;
+  --c-pensando: #ffc23c;
+  --c-respondiendo: #ff6a4a;
+  --mode-color: var(--c-reposo);
+
+  width: 100%;
+  height: 100%;
+  background: var(--ap-bg);
+  border: 0.5px solid var(--ap-border);
+  border-radius: 16px;
+  color: var(--ap-text);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: 'Inter', system-ui, sans-serif;
+  user-select: none;
+}
+
+.assistant-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 22px;
+  border-bottom: 0.5px solid var(--ap-border);
+  flex-shrink: 0;
+}
+
+.assistant-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 1;
+}
+
+.assistant-brand .name {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.assistant-brand .sub {
+  font-size: 12px;
+  color: var(--ap-text-muted);
+}
+
+.assistant-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--ap-text-2);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.assistant-icon-btn:hover {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+}
+
+.assistant-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.assistant-win-btn {
+  width: 36px;
+}
+
+.assistant-win-close:hover {
+  background: rgba(255, 90, 90, 0.16);
+  color: #ff7a7a;
+}
+
+.assistant-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.assistant-rail {
+  width: 60px;
+  flex-shrink: 0;
+  border-right: 0.5px solid var(--ap-border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 18px 0;
+  gap: 6px;
+}
+
+.assistant-rail-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--ap-text-muted);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  transition: color 0.15s, background 0.15s;
+}
+
+.assistant-rail-btn:hover {
+  background: var(--ap-surface-2);
+  color: var(--ap-text-2);
+}
+
+.assistant-rail-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.assistant-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 28px;
+}
+
+.assistant-greeting {
+  text-align: center;
+}
+
+.assistant-greeting .hi {
+  font-size: 16px;
+  margin: 0 0 4px;
+}
+
+.assistant-greeting .hi b {
+  color: var(--mode-color);
+  font-weight: 500;
+  transition: color 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.assistant-greeting .status {
+  font-size: 13px;
+  color: var(--ap-text-muted);
+  margin: 0;
+  min-height: 18px;
+  max-width: 560px;
+}
+
+.assistant-face {
+  width: 176px;
+  height: 176px;
+  border-radius: 50%;
+  background: #0a0a0a;
+  border: 3px solid var(--mode-color);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 42px;
+  box-shadow:
+    0 0 34px -4px color-mix(in srgb, var(--mode-color) 65%, transparent),
+    inset 0 0 22px -6px color-mix(in srgb, var(--mode-color) 35%, transparent);
+  transition: border-color 0.7s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: assistant-face-breathe 4.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes assistant-face-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.025);
+  }
+}
+
+.assistant-eyes-row {
+  display: flex;
+  gap: 26px;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.assistant-eye-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--mode-color);
+  box-shadow: 0 0 16px 2px color-mix(in srgb, var(--mode-color) 75%, transparent);
+  transition: background 0.7s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.assistant-root[data-visual='escuchando'] .assistant-eye-dot {
+  animation: assistant-eye-listen 0.85s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes assistant-eye-listen {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.45);
+  }
+}
+
+.assistant-root[data-visual='pensando'] .assistant-eyes-row {
+  animation: assistant-think-shift 1.7s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes assistant-think-shift {
+  0%,
+  100% {
+    transform: translateX(-5px);
+  }
+  50% {
+    transform: translateX(5px);
+  }
+}
+
+.assistant-root[data-visual='respondiendo'] .assistant-eye-dot {
+  animation: assistant-eye-answer 1.1s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes assistant-eye-answer {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(0.25);
+  }
+}
+
+.assistant-composer {
+  margin: 0 24px 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--ap-surface-2);
+  border: 0.5px solid var(--ap-border);
+  border-radius: 10px;
+  padding: 11px 14px;
+}
+
+.assistant-composer input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ap-text);
+  font-family: inherit;
+  font-size: 13px;
+  user-select: text;
+}
+
+.assistant-composer input::placeholder {
+  color: var(--ap-text-muted);
+}
+
+.assistant-composer .assistant-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.assistant-composer .send {
+  color: var(--mode-color);
+  transition: color 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.assistant-mic-live {
+  color: var(--c-escuchando) !important;
+}
+
+.assistant-root[data-muted='mic'] .assistant-face {
+  filter: grayscale(1) brightness(0.85);
+  opacity: 0.7;
+}
+
+.assistant-toggle-on {
+  color: var(--c-escuchando) !important;
+  background: color-mix(in srgb, var(--c-escuchando) 14%, transparent) !important;
+}
+
+.assistant-toggle-off {
+  color: var(--ap-text-muted) !important;
+  background: transparent !important;
+}
+
+.assistant-toggle-off.assistant-mute-active {
+  color: #ff6a4a !important;
+  background: color-mix(in srgb, #ff6a4a 14%, transparent) !important;
+}

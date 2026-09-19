@@ -185,3 +185,16 @@ def pcm_to_numpy(pcm_data: bytes, dtype=np.int16) -> np.ndarray:
 def numpy_to_pcm(arr: np.ndarray) -> bytes:
     """Convert numpy array to PCM bytes."""
     return arr.astype(np.int16).tobytes()
+
+
+def apply_auto_gain(pcm_data: bytes, target_peak: float = 0.5, max_gain: float = 15.0) -> bytes:
+    """Normaliza picos bajos sin amplificar ruido de más (mismo patrón que HARVIS stt.py:103)."""
+    if len(pcm_data) < 2:
+        return pcm_data
+    samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+    peak = float(np.max(np.abs(samples)))
+    if peak < 0.002 or peak >= 0.35:
+        return pcm_data
+    gain = min(target_peak / max(peak, 1e-6), max_gain)
+    amplified = np.clip(samples * gain, -1.0, 1.0)
+    return (amplified * 32768.0).astype(np.int16).tobytes()

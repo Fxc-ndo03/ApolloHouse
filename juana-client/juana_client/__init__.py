@@ -20,6 +20,7 @@ from .protocol import (
     ErrorMessage,
 )
 from .audio import AudioCapture, AudioPlayback
+from .clap import ClapDetector, compute_rms
 from .wake import (
     VoskWakeWordDetector,
     ManualWakeWordDetector,
@@ -50,6 +51,8 @@ __all__ = [
     "ErrorMessage",
     "AudioCapture",
     "AudioPlayback",
+    "ClapDetector",
+    "compute_rms",
     "VoskWakeWordDetector",
     "ManualWakeWordDetector",
     "create_wake_detector",

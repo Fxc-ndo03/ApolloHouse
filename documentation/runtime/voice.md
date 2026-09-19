@@ -26,6 +26,49 @@ Quota math (Starter ≈ 30k credits/mo): `eleven_multilingual_v2` burns ~1 credi
 
 Implementation details sit under `apps/agent/src/voice/`.
 
+## Fallbacks (degradación, nunca reemplazo del Live)
+
+El pipeline principal es la Live API de Gemini (audio bidireccional en tiempo real). Nada de lo
+siguiente lo toca: todo vive en la rama clásica STT → LLM → TTS (`apps/agent/src/agents/runtime.ts`,
+adapters no-Live) y solo se activa cuando Gemini falla o se acerca a su cuota.
+
+- **LLM por proveedor** (`apps/agent/src/voice/provider.ts`): si Gemini devuelve 429 tras los
+  reintentos, el turno se resuelve una vez contra un endpoint OpenAI-compatible configurado
+  (  `LLM_FALLBACK_API_KEY/BASE_URL/MODEL`, hoy Groq). El turno siguiente vuelve a Gemini solo: no
+  hay estado pegajoso. El fallback mapea tool calls igual que Gemini, así que un turno que
+  necesitaba una tool (ej. prender una luz) sigue ejecutándola. Test: `LLM_FALLBACK_FORCE=1`
+  (secret) salta Gemini y fuerza la rama para probar el circuito sin quemar cuota real.
+  Anti-quema: tras un 429 de cuota se registra el fallo en SQLite del DO (`voice/provider.ts`);
+  durante el cooldown (10 min, `LLM_QUOTA_COOLDOWN_MS`) los turnos van directo al fallback sin
+  reintentar Gemini en vano; el primer éxito de Gemini lo limpia.
+- **STT por cuota** (misma rama clásica): si el STT de Gemini agota reintentos con 429, el turno
+  transcribe con Whisper del proveedor fallback (`whisper-large-v3-turbo`, `voice/provider.ts`,
+  misma cuenta/secret que el LLM fallback, sin costo extra). Si el cooldown de cuota LLM está
+  activo (misma cuenta agotada), ni lo intenta: va directo a Whisper. Sin fallback configurado,
+  el turno falla como antes.
+- **TTS reactivo al 429** (además del contador proactivo): si el TTS de Gemini agota reintentos
+  con 429, el turno sintetiza con Workers AI en vez de morir. Sin binding `AI`, relanza el error.
+- **TTS por cuota** (`apps/agent/src/voice/quota.ts`, `apps/agent/src/voice/fallback.ts`): contador
+  diario de caracteres sintetizados con Gemini en SQLite del Durable Object (tabla `tts_usage`,
+  clave por día UTC, reset a medianoche). Al llegar al 80 % del límite
+  (`TTS_FALLBACK_DAILY_CHAR_LIMIT`, default 150000, ajustable: es un guardarraíl propio, no la
+  cuota publicada de Google) el adapter TTS cambia a Workers AI MeloTTS
+  (`@cf/myshell-ai/melotts`, `lang: 'ES'` en mayúsculas — minúsculas da 8002, verificado en prod):
+  el Worker pide MP3 y lo decodifica a PCM 24 kHz mono **en el servidor** vía WASM
+  (`@audio/decode-mp3` mpg123 + `voice/resample.ts` mix a mono + resample lineal) antes del streamer,
+  así el cliente/ESP32 siguen recibiendo PCM crudo sin cambios ni decoder extra. Timeout 15 s;
+  si cuelga, el turno falla ruidoso. Aura eliminado como fallback: cobra $0.03/1k y rompía el $0.
+  Sin binding `AI`, degrada a intentar Gemini igual. Límite conocido: los
+  turnos Live no pasan por el contador (la API no reporta uso por turno), así que la contabilidad
+  cubre la rama clásica.
+- **Plan B (documentado, no implementado): ElevenLabs** vía `fetch` funciona desde Workers y el
+  free tier (~10k chars/mes) alcanzaría para uso solo-emergencia, pero suma vendor + secret y tope
+  mensual duro. **edge-tts descartado como base**: endpoint interno de Microsoft reverse-engineered,
+  sin SLA, con historial de bloqueos que tardaron semanas en sortearse; como mucho último eslabón.
+- **Skip de Live con memoria**: si el setup de Live falla 3 veces seguidas (ej. key sin acceso,
+  verificado: ListModels lo lista pero el endpoint cierra 1008), los turnos de voz van directo a
+  la rama clásica por 30 min (`LIVE_SKIP_COOLDOWN_MS`, tabla `live_health`). Un éxito lo limpia.
+
 ## Interruption
 
 Speech is cancellable mid-reply. The device sends `abort`; the agent sets a flag that the

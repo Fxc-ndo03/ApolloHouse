@@ -9,6 +9,7 @@ Python client for **Apollo (Juana)** - a personal AI agent with a physical body.
 - **Audio Playback**: Plays TTS audio from server at 24kHz mono (16-bit PCM)
 - **Press-and-Hold**: Implements the hold_start/hold_end protocol for voice input
 - **Wake Word Detection**: Offline wake word detection using Vosk (no external account, no internet required)
+- **Double-Clap Trigger**: Two hand claps abort current speech (physical trigger, no ML)
 - **Text Input**: Alternative text-based interaction
 - **Response Routing**: Can route TTS audio to PC (this client) or server (device)
 - **Telemetry**: Sends battery, charging, volume status
@@ -72,10 +73,63 @@ Required environment variables:
 - `APOLLO_WORKER_URL` - WebSocket URL of your Apollo worker (e.g., `wss://apollo.your-domain.workers.dev`)
 - `DEVICE_SHARED_SECRET` - The `DEVICE_SHARED_SECRET` from your Cloudflare Worker secrets
 
-Optional wake word settings (can also be passed to `JuanaConfig`):
-- `WAKE_WORDS` - Comma-separated wake words (default: "juana,hey juana")
-- `WAKE_MODEL_DIR` - Directory containing Vosk models
-- `USE_VOSK_WAKE` - Set to "false" to disable Vosk and use manual fallback
+Wake word environment variables:
+- `WAKE_WORDS` - Comma-separated wake words (default: `juana,hey juana`)
+- `WAKE_MODEL_DIR` - Directory containing Vosk models (default: `juana_client/models/`)
+- `USE_VOSK_WAKE` - Set to `true` (default) to enable Vosk, `false` to use manual fallback
+
+### Forzar uso de Vosk (Wake Word por Voz)
+
+Para activar la detección de wake word por voz con Vosk:
+
+1. **Descarga un modelo Vosk** (~40-50 MB) en `juana_client/models/`:
+   ```bash
+   mkdir -p juana_client/models
+   cd juana_client/models
+   # Español (recomendado para Juana)
+   wget https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+   unzip vosk-model-small-es-0.42.zip
+   # O Inglés
+   # wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+   # unzip vosk-model-small-en-us-0.15.zip
+   ```
+
+2. **Configura en `.env`:**
+   ```env
+   USE_VOSK_WAKE=true
+   WAKE_WORDS=juana,hey juana
+   # WAKE_MODEL_DIR=juana_client/models  # opcional, es el default
+   ```
+
+3. **Verifica en los logs** al iniciar el cliente:
+   ```
+   [WAKE] Modelo Vosk encontrado: vosk-model-small-es-0.42
+   [WAKE] Wake word detector inicializado: Vosk (modelo=vosk-model-small-es-0.42, words=['juana', 'hey juana'])
+   [WAKE] Escuchando wake word...
+   ```
+
+4. **Di la wake word** (ej. "juana") y verás:
+   ```
+   [WAKE] Texto detectado: juana
+   [WAKE] Wake word coincide: juana
+   ```
+
+### Fallback Manual (Touch-to-Talk)
+
+Si no hay modelo Vosk o `USE_VOSK_WAKE=false`, se usa `ManualWakeWordDetector`.
+
+**Cómo activar manualmente:**
+```python
+# Desde código (ej. hotkey global, botón físico, etc.)
+client._wake_detector.trigger("juana")  # Inicia escucha (hold_start)
+```
+
+**Logs en modo manual:**
+```
+[WAKE] Wake word detector inicializado: Manual (words=['juana', 'hey juana'])
+[WAKE] Modo manual activo - usa .trigger('palabra') para activar
+[WAKE] Wake word manual activado: juana
+```
 
 ## Usage
 
@@ -261,6 +315,26 @@ If Vosk fails to load (no model found), the client automatically falls back to `
 # Trigger wake word manually (e.g., from a global hotkey)
 client._wake_detector.trigger("juana")
 ```
+
+### Double-Clap Trigger
+
+Two hand claps in a short window (0.25–1.0 s apart) abort the current speech — useful to silence an alarm without speaking. Pure RMS amplitude analysis on the mic (`juana_client/clap.py`): no ML, only `numpy` (already required). The detector runs on its own mic tap, adapts to room noise, rejects sustained loud sounds (music, shouting), and degrades gracefully if the mic is busy.
+
+```env
+CLAP_ENABLED=true
+# CLAP_THRESHOLD_RMS=0   # 0 = adaptive; raise (e.g. 1500) if noisy room gives false triggers
+```
+
+```python
+client.on_double_clap = lambda: print("claps!")
+# Default when no callback is set: sends abort to the Worker.
+```
+
+Caveat: the mic also hears the netbook's own speakers, so very loud playback can false-trigger — keep volume moderate or set a custom `on_double_clap`.
+
+### Nivel de entrada del mic (ganancia)
+
+No hay normalización previa: el audio se manda crudo tal como lo captura PyAudio. Con el VAD adaptativo, un nivel flojo degrada el STT. Dejá el mic del JBL Quantum 300 (o el que uses) en **85–90%** en Windows → Sonido → Entrada. Bajarlo a 70% como se sugirió antes deja la señal baja para el reconocedor.
 
 ## Architecture
 

@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import sys
+import threading
 import time
 import uuid
 from typing import Optional, Callable, Any
@@ -29,6 +31,7 @@ from .protocol import (
     UiStateMessage,
     ConfirmRequestMessage,
     ErrorMessage,
+    TextResponseMessage,
     ServerMessageType,
 )
 from .audio import AudioCapture, AudioPlayback
@@ -47,7 +50,7 @@ class ConnectionState(Enum):
 @dataclass
 class JuanaConfig:
     """Configuration for Juana client."""
-    worker_url: str = "wss://apollo.facupapollo.workers.dev"
+    worker_url: str = "wss://apollo.facupapollo.workers.dev/agents/apollo/default"
     device_id: str = "juana-client"
     device_shared_secret: str = ""
     sample_rate_capture: int = 16000
@@ -56,6 +59,9 @@ class JuanaConfig:
     chunk_size_playback: int = 1024
     auto_reconnect: bool = True
     reconnect_interval: float = 5.0
+    # Local Core LAN settings
+    use_local_core: bool = True
+    core_lan_url: str = "ws://192.168.100.8:9876"
     # Wake word settings
     wake_words: list[str] = None
     wake_model_dir: str = None
@@ -75,12 +81,17 @@ class JuanaClient:
         self._receive_task: Optional[asyncio.Task] = None
         self._audio_capture: Optional[AudioCapture] = None
         self._audio_playback: Optional[AudioPlayback] = None
+        self._audio_playback_disabled: bool = False
         self._wake_detector: Optional[VoskWakeWordDetector | ManualWakeWordDetector] = None
         self._audio_buffer = bytearray()
         self._tts_sequence: Optional[int] = None
         self._tts_expected_bytes: Optional[int] = None
         self._tts_received_bytes = 0
         self._holding = False
+        self._mic_muted = False
+        self._tts_muted = False
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stdin_thread: Optional[threading.Thread] = None
         
         # Callbacks
         self.on_state_change: Optional[Callable[[ConnectionState], None]] = None
@@ -92,6 +103,7 @@ class JuanaClient:
         self.on_audio_start: Optional[Callable[[], None]] = None
         self.on_audio_end: Optional[Callable[[], None]] = None
         self.on_wake_detected: Optional[Callable[[str], None]] = None
+        self.on_text_response: Optional[Callable[[TextResponseMessage], None]] = None
 
     @property
     def state(self) -> ConnectionState:
@@ -107,15 +119,18 @@ class JuanaClient:
             self.on_state_change(state)
 
     async def connect(self) -> None:
-        """Connect to the Apollo worker."""
+        """Connect to the Apollo worker or local Core."""
         if self._running:
             return
         
         self._set_state(ConnectionState.CONNECTING)
         self._running = True
         
-        # Build WebSocket URL with token
-        url = f"{self.config.worker_url}?token={self.config.device_shared_secret}"
+        # Choose endpoint: local Core LAN or Cloudflare Worker
+        if self.config.use_local_core:
+            url = f"{self.config.core_lan_url}/connect?token={self.config.device_shared_secret}"
+        else:
+            url = f"{self.config.worker_url}?token={self.config.device_shared_secret}"
         
         try:
             self._ws = await websockets.connect(
@@ -124,6 +139,8 @@ class JuanaClient:
                 ping_timeout=10,
                 close_timeout=5,
             )
+            self._event_loop = asyncio.get_running_loop()
+            self._start_stdin_listener()
             self._set_state(ConnectionState.CONNECTED)
             
             # Send hello
@@ -138,12 +155,20 @@ class JuanaClient:
                 sample_rate=self.config.sample_rate_capture,
                 chunk_size=self.config.chunk_size_capture,
             )
-            self._audio_playback = AudioPlayback(
-                sample_rate=self.config.sample_rate_playback,
-                chunk_size=self.config.chunk_size_playback,
-                on_end=self._on_playback_end,
-            )
-            self._audio_playback.start()
+            # Initialize audio playback (optional - may fail if no output device)
+            try:
+                self._audio_playback = AudioPlayback(
+                    sample_rate=self.config.sample_rate_playback,
+                    chunk_size=self.config.chunk_size_playback,
+                    on_end=self._on_playback_end,
+                )
+                self._audio_playback.start()
+                self._audio_playback_disabled = False
+            except Exception as e:
+                # Audio playback is optional - log and continue without it
+                print(f"[sidecar] audio playback disabled: {e}")
+                self._audio_playback = None
+                self._audio_playback_disabled = True
             
             # Initialize wake word detector
             self._wake_detector = create_wake_detector(
@@ -179,7 +204,7 @@ class JuanaClient:
             self._audio_capture.stop()
             self._audio_capture = None
         
-        if self._audio_playback:
+        if self._audio_playback and not self._audio_playback_disabled:
             self._audio_playback.stop()
             self._audio_playback = None
         
@@ -243,9 +268,23 @@ class JuanaClient:
         elif isinstance(parsed, ErrorMessage):
             if self.on_error:
                 self.on_error(parsed)
+                
+        elif isinstance(parsed, TextResponseMessage):
+            if self.on_text_response:
+                self.on_text_response(parsed)
 
     async def _handle_binary(self, data: bytes) -> None:
         """Handle binary audio data from server."""
+        # If audio playback is disabled, just track bytes for ack but don't play
+        if self._audio_playback_disabled or self._audio_playback is None:
+            if self._tts_expected_bytes is not None and self._tts_received_bytes < self._tts_expected_bytes:
+                self._tts_received_bytes += len(data)
+                if self._tts_received_bytes % 48000 == 0:  # Every ~1 second at 24kHz
+                    await self._send_playback_ack()
+            if self._tts_expected_bytes is not None and self._tts_received_bytes >= self._tts_expected_bytes:
+                await self._send_playback_ack()
+            return
+        
         # Check if this is a TTS audio chunk
         if self._tts_expected_bytes is not None and self._tts_received_bytes < self._tts_expected_bytes:
             self._audio_buffer.extend(data)
@@ -343,7 +382,7 @@ class JuanaClient:
             msg = AbortMessage(ts=int(time.time() * 1000))
             await self._ws.send(msg.to_json())
         
-        if self._audio_playback:
+        if self._audio_playback and not self._audio_playback_disabled:
             self._audio_playback.stop()
             self._audio_playback.start(on_end=self._on_playback_end)
 
@@ -375,6 +414,70 @@ class JuanaClient:
             )
             await self._ws.send(msg.to_json())
 
+    def set_mic_muted(self, muted: bool) -> None:
+        """Silencia el micro: corta lo que esté escuchando y apaga detectores."""
+        self._mic_muted = muted
+        if muted:
+            if self._holding:
+                self.stop_listening()
+            if self._wake_detector:
+                try:
+                    self._wake_detector.stop()
+                except Exception:
+                    pass
+        else:
+            if self._wake_detector:
+                try:
+                    self._wake_detector.start()
+                except Exception:
+                    pass
+
+    def set_tts_muted(self, muted: bool) -> None:
+        """Silencia la respuesta de voz (el texto sigue llegando)."""
+        self._tts_muted = muted
+
+    def _run_on_loop(self, coroutine: Any) -> None:
+        """Encola una coroutine en el loop asyncio principal desde el hilo de stdin."""
+        loop = self._event_loop
+        if loop is None or loop.is_closed():
+            coroutine.close()
+            return
+        asyncio.run_coroutine_threadsafe(coroutine, loop)
+
+    def _start_stdin_listener(self) -> None:
+        """Lee {'action': ...} del stdin (push-to-talk y texto del chat de Tauri)."""
+        if self._stdin_thread is not None and self._stdin_thread.is_alive():
+            return
+        self._stdin_thread = threading.Thread(target=self._stdin_loop, daemon=True)
+        self._stdin_thread.start()
+
+    def _stdin_loop(self) -> None:
+        try:
+            for line in sys.stdin:
+                try:
+                    payload = json.loads(line)
+                    action = payload.get("action")
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                if action == "start_listening":
+                    self.start_listening()
+                elif action == "stop_listening":
+                    self.stop_listening()
+                elif action == "send_text":
+                    text = payload.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        self._run_on_loop(self.send_text(text))
+                elif action == "send_confirm":
+                    self._run_on_loop(self.confirm(bool(payload.get("ok", False))))
+                elif action == "abort":
+                    self._run_on_loop(self.abort())
+                elif action == "set_mic_muted":
+                    self.set_mic_muted(bool(payload.get("muted", False)))
+                elif action == "set_tts_muted":
+                    self.set_tts_muted(bool(payload.get("muted", False)))
+        except Exception:
+            pass
+
 
 async def main():
     """Example usage."""
@@ -384,17 +487,28 @@ async def main():
     load_dotenv()
     
     config = JuanaConfig(
-        worker_url=os.getenv("APOLLO_WORKER_URL", "wss://apollo.facupapollo.workers.dev"),
+        worker_url=os.getenv("APOLLO_WORKER_URL", "wss://apollo.facupapollo.workers.dev/agents/apollo/default"),
         device_shared_secret=os.getenv("DEVICE_SHARED_SECRET", ""),
+        use_local_core=os.getenv("USE_LOCAL_CORE", "true").lower() not in ("false", "0", "no"),
+        core_lan_url=os.getenv("CORE_LAN_URL", "ws://192.168.100.8:9876"),
     )
     
     client = JuanaClient(config)
     
     def on_state_change(state):
         print(f"State: {state.value}")
+        print(json.dumps({
+            "type": "connection_state",
+            "state": state.value,
+        }, ensure_ascii=False))
     
     def on_ui_state(ui):
         print(f"UI State: {ui.state}, Caption: {ui.caption}")
+        print(json.dumps({
+            "type": "ui_state",
+            "state": ui.state,
+            "caption": ui.caption,
+        }, ensure_ascii=False))
     
     def on_audio_start():
         print("Audio playback started")
@@ -405,11 +519,20 @@ async def main():
     def on_turn_end(expects_reply):
         print(f"Turn ended, expects_reply: {expects_reply}")
     
+    def on_text_response(msg):
+        print(json.dumps({
+            "type": "text_response",
+            "text": msg.text,
+            "session_id": msg.session_id,
+            "ts": getattr(msg, "ts", int(time.time() * 1000)),
+        }, ensure_ascii=False))
+    
     client.on_state_change = on_state_change
     client.on_ui_state = on_ui_state
     client.on_audio_start = on_audio_start
     client.on_audio_end = on_audio_end
     client.on_turn_end = on_turn_end
+    client.on_text_response = on_text_response
     
     try:
         await client.connect()

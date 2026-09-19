@@ -135,6 +135,18 @@ No commitment on any of these.
 - **Multi-device** — the protocol already routes by `device_id`; formalize a second Apollo
   with shared memory and reminders. Note that installed MCP servers are per-instance, so
   this needs a decision about what a second device inherits.
+- **Smart home via Home Assistant (diseño pausado, sin implementar)** — no comprar ni
+  codear nada hasta tener hardware. Decisión tomada: la tool `smart_home_control` le hablará
+  a una instancia de Home Assistant vía su API REST (`POST /api/services/{domain}/{service}`
+  para actuar, `GET /api/states/{entity_id}` para leer) en vez de a MQTT directo — HA ya
+  abstrae Zigbee/Z-Wave/WiFi, evita un broker y un socket persistente en el Worker, y el
+  precedente (`ha_config.py` en JARVIS_NATIVE) ya valida ese camino con `fetch`. Secrets
+  opcionales `HA_URL`/`HA_TOKEN` (degradan a "no configurado" si faltan). La tool llevará
+  `{ room, device, action, color, brightness }` con `safety: 'unsafe'` (pide confirmación),
+  más un mapa de alias vocales → `entity_id` (`"living" → light.salon`, etc.) cargado de
+  configuración, no del código. Ejemplos hablados: "prendé la luz del living", "poné el
+  comedor en rojo tenue". La Juana Manso como Google Home y el comando por voz salen gratis
+  del pipeline existente; este item es solo la tool + el alias map.
 
 ## Known warts
 
