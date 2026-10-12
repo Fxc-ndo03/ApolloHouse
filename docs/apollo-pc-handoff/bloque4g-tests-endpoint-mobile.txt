@@ -1,0 +1,1083 @@
+# BLOQUE: bloque4g-tests-endpoint-mobile
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\endpoint.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+
+import { MobileDeviceEndpoint } from '@/devices/endpoint';
+import {
+  authorizeMobileDeviceRequest,
+  MOBILE_BRIDGE_ROUTE_PREFIX,
+  resolveMobileBridgeRoute,
+} from '@/devices/route';
+import { MOBILE_BRIDGE_INSTANCE_NAME } from '@/devices/bridge-client';
+import { buildAuthenticatedDeviceProof } from '@/devices/registry';
+import { PRESENCE_OFFLINE_AFTER_MILLISECONDS } from '@/devices/presence';
+import type { HeartbeatTimerHandle, HeartbeatTimerPort } from '@/devices/heartbeat';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Integration del endpoint mobile (Â§10, Â§11).
+//
+// Recorre el camino completo: request HTTP -> decisiÃ³n de ruta -> upgrade ->
+// auth boundary -> MobilePeerTransport -> DeviceSessionLifecycle -> Registry.
+// Lo Ãºnico inyectado es el socket (una primitiva de la plataforma) y el timer;
+// el registry, el lifecycle, el transport y la ruta son los de producciÃ³n.
+//
+// Lo que NO entra acÃ¡ es el upgrade real del Durable Object: la clase del DO
+// importa `cloudflare:` a travÃ©s del SDK de agents y no se puede cargar bajo
+// bun. route.spec.ts cubre la decisiÃ³n de ruta y esta spec cubre el endpoint.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const TEST_DEVICE_SHARED_SECRET = 'test-device-shared-secret';
+const TEST_DASHBOARD_SHARED_SECRET = 'test-dashboard-shared-secret';
+const START = 1_700_000_000_000;
+
+const ENVIRONMENT = {
+  DEVICE_SHARED_SECRET: TEST_DEVICE_SHARED_SECRET,
+  DASHBOARD_SHARED_SECRET: TEST_DASHBOARD_SHARED_SECRET,
+} as unknown as Env;
+
+class FakeWebSocket {
+  readonly sentMessageList: string[] = [];
+  closeCallCount = 0;
+
+  send(messageText: string): void {
+    this.sentMessageList.push(messageText);
+  }
+
+  close(): void {
+    this.closeCallCount += 1;
+  }
+
+  listParsedMessageList(): Record<string, unknown>[] {
+    return this.sentMessageList.map(
+      (messageText) => JSON.parse(messageText) as Record<string, unknown>,
+    );
+  }
+}
+
+class CountingTimerPort implements HeartbeatTimerPort {
+  #nextHandle = 1;
+  readonly #activeHandleSet = new Set<number>();
+  createdCount = 0;
+
+  setInterval(): HeartbeatTimerHandle {
+    this.createdCount += 1;
+    const handle = this.#nextHandle;
+    this.#nextHandle += 1;
+    this.#activeHandleSet.add(handle);
+    return handle;
+  }
+
+  clearInterval(handle: HeartbeatTimerHandle): void {
+    this.#activeHandleSet.delete(handle as number);
+  }
+
+  get activeCount(): number {
+    return this.#activeHandleSet.size;
+  }
+}
+
+function buildHello(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: 'hello',
+    deviceId: 'mobile:phone-123',
+    deviceType: 'mobile',
+    protocolVersion: 1,
+    capabilities: ['mobile.notifications'],
+    ts: START,
+    ...overrides,
+  });
+}
+
+type Harness = {
+  readonly endpoint: MobileDeviceEndpoint;
+  readonly timerPort: CountingTimerPort;
+  readonly setNow: (value: number) => void;
+};
+
+function buildEndpoint(now: number = START): Harness {
+  let current = now;
+  const timerPort = new CountingTimerPort();
+  const endpoint = new MobileDeviceEndpoint({
+    nowMilliseconds: () => current,
+    timerPort,
+  });
+  return { endpoint, timerPort, setNow: (value: number) => (current = value) };
+}
+
+// El request real que harÃ­a el telÃ©fono, pasado por la decisiÃ³n de ruta y por el
+// lÃ­mite de autenticaciÃ³n, antes de tocar el endpoint.
+async function authorizeUpgrade(
+  pathname: string,
+  token: string | null,
+): Promise<Response | undefined> {
+  const routeDecision = resolveMobileBridgeRoute({
+    pathname,
+    upgradeHeader: 'websocket',
+  });
+  if (!routeDecision.isMobileBridgeRoute) {
+    return new Response('Not a mobile route', { status: 404 });
+  }
+  const url = new URL(`https://apollo.example${pathname}`);
+  if (token !== null) {
+    url.searchParams.set('token', token);
+  }
+  const authDecision = await authorizeMobileDeviceRequest({
+    request: new Request(url.toString(), { headers: { Upgrade: 'websocket' } }),
+    environment: ENVIRONMENT,
+  });
+  return authDecision.isAuthorized ? undefined : authDecision.response;
+}
+
+function connectAuthorized(
+  endpoint: MobileDeviceEndpoint,
+  connectionId: string,
+): FakeWebSocket {
+  const socket = new FakeWebSocket();
+  endpoint.handleConnect({
+    connectionId,
+    port: socket,
+    proof: buildAuthenticatedDeviceProof('device'),
+  });
+  return socket;
+}
+
+describe('B8.1 Â§2+Â§11: request -> route -> upgrade -> session -> registry', () => {
+  it('the full happy path registers an authenticated session', async () => {
+    // 1. request + route
+    expect(
+      await authorizeUpgrade(
+        `${MOBILE_BRIDGE_ROUTE_PREFIX}/${MOBILE_BRIDGE_INSTANCE_NAME}`,
+        TEST_DEVICE_SHARED_SECRET,
+      ),
+    ).toBeUndefined();
+
+    // 2. upgrade: el socket aparece y todavÃ­a NO es un dispositivo.
+    const harness = buildEndpoint();
+    const socket = connectAuthorized(harness.endpoint, 'mobile-1');
+    expect(harness.endpoint.listConnectedCount()).toBe(1);
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+
+    // 3. mobile hello autenticado
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    const accepted = socket.listParsedMessageList()[0];
+    expect(accepted?.['type']).toBe('hello_accepted');
+
+    // 4. sesiÃ³n en el registry
+    const session = harness.endpoint.registry.getDevice('mobile:phone-123');
+    expect(session?.authenticated).toBe(true);
+    expect(session?.transport.transportKind).toBe('mobile_websocket');
+    expect(session?.transport.connectionId).toBe('mobile-1');
+    expect(session?.presence).toBe('online');
+    expect(session?.connectedAt).toBe(START);
+
+    // 5. heartbeat scheduler por sesiÃ³n
+    expect(harness.timerPort.activeCount).toBe(1);
+  });
+
+  it('7. invalid auth never produces a session', async () => {
+    // Sin token el borde corta antes del upgrade.
+    expect(
+      (await authorizeUpgrade(`${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`, null))?.status,
+    ).toBe(401);
+
+    // Y si el socket llegara sin proof igual, el handshake no registra nada.
+    const harness = buildEndpoint();
+    const socket = new FakeWebSocket();
+    harness.endpoint.handleConnect({
+      connectionId: 'mobile-1',
+      port: socket,
+      proof: null,
+    });
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(socket.listParsedMessageList()[0]?.['type']).toBe('hello_rejected');
+    expect(harness.timerPort.activeCount).toBe(0);
+  });
+
+  it('8. a malformed hello is rejected without a session', async () => {
+    const harness = buildEndpoint();
+    const socket = connectAuthorized(harness.endpoint, 'mobile-1');
+    for (const malformed of [
+      JSON.stringify({ type: 'hello' }),
+      JSON.stringify({ type: 'hello', deviceId: 'mobile:x', ts: START }),
+    ]) {
+      harness.endpoint.handleMessage('mobile-1', malformed);
+    }
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(harness.timerPort.activeCount).toBe(0);
+    // El socket sigue vivo: un mensaje malo no cierra la conexiÃ³n.
+    expect(harness.endpoint.listConnectedCount()).toBe(1);
+    // Los dos hellos invÃ¡lidos reciben el motivo.
+    expect(socket.listParsedMessageList()).toHaveLength(2);
+    expect(
+      socket
+        .listParsedMessageList()
+        .every((message) => message['type'] === 'hello_rejected'),
+    ).toBe(true);
+  });
+
+  it('a non-hello malformed message is ignored in silence', () => {
+    const harness = buildEndpoint();
+    const socket = connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', 'not json at all');
+    harness.endpoint.handleMessage('mobile-1', JSON.stringify({ type: 'garbage' }));
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(harness.endpoint.listConnectedCount()).toBe(1);
+    expect(socket.sentMessageList).toHaveLength(0);
+  });
+
+  it('9. a wrong deviceType is rejected', () => {
+    const harness = buildEndpoint();
+    const socket = connectAuthorized(harness.endpoint, 'mobile-1');
+    // El hello mobile exige deviceType 'mobile' literal: 'desktop' no entra al
+    // contrato y el device recibe hello_rejected.
+    harness.endpoint.handleMessage('mobile-1', buildHello({ deviceType: 'desktop' }));
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(socket.listParsedMessageList()[0]?.['type']).toBe('hello_rejected');
+    expect(socket.listParsedMessageList()[0]?.['reason']).toBe('malformed_hello');
+
+    // Y un deviceId de desktop con deviceType mobile cae en la validaciÃ³n de
+    // identidad, con su propio motivo.
+    harness.endpoint.handleMessage('mobile-1', buildHello({ deviceId: 'desktop:pc' }));
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(String(socket.listParsedMessageList()[1]?.['reason'])).toContain(
+      'device_id_type_mismatch',
+    );
+  });
+
+  it('10. a hostname-derived mobile identity is rejected', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    // El endpoint nunca fabrica una identidad legacy: el hello mobile no puede
+    // declararla, y el registry la rechaza si alguien lo intenta por abajo.
+    const hello = JSON.parse(buildHello()) as Record<string, unknown>;
+    hello['hostname'] = 'PC-ESTUDIO';
+    harness.endpoint.handleMessage('mobile-1', JSON.stringify(hello));
+    expect(harness.endpoint.registry.getDevice('mobile:phone-123')?.identitySource).toBe(
+      'client_provided',
+    );
+
+    const legacy = harness.endpoint.registry.register({
+      proof: buildAuthenticatedDeviceProof('device'),
+      deviceId: 'mobile:PC-ESTUDIO',
+      deviceType: 'mobile',
+      capabilityNameList: ['mobile.alarm'],
+      protocolVersion: 1,
+      identitySource: 'desktop_hostname_legacy',
+      transport: { transportKind: 'mobile_websocket', connectionId: 'mobile-9' },
+    });
+    expect(legacy.status).toBe('rejected');
+  });
+
+  it('11. an unsupported protocol version never negotiates a partial session', async () => {
+    const harness = buildEndpoint();
+    const socket = connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', buildHello({ protocolVersion: 999 }));
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    const rejection = socket.listParsedMessageList()[0];
+    expect(rejection?.['type']).toBe('hello_rejected');
+    expect(String(rejection?.['reason'])).toContain('protocolVersion incompatible');
+    // Ni scheduler, ni presencia: una negociaciÃ³n fallida no deja rastro.
+    expect(harness.timerPort.activeCount).toBe(0);
+    expect(harness.endpoint.lifecycle.listHeartbeatSchedulerCount()).toBe(0);
+  });
+
+  it('4. a heartbeat from a connected mobile updates lastSeenAt', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    harness.endpoint.handleMessage(
+      'mobile-1',
+      JSON.stringify({ type: 'heartbeat', ts: START + 30_000 }),
+    );
+    expect(harness.endpoint.registry.getDevice('mobile:phone-123')?.lastSeenAt).toBe(
+      START + 30_000,
+    );
+  });
+
+  it('a heartbeat before the hello does not create anything', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage(
+      'mobile-1',
+      JSON.stringify({ type: 'heartbeat', ts: START + 1000 }),
+    );
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+  });
+
+  it('5. closing the socket stops the heartbeat and takes the device offline', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    expect(harness.timerPort.activeCount).toBe(1);
+
+    harness.endpoint.handleClose('mobile-1');
+
+    expect(harness.timerPort.activeCount).toBe(0);
+    expect(harness.endpoint.registry.getDevice('mobile:phone-123')?.presence).toBe(
+      'offline',
+    );
+    expect(harness.endpoint.listConnectedCount()).toBe(0);
+    // Un cierre no deja sesiÃ³n seleccionable.
+    expect(harness.endpoint.registry.listSelectableSessionList()).toHaveLength(0);
+  });
+
+  it('closing an unknown connection is a no-op', () => {
+    const harness = buildEndpoint();
+    expect(harness.endpoint.handleClose('nope')).toBe(false);
+  });
+
+  it('9(heartbeat). a heartbeat timeout takes the device offline', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    harness.setNow(START + PRESENCE_OFFLINE_AFTER_MILLISECONDS + 1);
+    expect(harness.endpoint.registry.resolvePresence('mobile:phone-123')).toBe('offline');
+    expect(harness.endpoint.registry.listSelectableSessionList()).toHaveLength(0);
+  });
+
+  it('6+14. a reconnect is one logical device with one heartbeat scheduler', async () => {
+    const harness = buildEndpoint();
+    const firstSocket = connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage(
+      'mobile-1',
+      buildHello({ capabilities: ['mobile.alarm'] }),
+    );
+    harness.endpoint.handleClose('mobile-1');
+    expect(harness.timerPort.activeCount).toBe(0);
+
+    const secondSocket = connectAuthorized(harness.endpoint, 'mobile-2');
+    harness.endpoint.handleMessage(
+      'mobile-2',
+      buildHello({ capabilities: ['mobile.alarm', 'mobile.calendar'] }),
+    );
+
+    // Un solo dispositivo lÃ³gico.
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(1);
+    const session = harness.endpoint.registry.getDevice('mobile:phone-123');
+    expect(session?.transport.connectionId).toBe('mobile-2');
+    expect(session?.presence).toBe('online');
+    expect(session?.declaredCapabilities).toEqual(['mobile.alarm', 'mobile.calendar']);
+    // Block 11: ambas tienen comando real, asÃ­ que declarado == disponible.
+    expect(session?.availableCapabilities).toEqual(['mobile.alarm', 'mobile.calendar']);
+
+    // Un solo scheduler: el reconnect reutiliza la instancia por deviceId.
+    expect(harness.endpoint.lifecycle.listHeartbeatSchedulerCount()).toBe(1);
+    expect(harness.timerPort.activeCount).toBe(1);
+    expect(harness.timerPort.createdCount).toBe(2);
+    expect(firstSocket.sentMessageList.length).toBeGreaterThan(0);
+    expect(secondSocket.listParsedMessageList()[0]?.['type']).toBe('hello_accepted');
+  });
+
+  it('12. a duplicate connection keeps one entry and one session per device', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    // El mismo socket reenvÃ­a el hello (p. ej. un retry del cliente).
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(1);
+    expect(harness.endpoint.lifecycle.listHeartbeatSchedulerCount()).toBe(1);
+    expect(harness.timerPort.activeCount).toBe(1);
+    expect(harness.timerPort.createdCount).toBe(1);
+    expect(harness.endpoint.listConnectedCount()).toBe(1);
+  });
+
+  it('13. two different devices coexist as two sessions on one endpoint', async () => {
+    const harness = buildEndpoint();
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    connectAuthorized(harness.endpoint, 'mobile-2');
+    harness.endpoint.handleMessage(
+      'mobile-1',
+      buildHello({ deviceId: 'mobile:phone-123' }),
+    );
+    harness.endpoint.handleMessage(
+      'mobile-2',
+      buildHello({ deviceId: 'mobile:tablet-9' }),
+    );
+
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(2);
+    expect(harness.endpoint.listConnectedCount()).toBe(2);
+    // Un scheduler por device: dos devices, dos timers.
+    expect(harness.endpoint.lifecycle.listHeartbeatSchedulerCount()).toBe(2);
+    expect(harness.timerPort.activeCount).toBe(2);
+  });
+
+  it('a message for an unknown connection is ignored', () => {
+    const harness = buildEndpoint();
+    harness.endpoint.handleMessage('nope', buildHello());
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+  });
+
+  it('a non-string socket message is ignored', () => {
+    const harness = buildEndpoint();
+    const socket = connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleRawMessage('mobile-1', new Uint8Array([1, 2, 3]));
+    harness.endpoint.handleRawMessage('mobile-1', { type: 'hello' });
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(socket.sentMessageList).toHaveLength(0);
+  });
+
+  it('15. the desktop path is unaffected by the mobile endpoint', () => {
+    const harness = buildEndpoint();
+    // Registrar un desktop en el mismo registry no interactÃºa con mobile.
+    const outcome = harness.endpoint.registry.register({
+      proof: buildAuthenticatedDeviceProof('device'),
+      deviceId: 'desktop:PC-ESTUDIO',
+      deviceType: 'desktop',
+      capabilityNameList: ['desktop.open_app'],
+      protocolVersion: 1,
+      lastSeenAt: START,
+      transport: { transportKind: 'pc_bridge', connectionId: 'desktop:PC-ESTUDIO' },
+    });
+    expect(outcome.status).toBe('registered');
+
+    connectAuthorized(harness.endpoint, 'mobile-1');
+    harness.endpoint.handleMessage('mobile-1', buildHello());
+    expect(harness.endpoint.registry.listDeviceList()).toHaveLength(2);
+
+    const desktopResolution = harness.endpoint.registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'desktop' },
+    });
+    expect(desktopResolution.status).toBe('resolved');
+    if (desktopResolution.status === 'resolved') {
+      expect(desktopResolution.device.deviceId).toBe('desktop:PC-ESTUDIO');
+    }
+    // BLOCK 9: mobile.notifications ahora tiene implementaciÃ³n, asÃ­ que el
+    // mobile la resuelve y el desktop nunca puede ser su target.
+    const mobileResolution = harness.endpoint.registry.resolveTarget({
+      capabilityName: 'mobile.notifications',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(mobileResolution.status).toBe('resolved');
+    if (mobileResolution.status === 'resolved') {
+      expect(mobileResolution.device.deviceId).toBe('mobile:phone-123');
+      expect(mobileResolution.device.deviceType).toBe('mobile');
+    }
+    // Con preferencia 'any', la capability mobile sigue yendo al mobile: jamÃ¡s
+    // al desktop aunque estÃ© online.
+    const anyResolution = harness.endpoint.registry.resolveTarget({
+      capabilityName: 'mobile.notifications',
+      targetPreference: { kind: 'any' },
+    });
+    expect(anyResolution.status).toBe('resolved');
+    if (anyResolution.status === 'resolved') {
+      expect(anyResolution.device.deviceType).toBe('mobile');
+    }
+    // Y una capability unimplemented sigue sin target. Block 11 dejÃ³ todas las
+    // mobile con comando real, asÃ­ que la unimplemented de ejemplo es desktop.
+    const unimplementedResolution = harness.endpoint.registry.resolveTarget({
+      capabilityName: 'desktop.files',
+      targetPreference: { kind: 'any' },
+    });
+    expect(unimplementedResolution.status).toBe('unavailable');
+    if (unimplementedResolution.status === 'unavailable') {
+      expect(unimplementedResolution.reason).toBe('unimplemented');
+    }
+  });
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\mobile.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { buildAuthenticatedDeviceProof, CapabilityRegistry } from '@/devices/registry';
+import {
+  isDeviceIdentityRejection,
+  parseDeviceIdentity,
+  type DeviceIdentitySource,
+} from '@/devices/identity';
+import {
+  describeCapability,
+  describeCapabilityDeviceType,
+  isImplementedCapability,
+  isPcBridgeBackedCapability,
+  listCapabilityNameForDeviceType,
+  MOBILE_CAPABILITY_NAME_LIST,
+} from '@/devices/capability';
+import {
+  buildRegistryCapabilityTargetResolver,
+  buildTargetPreferenceForCapabilityName,
+  buildCapabilityResolverMap,
+  resolveCapabilityTargetForDeviceType,
+} from '@/devices/target';
+import { ANY_TARGET_PREFERENCE, type TargetPreference } from '@/devices/schema';
+import { PRESENCE_OFFLINE_AFTER_MILLISECONDS } from '@/devices/presence';
+import { buildDesktopRegistrationFromHello } from '@/devices/desktop';
+import { pcToServerMessageSchema } from '@/protocol/schema';
+import { listBuiltinToolDefinitionList } from '@/tools/catalog';
+import { buildToolDefinitionMap } from '@/tools/router';
+import { resolveCapabilityForToolName } from '@/tools/capability-index';
+import type { CapabilityName } from '@/devices/capability';
+
+const proof = buildAuthenticatedDeviceProof('device');
+const START = 1_700_000_000_000;
+const SOURCE_ROOT = join(import.meta.dir, '..', '..');
+
+function buildRegistry(nowMilliseconds = START): {
+  readonly registry: CapabilityRegistry;
+  readonly setNow: (value: number) => void;
+} {
+  let now = nowMilliseconds;
+  const registry = new CapabilityRegistry({ nowMilliseconds: () => now });
+  return { registry, setNow: (value: number) => (now = value) };
+}
+
+function registerDesktop(registry: CapabilityRegistry, deviceId = 'desktop:pc'): void {
+  const outcome = registry.register({
+    transport: { transportKind: 'pc_bridge', connectionId: 'connection-under-test' },
+    proof,
+    deviceId,
+    deviceType: 'desktop',
+    identitySource: 'client_provided',
+    capabilityNameList: ['desktop.open_app', 'desktop.close_app', 'desktop.spotify'],
+    protocolVersion: 1,
+    lastSeenAt: START,
+  });
+  expect(outcome.status).toBe('registered');
+}
+
+function registerMobile(
+  registry: CapabilityRegistry,
+  options: {
+    readonly deviceId?: string;
+    readonly identitySource?: DeviceIdentitySource;
+    readonly capabilityNameList?: readonly CapabilityName[];
+  } = {},
+): { readonly status: string; readonly reason?: string } {
+  const outcome = registry.register({
+    transport: {
+      transportKind: 'mobile_websocket',
+      connectionId: 'connection-under-test',
+    },
+    proof,
+    deviceId: options.deviceId ?? 'mobile:phone-123',
+    deviceType: 'mobile',
+    identitySource: options.identitySource ?? 'client_provided',
+    capabilityNameList: options.capabilityNameList ?? [
+      'mobile.open_app',
+      'mobile.notifications',
+      'mobile.alarm',
+    ],
+    protocolVersion: 1,
+    lastSeenAt: START,
+  });
+  return outcome.status === 'rejected'
+    ? { status: outcome.status, reason: outcome.reason }
+    : { status: outcome.status };
+}
+
+describe('B7 Â§1: device identity', () => {
+  it('accepts a well-formed deviceId for both types', () => {
+    for (const [deviceId, deviceType] of [
+      ['desktop:PC-ESTUDIO', 'desktop'],
+      ['mobile:phone-123', 'mobile'],
+    ] as const) {
+      const identity = parseDeviceIdentity({
+        deviceId,
+        deviceType,
+        identitySource: 'client_provided',
+      });
+      expect(isDeviceIdentityRejection(identity)).toBe(false);
+    }
+  });
+
+  it('rejects a deviceId whose type does not match the declared type', () => {
+    const identity = parseDeviceIdentity({
+      deviceId: 'mobile:phone-123',
+      deviceType: 'desktop',
+      identitySource: 'client_provided',
+    });
+    expect(isDeviceIdentityRejection(identity)).toBe(true);
+    if (isDeviceIdentityRejection(identity)) {
+      expect(identity.reason).toBe('device_id_type_mismatch');
+    }
+  });
+
+  it('rejects a malformed deviceId', () => {
+    for (const malformedDeviceId of ['phone-123', ':phone', 'mobile:', 'wat:x']) {
+      const identity = parseDeviceIdentity({
+        deviceId: malformedDeviceId,
+        deviceType: 'mobile',
+        identitySource: 'client_provided',
+      });
+      expect(isDeviceIdentityRejection(identity)).toBe(true);
+    }
+  });
+
+  it('mobile cannot be registered with a hostname-derived identity', () => {
+    const { registry } = buildRegistry();
+    const rejection = registerMobile(registry, {
+      identitySource: 'desktop_hostname_legacy',
+    });
+    expect(rejection.status).toBe('rejected');
+    expect(rejection.reason).toContain('mobile_requires_client_provided_identity');
+    expect(registry.listDeviceList()).toHaveLength(0);
+  });
+
+  it('desktop keeps its legacy hostname identity working', () => {
+    const hello = pcToServerMessageSchema.parse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: START,
+    });
+    if (hello.type !== 'hello') {
+      throw new Error('expected hello');
+    }
+    const registration = buildDesktopRegistrationFromHello({
+      hello,
+      hostname: 'PC-ESTUDIO',
+      nowMilliseconds: START,
+    });
+    expect(registration.deviceId).toBe('desktop:PC-ESTUDIO');
+    expect(registration.identitySource).toBe('desktop_hostname_legacy');
+
+    // El registry lo acepta: el desktop no se rompe.
+    const { registry } = buildRegistry();
+    const outcome = registry.register({
+      transport: { transportKind: 'pc_bridge', connectionId: 'connection-under-test' },
+      proof,
+      deviceId: registration.deviceId,
+      deviceType: registration.deviceType,
+      identitySource: registration.identitySource,
+      capabilityNameList: registration.capabilityNameList,
+      protocolVersion: registration.protocolVersion,
+      lastSeenAt: registration.lastSeenAt,
+    });
+    expect(outcome.status).toBe('registered');
+  });
+
+  it('1. the desktop registry keeps working exactly as before', () => {
+    const { registry } = buildRegistry();
+    registerDesktop(registry);
+    expect(registry.getDevice('desktop:pc')?.deviceType).toBe('desktop');
+    expect(registry.getDevice('desktop:pc')?.presence).toBe('online');
+    expect(
+      registry.resolveTarget({
+        capabilityName: 'desktop.open_app',
+        targetPreference: { kind: 'device_type', deviceType: 'desktop' },
+      }).status,
+    ).toBe('resolved');
+  });
+});
+
+describe('B7 Â§2-3: mobile capability contract', () => {
+  it('2. all six mobile capabilities are declared', () => {
+    expect(MOBILE_CAPABILITY_NAME_LIST.length).toBe(6);
+    expect(MOBILE_CAPABILITY_NAME_LIST).toEqual([
+      'mobile.open_app',
+      'mobile.notifications',
+      'mobile.alarm',
+      'mobile.calendar',
+      'mobile.media',
+      'mobile.volume',
+    ]);
+  });
+
+  it('every mobile capability is declared for mobile', () => {
+    for (const capabilityName of MOBILE_CAPABILITY_NAME_LIST) {
+      const contract = describeCapability(capabilityName);
+      expect(contract.deviceType).toBe('mobile');
+      // Ninguna capability mobile puede reclamar un comando de PcBridge.
+      expect(isPcBridgeBackedCapability(capabilityName)).toBe(false);
+    }
+  });
+
+  it('BLOCK 11: every mobile capability is implemented with a real command', () => {
+    for (const capabilityName of MOBILE_CAPABILITY_NAME_LIST) {
+      const contract = describeCapability(capabilityName);
+      expect(contract.status).toBe('implemented');
+      expect(contract.deviceType).toBe('mobile');
+      expect(contract.commandList.length).toBeGreaterThan(0);
+      expect(isImplementedCapability(capabilityName)).toBe(true);
+    }
+    expect(describeCapability('mobile.notifications').commandList).toEqual([
+      'notification_post',
+    ]);
+    expect(describeCapability('mobile.alarm').commandList).toEqual([
+      'alarm_set',
+      'alarm_cancel',
+    ]);
+    expect(describeCapability('mobile.open_app').commandList).toEqual(['app_open']);
+  });
+
+  it('3. a mobile device can declare mobile capabilities', () => {
+    const { registry } = buildRegistry();
+    expect(registerMobile(registry).status).toBe('registered');
+    const device = registry.getDevice('mobile:phone-123');
+    expect(device?.deviceType).toBe('mobile');
+    expect(device?.declaredCapabilities).toContain('mobile.notifications');
+    // BLOCK 11: todas las mobile declaradas tienen implementaciÃ³n real, asÃ­ que
+    // lo declarado queda disponible. El gate de deviceType sigue aplicando: una
+    // mobile no puede declarar una desktop (ver "12." abajo).
+    expect(device?.availableCapabilities).toEqual([
+      'mobile.open_app',
+      'mobile.notifications',
+      'mobile.alarm',
+    ]);
+  });
+
+  it('4. an unimplemented capability is never resolvable', () => {
+    // BLOCK 11 ya no quedan mobile unimplemented, asÃ­ que la invariante se
+    // prueba con las desktop contract-only, que es el mismo gate
+    // (isImplementedCapability) y sigue siendo la frontera real.
+    const { registry } = buildRegistry();
+    registerMobile(registry);
+    for (const capabilityName of ['desktop.volume', 'desktop.notifications'] as const) {
+      const resolution = registry.resolveTarget({
+        capabilityName,
+        targetPreference: ANY_TARGET_PREFERENCE,
+      });
+      expect(resolution.status).toBe('unavailable');
+      if (resolution.status === 'unavailable') {
+        expect(resolution.reason).toBe('unimplemented');
+      }
+    }
+  });
+
+  it('4b. a mobile session can never resolve a desktop capability', () => {
+    // Aislamiento cross-device (BLOCK 11 Â§19): el deviceType sale del catÃ¡logo,
+    // no del prefijo del texto.
+    const { registry } = buildRegistry();
+    registerMobile(registry);
+    const resolution = registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(resolution.status).toBe('unavailable');
+  });
+
+  it('the catalog exposes capabilities per device type', () => {
+    expect(listCapabilityNameForDeviceType('mobile')).toEqual([
+      'mobile.open_app',
+      'mobile.notifications',
+      'mobile.alarm',
+      'mobile.calendar',
+      'mobile.media',
+      'mobile.volume',
+    ]);
+    expect(listCapabilityNameForDeviceType('desktop')).toContain('desktop.open_app');
+    expect(listCapabilityNameForDeviceType('desktop')).not.toContain('mobile.media');
+    expect(describeCapabilityDeviceType('desktop.spotify')).toBe('desktop');
+  });
+
+  it('every capability a tool puede alcanzar estÃ¡ implementada', () => {
+    const toolDefinitionMap = buildToolDefinitionMap(listBuiltinToolDefinitionList());
+    for (const toolDefinition of listBuiltinToolDefinitionList()) {
+      const capabilityName = resolveCapabilityForToolName(
+        toolDefinitionMap,
+        toolDefinition.name,
+      );
+      if (capabilityName === undefined) {
+        continue;
+      }
+      // Una tool nunca puede apuntar a un contrato unimplemented: el target no
+      // resolverÃ­a y la tool no podrÃ­a ejecutarse nunca.
+      expect(isImplementedCapability(capabilityName)).toBe(true);
+      // Y el deviceType del contrato tiene que existir como tipo real.
+      expect(['desktop', 'mobile']).toContain(
+        describeCapabilityDeviceType(capabilityName),
+      );
+    }
+  });
+});
+
+describe('B7 Â§4+6: target resolution is device-agnostic', () => {
+  it('5. resolves by deviceType=mobile', async () => {
+    const { registry } = buildRegistry();
+    registerMobile(registry);
+    const resolver = buildRegistryCapabilityTargetResolver(registry);
+    // La interfaz acepta un preference por tipo sin conocer transports.
+    const preference: TargetPreference = { kind: 'device_type', deviceType: 'mobile' };
+    expect(preference).toEqual({ kind: 'device_type', deviceType: 'mobile' });
+    // Con la capability unimplemented la respuesta es 'unimplemented', no un
+    // device cualquiera.
+    // BLOCK 9: mobile.notifications tiene implementaciÃ³n, asÃ­ que con un device
+    // que la declare resuelve contra el mobile.
+    const resolution = await resolver({
+      capabilityName: 'mobile.notifications',
+      targetPreference: preference,
+    });
+    expect(resolution.status).toBe('resolved');
+    if (resolution.status === 'resolved') {
+      expect(resolution.target.deviceId).toBe('mobile:phone-123');
+      expect(resolution.target.deviceType).toBe('mobile');
+    }
+  });
+
+  it('6. resolves by deviceId', async () => {
+    const { registry } = buildRegistry();
+    registerMobile(registry, { deviceId: 'mobile:phone-123' });
+    const resolver = buildRegistryCapabilityTargetResolver(registry);
+    const byDeviceId = await resolver({
+      capabilityName: 'mobile.alarm',
+      targetPreference: { kind: 'device', deviceId: 'mobile:phone-123' },
+    });
+    // Block 11: mobile.alarm ya tiene comando, asÃ­ que resolver por deviceId
+    // ahora sÃ­ encuentra el telÃ©fono declarado.
+    expect(byDeviceId.status).toBe('resolved');
+    if (byDeviceId.status === 'resolved') {
+      expect(byDeviceId.target.deviceId).toBe('mobile:phone-123');
+    }
+    // Un deviceId que no existe tampoco se inventa.
+    const unknownDevice = await resolver({
+      capabilityName: 'mobile.alarm',
+      targetPreference: { kind: 'device', deviceId: 'mobile:inexistente' },
+    });
+    expect(unknownDevice.status).toBe('unavailable');
+  });
+
+  it('a capability contract derives its own target preference', () => {
+    expect(buildTargetPreferenceForCapabilityName('desktop.open_app')).toEqual({
+      kind: 'device_type',
+      deviceType: 'desktop',
+    });
+    expect(buildTargetPreferenceForCapabilityName('mobile.notifications')).toEqual({
+      kind: 'device_type',
+      deviceType: 'mobile',
+    });
+  });
+
+  it('a resolver map resolves per device type without importing transports', async () => {
+    const desktopRegistry = buildRegistry();
+    registerDesktop(desktopRegistry.registry);
+    const mobileRegistry = buildRegistry();
+    registerMobile(mobileRegistry.registry);
+    const resolverMap = buildCapabilityResolverMap({
+      desktop: buildRegistryCapabilityTargetResolver(desktopRegistry.registry),
+      mobile: buildRegistryCapabilityTargetResolver(mobileRegistry.registry),
+    });
+
+    const desktopAnswer = await resolveCapabilityTargetForDeviceType({
+      resolverMap,
+      deviceType: 'desktop',
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'desktop' },
+    });
+    expect(desktopAnswer.status).toBe('resolved');
+
+    const mobileAnswer = await resolveCapabilityTargetForDeviceType({
+      resolverMap,
+      deviceType: 'mobile',
+      capabilityName: 'mobile.notifications',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(mobileAnswer.status).toBe('resolved');
+    if (mobileAnswer.status === 'resolved') {
+      expect(mobileAnswer.target.deviceType).toBe('mobile');
+    }
+  });
+
+  it('an unregistered device type has no resolver and says no_device', async () => {
+    const resolverMap = buildCapabilityResolverMap({});
+    const answer = await resolveCapabilityTargetForDeviceType({
+      resolverMap,
+      deviceType: 'mobile',
+      capabilityName: 'mobile.media',
+      targetPreference: ANY_TARGET_PREFERENCE,
+    });
+    expect(answer.status).toBe('unavailable');
+    if (answer.status === 'unavailable') {
+      expect(answer.reason).toBe('no_device');
+    }
+  });
+
+  it('11. desktop and mobile coexist without interfering', () => {
+    const { registry } = buildRegistry();
+    registerDesktop(registry, 'desktop:pc');
+    registerMobile(registry, { deviceId: 'mobile:phone-123' });
+
+    // Ambos devices viven en el mismo registry.
+    expect(
+      registry
+        .listDeviceList()
+        .map((device) => device.deviceId)
+        .toSorted(),
+    ).toEqual(['desktop:pc', 'mobile:phone-123']);
+
+    // La capability desktop sigue apuntando sÃ³lo al desktop.
+    expect(registry.listDeviceIdForCapabilityList('desktop.open_app')).toEqual([
+      'desktop:pc',
+    ]);
+    const desktopAnswer = registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'desktop' },
+    });
+    expect(desktopAnswer.status).toBe('resolved');
+
+    // La capability mobile se satisface con el mobile y NUNCA con el desktop.
+    expect(registry.listDeviceIdForCapabilityList('mobile.notifications')).toEqual([
+      'mobile:phone-123',
+    ]);
+    const mobileAnswer = registry.resolveTarget({
+      capabilityName: 'mobile.notifications',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(mobileAnswer.status).toBe('resolved');
+    if (mobileAnswer.status === 'resolved') {
+      expect(mobileAnswer.device.deviceId).toBe('mobile:phone-123');
+    }
+    // Un desktop online nunca puede ser target de mobile.notifications.
+    const anyAnswer = registry.resolveTarget({
+      capabilityName: 'mobile.notifications',
+      targetPreference: { kind: 'any' },
+    });
+    expect(anyAnswer.status).toBe('resolved');
+    if (anyAnswer.status === 'resolved') {
+      expect(anyAnswer.device.deviceType).toBe('mobile');
+    }
+  });
+});
+
+describe('B7 Â§5: availability reasons per device type', () => {
+  it('7. an offline mobile device reports target_unavailable for a desktop capability', () => {
+    const { registry } = buildRegistry();
+    registerMobile(registry);
+    registry.markPresence({ proof, deviceId: 'mobile:phone-123', presence: 'offline' });
+    const resolution = registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(resolution.status).toBe('unavailable');
+    if (resolution.status === 'unavailable') {
+      expect(['target_unavailable', 'capability_absent']).toContain(resolution.reason);
+    }
+  });
+
+  it('8. no mobile device at all reports the right reason', () => {
+    const { registry } = buildRegistry();
+    registerDesktop(registry);
+    const resolution = registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(resolution.status).toBe('unavailable');
+    if (resolution.status === 'unavailable') {
+      // Pide un tipo de device que no existe â†’ el target no estÃ¡ disponible.
+      expect(resolution.reason).toBe('target_unavailable');
+    }
+  });
+
+  it('9. capability_absent works independently of device type', () => {
+    const { registry } = buildRegistry();
+    registerMobile(registry, { capabilityNameList: ['mobile.alarm'] });
+    const resolution = registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+    });
+    expect(resolution.status).toBe('unavailable');
+    if (resolution.status === 'unavailable') {
+      expect(resolution.reason).toBe('capability_absent');
+    }
+  });
+
+  it('a stale mobile device stops being selectable, like desktop', () => {
+    let now = START;
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => now });
+    registerMobile(registry);
+    now = START + PRESENCE_OFFLINE_AFTER_MILLISECONDS + 1;
+    expect(registry.resolvePresence('mobile:phone-123')).toBe('offline');
+  });
+});
+
+function listSourceFilePathList(): string[] {
+  const filePathList: string[] = [];
+  const walk = (directoryPath: string): void => {
+    for (const entryName of readdirSync(directoryPath)) {
+      const entryPath = join(directoryPath, entryName);
+      if (statSync(entryPath).isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      if (entryName.endsWith('.ts') && !entryName.endsWith('.spec.ts')) {
+        filePathList.push(entryPath);
+      }
+    }
+  };
+  walk(SOURCE_ROOT);
+  return filePathList;
+}
+
+function stripComment(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+function toRelativePath(filePath: string): string {
+  return filePath.replace(SOURCE_ROOT, '').replace(/\\/g, '/').replace(/^\//, '');
+}
+
+describe('B7 Â§7+Â§9: structural guards', () => {
+  it('10. the registry never imports execution or handlers', () => {
+    const registrySource = stripComment(
+      readFileSync(join(SOURCE_ROOT, 'devices/registry.ts'), 'utf8'),
+    );
+    for (const forbidden of [
+      '@/tools/execution',
+      '@/tools/router',
+      '@/tools/types',
+      '.handler(',
+      'executeAuthorizedTool',
+      'authorizeToolExecution',
+    ]) {
+      expect(registrySource).not.toContain(forbidden);
+    }
+  });
+
+  it('12. target resolution does not depend on PcBridge', () => {
+    // devices/target.ts es el resolver device-agnostic: no conoce transports.
+    const targetSource = stripComment(
+      readFileSync(join(SOURCE_ROOT, 'devices/target.ts'), 'utf8'),
+    );
+    expect(targetSource).not.toContain('getAgentByName');
+    expect(targetSource).not.toContain('PcBridge');
+    expect(targetSource).not.toContain('@/tools/execution');
+
+    // Toda la capa de resoluciÃ³n (registry + target) es device-agnostic.
+    for (const moduleName of ['devices/registry.ts', 'devices/target.ts']) {
+      const moduleSource = stripComment(
+        readFileSync(join(SOURCE_ROOT, moduleName), 'utf8'),
+      );
+      expect(moduleSource).not.toContain('getAgentByName');
+      expect(moduleSource).not.toContain('@/devices/desktop');
+      expect(moduleSource).not.toContain('@/tools/execution');
+    }
+  });
+
+  it('the PcBridge transport lives only in the desktop device module', () => {
+    // Dentro de devices/, el transporte PcBridge sÃ³lo puede existir en el mÃ³dulo
+    // del deviceType que lo implementa (hoy: desktop).
+    const pcBridgeModuleList = listSourceFilePathList()
+      .filter((filePath) => toRelativePath(filePath).startsWith('devices/'))
+      .filter((filePath) =>
+        stripComment(readFileSync(filePath, 'utf8')).includes('getAgentByName'),
+      );
+    expect(pcBridgeModuleList.map(toRelativePath)).toEqual(['devices/desktop.ts']);
+  });
+
+  it('hostname is not a global identity source', () => {
+    // El hostname sÃ³lo puede aparecer como identidad legacy del desktop.
+    const hostnameModuleList = listSourceFilePathList().filter((filePath) =>
+      stripComment(readFileSync(filePath, 'utf8')).includes(
+        'buildDesktopDeviceIdFromHostname',
+      ),
+    );
+    expect(hostnameModuleList.map(toRelativePath)).toEqual(['devices/desktop.ts']);
+  });
+
+  it('unimplemented capabilities can never become resolvable', () => {
+    // Mobile: todas implementadas en Block 11.
+    for (const capabilityName of MOBILE_CAPABILITY_NAME_LIST) {
+      expect(isImplementedCapability(capabilityName)).toBe(true);
+    }
+    // Desktop contract-only: siguen unimplemented y por eso no resolvibles.
+    for (const capabilityName of ['desktop.files', 'desktop.system_status'] as const) {
+      expect(isImplementedCapability(capabilityName)).toBe(false);
+    }
+  });
+});
+

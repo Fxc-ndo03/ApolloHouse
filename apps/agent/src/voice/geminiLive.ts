@@ -64,11 +64,21 @@ export async function handleGeminiLiveTurn(input: {
   readonly effects: import('@/tools/types').DeskToolEffects | undefined;
   readonly recentHistoryMessageList?: readonly unknown[];
   readonly onAudioChunk?: (chunk: ArrayBuffer) => void;
+  readonly request_id?: string;
 }): Promise<GeminiLiveTurnResult> {
+  const requestId = input.request_id ?? 'unknown';
   const apiKey = input.environment.GEMINI_API_KEY;
   if (apiKey === undefined || apiKey.length === 0) {
     throw new Error('GEMINI_API_KEY no configurado');
   }
+
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] gemini_live_start',
+      request_id: requestId,
+    }),
+  );
 
   const configuredModelId =
     input.environment.GEMINI_LIVE_MODEL ?? 'gemini-3.1-flash-live-preview';
@@ -352,6 +362,7 @@ export async function handleGeminiLiveTurn(input: {
     JSON.stringify({
       level: 'info',
       message: 'ApolloGemini: AUDIO_SENT',
+      request_id: requestId,
       bytes: input.audioBuffer?.byteLength ?? 0,
     }),
   );
@@ -438,6 +449,7 @@ export async function handleGeminiLiveTurn(input: {
     JSON.stringify({
       level: 'info',
       message: 'ApolloGemini: RESPONSE_FINISHED',
+      request_id: requestId,
       transcriptLength: transcriptText.length,
       spokenLength: spokenText.length,
       audioChunks: audioChunkList.length,

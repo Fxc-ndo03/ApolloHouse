@@ -40,8 +40,7 @@ async function requestDollarApi<ParsedPayload>(
   const fetchImplementation: typeof fetch =
     fetchImpl === undefined
       ? globalThis.fetch
-      : (url: string | URL | Request, init?: RequestInit) =>
-          fetchImpl(String(url));
+      : (url: string | URL | Request, init?: RequestInit) => fetchImpl(String(url));
   const response = await fetchWithTimeout({
     url: requestUrl,
     timeoutMilliseconds,

@@ -25,11 +25,7 @@ function resampleMonoFrames(
   sourceSampleRateHz: number,
   targetSampleRateHz: number,
 ): Float32Array {
-  if (
-    sourceSampleRateHz <= 0 ||
-    targetSampleRateHz <= 0 ||
-    monoFrames.length === 0
-  ) {
+  if (sourceSampleRateHz <= 0 || targetSampleRateHz <= 0 || monoFrames.length === 0) {
     return new Float32Array(0);
   }
   if (sourceSampleRateHz === targetSampleRateHz) {

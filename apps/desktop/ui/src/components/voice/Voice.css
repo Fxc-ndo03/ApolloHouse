@@ -1,0 +1,109 @@
+.apollo-voice {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 28px 20px 26px;
+  background:
+    radial-gradient(700px 320px at 50% 8%, rgba(103, 217, 255, 0.1), transparent 70%),
+    var(--apollo-glass);
+  backdrop-filter: blur(22px);
+  color: var(--apollo-text);
+  overflow: hidden;
+  animation: apollo-fade-in 0.35s var(--apollo-ease) both;
+}
+
+.apollo-voice-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 460px;
+  min-height: 110px;
+  text-align: center;
+}
+
+.apollo-voice-label {
+  font-size: 13px;
+  color: var(--apollo-text-secondary);
+}
+
+.apollo-voice-sub {
+  font-size: 13px;
+  color: var(--apollo-text-muted);
+}
+
+.apollo-stream {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.apollo-stream span {
+  transition: opacity 0.3s, color 0.3s;
+}
+
+.apollo-voice-chips {
+  display: flex;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.apollo-voice-chip {
+  padding: 7px 14px;
+  border: 1px solid var(--apollo-line-soft);
+  border-radius: 999px;
+  background: var(--apollo-card);
+  color: var(--apollo-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.apollo-voice-chip:active {
+  transform: scale(0.96);
+}
+
+.apollo-voice-chip:hover {
+  border-color: var(--apollo-line);
+}
+
+.apollo-voice-bar {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+.apollo-voice-btn {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--apollo-line-soft);
+  border-radius: 50%;
+  background: var(--apollo-card);
+  color: var(--apollo-text);
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.apollo-voice-btn:active {
+  transform: scale(0.94);
+}
+
+.apollo-voice-btn:hover {
+  border-color: var(--apollo-line);
+}
+
+.apollo-voice-btn.main {
+  width: 62px;
+  height: 62px;
+  border: none;
+  background: linear-gradient(135deg, var(--apollo-primary), var(--apollo-primary-2));
+  box-shadow: 0 8px 26px var(--apollo-glow-strong);
+  color: #04181d;
+}

@@ -34,7 +34,9 @@ function createLiveHealthSqlExecutor() {
         return [];
       }
       if (query.startsWith('SELECT consecutive_failures')) {
-        return hasRow ? [{ consecutive_failures: consecutiveFailures, failed_at: failedAt }] : [];
+        return hasRow
+          ? [{ consecutive_failures: consecutiveFailures, failed_at: failedAt }]
+          : [];
       }
       if (query.startsWith('INSERT INTO live_health')) {
         consecutiveFailures = Number(bindValues[0]);
@@ -296,11 +298,7 @@ describe('isLlmQuotaCooldownActive', () => {
     const sqlExecutor = createQuotaSqlExecutor();
     recordLlmQuotaFailure(sqlExecutor, 1000);
     expect(
-      isLlmQuotaCooldownActive(
-        sqlExecutor,
-        createFakeApolloEnvironment(),
-        1000 + 60_000,
-      ),
+      isLlmQuotaCooldownActive(sqlExecutor, createFakeApolloEnvironment(), 1000 + 60_000),
     ).toBe(true);
   });
 
@@ -321,11 +319,7 @@ describe('isLlmQuotaCooldownActive', () => {
     recordLlmQuotaFailure(sqlExecutor, 1000);
     clearLlmQuotaFailure(sqlExecutor);
     expect(
-      isLlmQuotaCooldownActive(
-        sqlExecutor,
-        createFakeApolloEnvironment(),
-        1000 + 60_000,
-      ),
+      isLlmQuotaCooldownActive(sqlExecutor, createFakeApolloEnvironment(), 1000 + 60_000),
     ).toBe(false);
   });
 });
@@ -333,7 +327,11 @@ describe('isLlmQuotaCooldownActive', () => {
 describe('isLiveSkipActive', () => {
   it('is inactive without any recorded failure', () => {
     expect(
-      isLiveSkipActive(createLiveHealthSqlExecutor(), createFakeApolloEnvironment(), 1000),
+      isLiveSkipActive(
+        createLiveHealthSqlExecutor(),
+        createFakeApolloEnvironment(),
+        1000,
+      ),
     ).toBe(false);
   });
 
@@ -341,9 +339,9 @@ describe('isLiveSkipActive', () => {
     const sqlExecutor = createLiveHealthSqlExecutor();
     recordLiveSetupFailure(sqlExecutor, 1000);
     recordLiveSetupFailure(sqlExecutor, 2000);
-    expect(
-      isLiveSkipActive(sqlExecutor, createFakeApolloEnvironment(), 3000),
-    ).toBe(false);
+    expect(isLiveSkipActive(sqlExecutor, createFakeApolloEnvironment(), 3000)).toBe(
+      false,
+    );
   });
 
   it('activates after repeated failures', () => {
@@ -351,9 +349,7 @@ describe('isLiveSkipActive', () => {
     for (let index = 0; index < LIVE_SKIP_CONSECUTIVE_FAILURES; index += 1) {
       recordLiveSetupFailure(sqlExecutor, 1000 + index);
     }
-    expect(
-      isLiveSkipActive(sqlExecutor, createFakeApolloEnvironment(), 2000),
-    ).toBe(true);
+    expect(isLiveSkipActive(sqlExecutor, createFakeApolloEnvironment(), 2000)).toBe(true);
   });
 
   it('expires after the cooldown', () => {
@@ -376,9 +372,9 @@ describe('isLiveSkipActive', () => {
       recordLiveSetupFailure(sqlExecutor, 1000);
     }
     clearLiveSetupFailure(sqlExecutor);
-    expect(
-      isLiveSkipActive(sqlExecutor, createFakeApolloEnvironment(), 2000),
-    ).toBe(false);
+    expect(isLiveSkipActive(sqlExecutor, createFakeApolloEnvironment(), 2000)).toBe(
+      false,
+    );
   });
 
   it('uses the default cooldown without configuration', () => {
@@ -407,7 +403,8 @@ function hangingFetchHandler(
   });
 }
 
-function createTranscriptionFetchMock(transcript: string) {  const callList: { url: string }[] = [];
+function createTranscriptionFetchMock(transcript: string) {
+  const callList: { url: string }[] = [];
   const fetchHandler = async (
     input: string | URL | Request,
     _init?: RequestInit,
@@ -435,8 +432,7 @@ describe('transcribeAudioWithGemini quota error', () => {
 
 describe('transcribeWithFallbackStt', () => {
   it('returns the transcript from an OpenAI-compatible endpoint', async () => {
-    const { fetchImplementation, callList } =
-      createTranscriptionFetchMock('hola mundo');
+    const { fetchImplementation, callList } = createTranscriptionFetchMock('hola mundo');
 
     const text = await transcribeWithFallbackStt({
       environment: createFallbackEnvironment(),

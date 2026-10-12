@@ -8,6 +8,8 @@ type PendingConfirmationRow = {
   readonly args_json: string;
   readonly summary: string;
   readonly expires_at: number;
+  readonly target_device_id?: string | null;
+  readonly target_device_type?: string | null;
 };
 
 type McpToolSettingRow = {
@@ -35,6 +37,14 @@ export function createInMemoryPendingConfirmationSqlExecutor(): MemorySqlExecuto
             args_json: String(bindValues[2]),
             summary: String(bindValues[3]),
             expires_at: Number(bindValues[4]),
+            target_device_id:
+              bindValues[5] === null || bindValues[5] === undefined
+                ? null
+                : String(bindValues[5]),
+            target_device_type:
+              bindValues[6] === null || bindValues[6] === undefined
+                ? null
+                : String(bindValues[6]),
           },
         ];
         return [];

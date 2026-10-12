@@ -1,0 +1,1176 @@
+# BLOQUE: bloque2a-worker-bridge
+# Apollo PC / Apollo Node - material de referencia para Android
+# Generado desde el repo, sin secretos.
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\04-rpc\mobile-bridge.ts =====
+
+import {
+  Agent,
+  callable,
+  type Connection,
+  type ConnectionContext,
+  type WSMessage,
+} from 'agents';
+
+import {
+  buildAuthenticatedDeviceProof,
+  type CapabilityUnavailableReason,
+} from '@/devices/registry';
+import { MobileDeviceEndpoint } from '@/devices/endpoint';
+import type { MobileConnectionAuth } from '@/devices/endpoint';
+import type { MobileMessagePort } from '@/devices/mobile';
+import { createSqliteEnrollmentStore } from '@/devices/credential-store';
+import { verifyDeviceCredential, type EnrollmentStore } from '@/devices/enrollment';
+import {
+  handleEnrollmentChallengeRequest,
+  handleEnrollmentClaimRequest,
+  handleEnrollmentRevokeRequest,
+  resolveEnrollmentRouteKind,
+} from '@/devices/route';
+import { readBearerCredentialFromRequest } from '@/auth/token';
+import {
+  buildMobileSessionInspectorResponse,
+  isInspectorRequestDenied,
+  isMobileSessionInspectorRequest,
+} from '@/devices/inspector';
+import { targetPreferenceSchema, type TargetPreference } from '@/devices/schema';
+import {
+  describeCapability,
+  isImplementedCapability,
+  listCapabilityNameForDeviceType,
+  type CapabilityName,
+} from '@/devices/capability';
+import { resolveMobileCommand } from '@/devices/command';
+import {
+  mobileNotificationPayloadSchema,
+  type MobileNotificationPayload,
+} from '@/protocol/schema';
+import {
+  buildDeviceCommandResultEnvelope,
+  type DeviceCommandResultEnvelope,
+} from '@/devices/envelope';
+import type {
+  DeviceCommandFailureReason,
+  DeviceCommandOutcome,
+} from '@/devices/dispatch';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// MobileBridge: el endpoint Cloudflare de mobile.
+//
+// Adaptador de eventos de WebSocket a llamadas del MobileDeviceEndpoint. AcÃ¡ no
+// hay handlers de capability, ni tools, ni ejecuciÃ³n de tools, ni PcBridge, ni
+// resoluciÃ³n de target: la capa queda
+//
+//   Cloudflare endpoint (este archivo)
+//     â†“ MobilePeerTransport
+//     â†“ DeviceSessionLifecycle
+//     â†“ Registry
+//
+// Las dos Ãºnicas:callables de producto son el discovery (espejo de PcBridge) y
+// el envÃ­o de una notification ya autorizada. La lÃ³gica de negocio vive en la
+// tool y en el peer, nunca acÃ¡.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+interface MobileBridgeState {
+  connectedCount: number;
+}
+
+export type MobileNotificationCommandInput = {
+  readonly targetDeviceId: string;
+  readonly requestId: string;
+  readonly payload: MobileNotificationPayload;
+  readonly clientTurnId?: string;
+  readonly generation?: number;
+};
+
+export type MobileCapabilityTargetAnswer = {
+  readonly status: 'resolved' | 'unavailable';
+  readonly deviceId: string | null;
+  readonly deviceType: string | null;
+  readonly presence: string | null;
+  readonly reason: string | null;
+  readonly commandList: readonly string[];
+};
+
+// La respuesta es plana a propÃ³sito: la tool lee reason/detail sin conocer el
+// endpoint. El outcome completo viaja aparte para el que quiera inspeccionar.
+// BLOCK 11 Â§4: el dispatch mobile genÃ©rico. El caller pide una CAPABILITY y el
+// catÃ¡logo decide el comando: no existe campo `command` en el input, asÃ­ que no
+// hay forma de dispatchear algo que la capability no declare (BLOCK 11 Â§16).
+export type MobileCommandRequest = {
+  readonly targetDeviceId: string;
+  readonly capabilityName: CapabilityName;
+  // BLOCK 11 Â§4: comando explicito dentro de la capability. Ausente = canÃ³nico.
+  readonly commandName?: string;
+  readonly requestId: string;
+  readonly payload: unknown;
+  readonly clientTurnId?: string;
+  readonly generation?: number;
+};
+
+export type MobileCommandAnswer = {
+  readonly status: 'completed' | 'failed';
+  readonly reason?: DeviceCommandFailureReason;
+  readonly detail?: string;
+  readonly outcome?: DeviceCommandOutcome;
+  readonly result?: DeviceCommandResultEnvelope;
+};
+
+// BLOCK 11 Â§11 y Â§13: una sola llamada sirve para las dos cosas. El tool filter
+// necesita saber quÃ© capabilities tienen device compatible; el contexto del
+// prompt necesita un resumen de los devices. No se pone el registry entero en el
+// prompt: solo presencia y resumen de capabilities.
+export type MobileReachableDeviceSummary = {
+  readonly deviceId: string;
+  readonly presence: string;
+  readonly capabilityNameList: readonly string[];
+};
+
+export type MobileReachableCapabilityEntry = {
+  readonly capabilityName: CapabilityName;
+  readonly deviceId: string | null;
+  readonly presence: string | null;
+};
+
+export type MobileReachableCapabilityAnswer = {
+  readonly reachableCapabilityEntryList: readonly MobileReachableCapabilityEntry[];
+  readonly deviceSummaryList: readonly MobileReachableDeviceSummary[];
+};
+
+export type MobileNotificationCommandAnswer = {
+  readonly status: 'completed' | 'failed';
+  readonly reason?: DeviceCommandFailureReason;
+  readonly detail?: string;
+  readonly outcome?: DeviceCommandOutcome;
+  readonly result?: DeviceCommandResultEnvelope;
+};
+
+export class MobileBridge extends Agent<Env, MobileBridgeState> {
+  initialState: MobileBridgeState = { connectedCount: 0 };
+
+  // Una sola registry y un solo lifecycle para todos los sockets del bridge: el
+  // estado de sesiÃ³n no se duplica por device.
+  readonly #endpoint = new MobileDeviceEndpoint();
+  // La Connection del SDK es la clave: el bridge no asume que haya una sola.
+  readonly #connectionIdMap = new Map<Connection, string>();
+  #connectionCounter = 0;
+  // BLOCK 12 Â§5: el store vive en el SQLite del DO, asÃ­ que una revocaciÃ³n
+  // sobrevive a que el DO se descargue. El endpoint lo recibe por constructor
+  // abajo, una vez que existe `ctx`.
+  #enrollmentStore: EnrollmentStore | null = null;
+
+  /**
+   * BLOCK 12 Â§1: el DO es la Ãºnica autoridad de autenticaciÃ³n.
+   *
+   * El borde ya rechazÃ³ un bearer con la forma equivocada, pero no verificÃ³ la
+   * credencial: el store estÃ¡ en este SQLite. AsÃ­ que la verificaciÃ³n real
+   * pasa acÃ¡, una vez por conexiÃ³n, ANTES de que el transport exista.
+   *
+   * Un bearer vÃ¡lido o revocado no deja conexiÃ³n registrada: se cierra el socket
+   * y nada entra al endpoint. Un `?token=` global se acepta como Ã¡mbito legacy, y
+   * la regla anti-bypass se aplica en el hello, cuando por fin hay un deviceId.
+   */
+  async onConnect(connection: Connection, context: ConnectionContext): Promise<void> {
+    const store = this.#resolveEnrollmentStore();
+    const request = readConnectionRequest(context);
+    const bearerCredential =
+      request === undefined ? null : readBearerCredentialFromRequest(request);
+    let auth: MobileConnectionAuth = {
+      scope: 'legacy_shared_secret',
+      boundDeviceId: null,
+    };
+    if (bearerCredential !== null) {
+      if (store === null) {
+        // Sin store no hay nada contra quÃ© verificar: no se admite el Ã¡mbito
+        // enrolado en vez de aceptarlo sin comprobar nada.
+        connection.close(1008, 'enrollment_unavailable');
+        return;
+      }
+      const verification = await verifyDeviceCredential({
+        store,
+        credential: bearerCredential,
+      });
+      if (verification.status !== 'valid') {
+        // 1008 = policy violation. El cliente usa el motivo para dejar de
+        // reconectar en loop, pero nunca se le manda la credencial.
+        connection.close(
+          1008,
+          verification.reason === 'credential_revoked'
+            ? 'credential_revoked'
+            : 'credential_rejected',
+        );
+        return;
+      }
+      auth = { scope: 'enrolled_android', boundDeviceId: verification.deviceId };
+    }
+    // El snapshot anti-bypass se refresca por conexiÃ³n: es una lectura de una
+    // tabla con primary key, y asÃ­ una revocaciÃ³n que acaba de ocurrir ya se ve.
+    await this.#endpoint.refreshEnrollmentSnapshot();
+
+    this.#connectionCounter += 1;
+    const connectionId = `mobile-${this.#connectionCounter}`;
+    const port: MobileMessagePort = {
+      send: (messageText: string) => connection.send(messageText),
+      close: () => connection.close(1000, 'closing'),
+    };
+    this.#endpoint.handleConnect({
+      connectionId,
+      port,
+      // El proof usa el mismo helper que el desktop. AcÃ¡ sÃ­ puede existir
+      // porque hubo un Ã¡mbito vÃ¡lido verificado por el servidor: ni el socket
+      // por sÃ­ solo ni un deviceId autentican nada.
+      proof: buildAuthenticatedDeviceProof('device'),
+      auth,
+    });
+    this.#connectionIdMap.set(connection, connectionId);
+    this.setState({ ...this.state, connectedCount: this.#connectionIdMap.size });
+  }
+
+  async onMessage(connection: Connection, message: WSMessage): Promise<void> {
+    const connectionId = this.#connectionIdMap.get(connection);
+    if (connectionId === undefined) {
+      return;
+    }
+    this.#endpoint.handleRawMessage(connectionId, message);
+  }
+
+  onClose(connection: Connection): void {
+    const connectionId = this.#connectionIdMap.get(connection);
+    if (connectionId === undefined) {
+      return;
+    }
+    this.#endpoint.handleClose(connectionId);
+    this.#connectionIdMap.delete(connection);
+    this.setState({ ...this.state, connectedCount: this.#connectionIdMap.size });
+  }
+
+  // Discovery: "Â¿quÃ© device puede hacer esta capability?". Espejo del RPC que ya
+  // expone PcBridge, para que el runtime no sepa que existe mÃ¡s de un bridge.
+  // La polÃ­tica de selecciÃ³n es la del registry, no una segunda implementaciÃ³n.
+  @callable()
+  async resolveCapabilityTarget(input: {
+    readonly capabilityName: CapabilityName;
+    readonly targetPreference?: unknown;
+  }): Promise<MobileCapabilityTargetAnswer> {
+    const parsedTargetPreference = targetPreferenceSchema.safeParse(
+      input.targetPreference ?? { kind: 'any' },
+    );
+    const targetPreference: TargetPreference = parsedTargetPreference.success
+      ? parsedTargetPreference.data
+      : { kind: 'any' };
+    const resolution = this.#endpoint.registry.resolveTarget({
+      capabilityName: input.capabilityName,
+      targetPreference,
+    });
+    if (resolution.status !== 'resolved') {
+      return {
+        status: 'unavailable',
+        deviceId: null,
+        deviceType: null,
+        presence: null,
+        reason: resolution.reason satisfies CapabilityUnavailableReason,
+        commandList: [],
+      };
+    }
+    return {
+      status: 'resolved',
+      deviceId: resolution.device.deviceId,
+      deviceType: resolution.device.deviceType,
+      // La revalidaciÃ³n pre-ejecuciÃ³n necesita la presencia vigente.
+      presence: this.#endpoint.registry.resolvePresence(resolution.device.deviceId),
+      reason: null,
+      commandList: describeCapability(input.capabilityName).commandList,
+    };
+  }
+
+  // EnvÃ­o de una notification. La tool ya resolviÃ³ target y autorizÃ³ antes de
+  // llegar acÃ¡: este RPC sÃ³lo despacha el envelope y espera el resultado.
+  @callable()
+  async sendNotificationCommand(
+    input: MobileNotificationCommandInput,
+  ): Promise<MobileNotificationCommandAnswer> {
+    const payload = mobileNotificationPayloadSchema.safeParse(input.payload);
+    if (!payload.success) {
+      const outcome: DeviceCommandOutcome = {
+        ok: false,
+        reason: 'device_rejected',
+        detail: 'El payload de la notificaciÃ³n no es vÃ¡lido.',
+      };
+      return {
+        status: 'failed',
+        reason: outcome.ok ? undefined : outcome.reason,
+        detail: outcome.ok ? undefined : outcome.detail,
+        outcome,
+      };
+    }
+    const outcome = await this.#endpoint.dispatchCommand({
+      deviceId: input.targetDeviceId,
+      capability: 'mobile.notifications',
+      payload: payload.data,
+      requestId: input.requestId,
+      clientTurnId: input.clientTurnId,
+      generation: input.generation,
+    });
+    if (!outcome.ok) {
+      return {
+        status: 'failed',
+        reason: outcome.reason,
+        detail: outcome.detail,
+        outcome,
+      };
+    }
+    return {
+      status: 'completed',
+      outcome,
+      result: buildDeviceCommandResultEnvelope({
+        requestId: input.requestId,
+        deviceId: input.targetDeviceId,
+        capability: 'mobile.notifications',
+        ok: true,
+        result: outcome.result,
+      }),
+    };
+  }
+
+  // Canal de inspecciÃ³n para el smoke test de concurrencia. NO es un @callable:
+  // no existe en el RPC del WebSocket, asÃ­ que un device no puede invocarlo
+  // aunque tenga la sesiÃ³n abierta. SÃ³lo responde si el servidor tiene el env de
+  // inspector prendido, y en una deployment normal no lo tiene.
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Dispatch mobile por capability (BLOCK 11 Â§4).
+  //
+  // El comando sale del catÃ¡logo, no del caller: `resolveMobileCommand` deriva el
+  // comando canÃ³nico, valida el payload con el schema de la capability y rechaza
+  // cualquier capability que no sea mobile o no estÃ© implementada. ReciÃ©n ahÃ­ se
+  // toca el socket.
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  @callable()
+  async sendMobileCommand(input: MobileCommandRequest): Promise<MobileCommandAnswer> {
+    const resolution = resolveMobileCommand(
+      input.capabilityName,
+      input.payload,
+      input.commandName,
+    );
+    if (!resolution.isResolved) {
+      return {
+        status: 'failed',
+        reason: resolution.reason,
+        detail: resolution.detail,
+        outcome: { ok: false, reason: resolution.reason, detail: resolution.detail },
+      };
+    }
+    const outcome = await this.#endpoint.dispatchCommand({
+      deviceId: input.targetDeviceId,
+      capability: input.capabilityName,
+      command: resolution.commandName,
+      payload: resolution.payload,
+      requestId: input.requestId,
+      clientTurnId: input.clientTurnId,
+      generation: input.generation,
+    });
+    if (!outcome.ok) {
+      return {
+        status: 'failed',
+        reason: outcome.reason,
+        detail: outcome.detail,
+        outcome,
+      };
+    }
+    return {
+      status: 'completed',
+      outcome,
+      result: buildDeviceCommandResultEnvelope({
+        requestId: input.requestId,
+        deviceId: input.targetDeviceId,
+        capability: input.capabilityName,
+        ok: true,
+        result: outcome.result,
+      }),
+    };
+  }
+
+  // QuÃ© capabilities tienen un device compatible ahora mismo, y quÃ© devices hay.
+  // Sirve para filtrar el catÃ¡logo de tools (BLOCK 11 Â§11) y para el contexto
+  // cross-device del prompt (BLOCK 11 Â§13) sin exponer el registry.
+  @callable()
+  async listReachableCapabilityList(): Promise<MobileReachableCapabilityAnswer> {
+    const reachableCapabilityEntryList: MobileReachableCapabilityEntry[] = [];
+    for (const capabilityName of listCapabilityNameForDeviceType('mobile')) {
+      if (!isImplementedCapability(capabilityName)) {
+        continue;
+      }
+      const resolution = this.#endpoint.registry.resolveTarget({
+        capabilityName,
+        targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+      });
+      reachableCapabilityEntryList.push({
+        capabilityName,
+        deviceId: resolution.status === 'resolved' ? resolution.device.deviceId : null,
+        presence:
+          resolution.status === 'resolved'
+            ? this.#endpoint.registry.resolvePresence(resolution.device.deviceId)
+            : null,
+      });
+    }
+    const deviceSummaryList: MobileReachableDeviceSummary[] = this.#endpoint.registry
+      .listDeviceList()
+      .filter((device) => device.deviceType === 'mobile')
+      .map((device) => ({
+        deviceId: device.deviceId,
+        presence: device.presence,
+        capabilityNameList: device.availableCapabilities,
+      }));
+    return { reachableCapabilityEntryList, deviceSummaryList };
+  }
+
+  override async fetch(request: Request): Promise<Response> {
+    const requestUrl = new URL(request.url);
+    if (
+      isMobileSessionInspectorRequest({
+        pathname: requestUrl.pathname,
+        upgradeHeader: request.headers.get('Upgrade'),
+        environment: this.env,
+      })
+    ) {
+      // BLOCK 12.2 Â§1: el inspector lista TODAS las sesiones (deviceId,
+      // presencia y capabilities), asÃ­ que no puede abrirlo un telÃ©fono.
+      //
+      // El borde no alcanza para decidir esto: `Authorization: Bearer` con la
+      // credencial de un telÃ©fono es una credencial VÃLIDA, y en el borde eso sÃ³lo
+      // significa Â«pasaÂ». La pregunta Â«Â¿esto es la credencial de un telÃ©fono?Â» la
+      // responde el store, y el store vive acÃ¡. Por eso el cierre va en el DO y
+      // no en index.ts, que ademÃ¡s no debe conocer la existencia del inspector.
+      //
+      // Sobre workerd real se comprobÃ³ que sin esto un telÃ©fono enrolado pedÃ­a
+      // `__inspect` y recibÃ­a 200 con la lista de los telÃ©fonos de los demÃ¡s.
+      // El borde no alcanza para decidir esto: `Authorization: Bearer` con la
+      // credencial de un telÃ©fono es una credencial VÃLIDA, y en el borde eso sÃ³lo
+      // significa Â«pasaÂ». La polÃ­tica vive en el DO, que ademÃ¡s es el Ãºnico que
+      // puede resolver la existencia del inspector sin que index.ts la conozca.
+      if (isInspectorRequestDenied(readBearerCredentialFromRequest(request))) {
+        return new Response('Not found', { status: 404 });
+      }
+      return buildMobileSessionInspectorResponse(this.#endpoint.inspectSessionSnapshot());
+    }
+    // BLOCK 12 Â§2: las tres rutas de enrollment las atiende este DO, no el Worker.
+    // Es el Ãºnico lugar que tiene el store Y los sockets vivos, que es lo que
+    // hace posible revocar sin salir al borde.
+    const store = this.#resolveEnrollmentStore();
+    if (store !== null) {
+      const enrollmentRouteKind = resolveEnrollmentRouteKind(requestUrl.pathname);
+      if (enrollmentRouteKind === 'challenge') {
+        return handleEnrollmentChallengeRequest({
+          request,
+          environment: this.env,
+          store,
+          nowMilliseconds: Date.now(),
+        });
+      }
+      if (enrollmentRouteKind === 'claim') {
+        return handleEnrollmentClaimRequest({
+          request,
+          store,
+          nowMilliseconds: Date.now(),
+        });
+      }
+      if (enrollmentRouteKind === 'revoke') {
+        return handleEnrollmentRevokeRequest({
+          request,
+          environment: this.env,
+          store,
+          nowMilliseconds: Date.now(),
+          revoke: async (deviceId) =>
+            this.#revokeLiveConnection(deviceId) ? 'closed_socket' : 'no_socket',
+        });
+      }
+    }
+    return super.fetch(request);
+  }
+
+  /**
+   * Â§5: revocar cierra el socket VIVO de ese deviceId. El `handleClose` del
+   * endpoint corta ademÃ¡s los comandos en vuelo, asÃ­ que un comando que estaba a
+   * medias termina como desconexiÃ³n y no queda colgado.
+   */
+  #revokeLiveConnection(deviceId: string): boolean {
+    let closedAny = false;
+    for (const connection of Array.from(this.#connectionIdMap.keys())) {
+      const connectionId = this.#connectionIdMap.get(connection);
+      if (connectionId === undefined) {
+        continue;
+      }
+      if (this.#endpoint.getTransport(connectionId)?.getDeviceId() !== deviceId) {
+        continue;
+      }
+      connection.close(1008, 'revoked');
+      this.#endpoint.handleClose(connectionId);
+      this.#connectionIdMap.delete(connection);
+      closedAny = true;
+    }
+    return closedAny;
+  }
+
+  /**
+   * El store se crea una vez por instancia. `ctx.storage.sql` ya existe porque
+   * MobileBridge estÃ¡ declarado como `new_sqlite_classes` en wrangler.jsonc, y
+   * las tablas se crean con IF NOT EXISTS en el primer uso.
+   */
+  #resolveEnrollmentStore(): EnrollmentStore | null {
+    if (this.#enrollmentStore !== null) {
+      return this.#enrollmentStore;
+    }
+    const sqlStorage = readSqlStorage(this);
+    if (sqlStorage === null) {
+      return null;
+    }
+    const store = createSqliteEnrollmentStore(sqlStorage);
+    this.#enrollmentStore = store;
+    // Sin esto el endpoint queda sin store, su authorizer es `null` y la regla
+    // anti-bypass de Â§1 no se aplica nunca.
+    this.#endpoint.attachEnrollmentStore(store);
+    return store;
+  }
+}
+
+/**
+ * `ConnectionContext.request` es el Request original del upgrade. El SDK lo
+ * expone como opcional, y sin Ã©l no hay forma de leer el header Authorization:
+ * por eso se degrada a `null` en vez de inventar una fuente.
+ */
+function readConnectionRequest(context: ConnectionContext): Request | undefined {
+  const candidate = (context as { readonly request?: unknown }).request;
+  return candidate instanceof Request ? candidate : undefined;
+}
+
+/** El tipo global `SqlStorage` no existe fuera de los tipos generados. */
+type SqlStorageLike = Parameters<typeof createSqliteEnrollmentStore>[0];
+
+function readSqlStorage(bridge: MobileBridge): SqlStorageLike | null {
+  const context = (bridge as unknown as { readonly ctx?: { storage?: unknown } }).ctx;
+  const storage = context?.storage as { sql?: unknown } | undefined;
+  const sqlStorage = storage?.sql;
+  if (
+    sqlStorage === undefined ||
+    typeof (sqlStorage as { exec?: unknown }).exec !== 'function'
+  ) {
+    return null;
+  }
+  return sqlStorage as SqlStorageLike;
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\04-rpc\rpc.ts =====
+
+import { z } from 'zod';
+
+import { initiativePrioritySchema, initiativeSourceSchema } from '@/initiative/logic';
+import { deskSoundEffectSchema } from '@/protocol/schema';
+
+export const notifyBackgroundResultInputSchema = z.object({
+  prompt: z.string().min(1),
+  summary: z.string().min(1),
+  documentKey: z.string().min(1).optional(),
+});
+
+export const deliverReminderPayloadSchema = z.object({
+  message: z.string().min(1),
+});
+
+export const expireConfirmPayloadSchema = z.object({
+  confirmationId: z.string().min(1),
+});
+
+export const retryInitiativeUtterancePayloadSchema = z.object({
+  source: initiativeSourceSchema,
+  priority: initiativePrioritySchema,
+  message: z.string().min(1),
+  earconName: deskSoundEffectSchema.optional(),
+  deferCount: z.number().int().min(0).max(5),
+  utteranceKey: z.string().min(1).optional(),
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\04-rpc\target.ts =====
+
+import {
+  describeCapability,
+  describeCapabilityDeviceType,
+  isImplementedCapability,
+  type CapabilityName,
+} from '@/devices/capability';
+import type { CapabilityUnavailableReason } from '@/devices/registry';
+import {
+  desktopTargetPreference,
+  mobileTargetPreference,
+  targetPreferenceSchema,
+  type DeviceType,
+  type PresenceState,
+  type TargetPreference,
+} from '@/devices/schema';
+
+// Puente entre el CapabilityRegistry (discovery + target selection) y el runtime
+// de ejecuciÃ³n. Este mÃ³dulo NO ejecuta ni autoriza: sÃ³lo traduce intenciÃ³n â†’
+// capability â†’ target y describe por quÃ© no hay target.
+//
+// La cadena completa queda:
+//   intent â†’ router â†’ capability â†’ REGISTRY(target) â†’ AUTHORIZATION â†’ EXECUTION
+
+export type ResolvedCapabilityTarget = {
+  readonly deviceId: string;
+  readonly deviceType: DeviceType;
+  readonly presence: PresenceState;
+};
+
+export type CapabilityTargetResolution =
+  | { readonly status: 'resolved'; readonly target: ResolvedCapabilityTarget }
+  | { readonly status: 'unavailable'; readonly reason: CapabilityUnavailableReason };
+
+export type CapabilityTargetResolver = (input: {
+  readonly capabilityName: CapabilityName;
+  readonly targetPreference: TargetPreference;
+}) => Promise<CapabilityTargetResolution>;
+
+export type CapabilityResolutionTiming = {
+  readonly capabilityResolutionMs: number;
+};
+
+// â”€â”€ capability â†’ tool existente â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// SÃ³lo capabilities implementadas, y sÃ³lo tools que ya existen. El mapa se
+// valida contra el catÃ¡logo builtin en los tests para que no se desincronice.
+const CAPABILITY_TOOL_NAME_MAP: ReadonlyMap<CapabilityName, readonly string[]> = new Map([
+  ['desktop.open_app', ['open_pc_app']],
+  ['desktop.focus_app', ['focus_pc_app']],
+  ['desktop.close_app', ['close_pc_app']],
+  ['desktop.list_apps', ['list_pc_apps']],
+  ['desktop.lock', ['lock_pc_screen']],
+  [
+    'desktop.spotify',
+    [
+      'spotify_play',
+      'spotify_pause',
+      'spotify_next',
+      'spotify_previous',
+      'spotify_get_state',
+    ],
+  ],
+  // BLOCK 9: la Ãºnica capability mobile con tool real.
+  ['mobile.notifications', ['send_mobile_notification']],
+]);
+
+export function listToolNameForCapability(
+  capabilityName: CapabilityName,
+): readonly string[] {
+  if (!isImplementedCapability(capabilityName)) {
+    return [];
+  }
+  return CAPABILITY_TOOL_NAME_MAP.get(capabilityName) ?? [];
+}
+
+export function listConnectedCapabilityNameList(): readonly CapabilityName[] {
+  return [...CAPABILITY_TOOL_NAME_MAP.keys()];
+}
+
+// Inversa: quÃ© capability representa una tool. Se usa al revalidar el target de
+// una confirmaciÃ³n, que guarda el toolName y no la capability.
+const TOOL_NAME_TO_CAPABILITY_MAP: ReadonlyMap<string, CapabilityName> = new Map(
+  [...CAPABILITY_TOOL_NAME_MAP.entries()].flatMap(([capabilityName, toolNameList]) =>
+    toolNameList.map((toolName) => [toolName, capabilityName] as const),
+  ),
+);
+
+// Sin mapping NO se inventa capability: una tool cloud-only o desconocida
+// simplemente no tiene target que resolver (undefined), y el pipeline la trata
+// como no-targeted. Un default inventado harÃ­a que una tool sin target pasara
+// por el registry como si fuera de escritorio.
+export function getCapabilityForToolName(toolName: string): CapabilityName | undefined {
+  return TOOL_NAME_TO_CAPABILITY_MAP.get(toolName);
+}
+
+export function listCapabilityNameForToolName(
+  toolName: string,
+): CapabilityName | undefined {
+  return getCapabilityForToolName(toolName);
+}
+
+// Toda tool que necesita un device remoto para ejecutarse.
+export function requiresExecutionTarget(toolName: string): boolean {
+  return getCapabilityForToolName(toolName) !== undefined;
+}
+
+// â”€â”€ mensajes de indisponibilidad â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const UNAVAILABLE_RESPONSE_TEXT_MAP: ReadonlyMap<CapabilityUnavailableReason, string> =
+  new Map([
+    ['no_device', 'No tengo ningÃºn dispositivo conectado.'],
+    ['capability_absent', 'Ese dispositivo no puede hacer eso.'],
+    ['target_unavailable', 'Ese dispositivo no estÃ¡ disponible ahora.'],
+    ['unimplemented', 'TodavÃ­a no puedo hacer eso.'],
+    [
+      'target_offline',
+      'Ese dispositivo se desconectÃ³ antes de que terminara. No lo ejecutÃ©.',
+    ],
+  ]);
+
+export function describeUnavailableCapability(
+  reason: CapabilityUnavailableReason,
+): string {
+  return UNAVAILABLE_RESPONSE_TEXT_MAP.get(reason) ?? 'No puedo hacer eso ahora.';
+}
+
+export function normalizeTargetPreference(
+  rawTargetPreference: unknown,
+): TargetPreference {
+  const parsedTargetPreference = targetPreferenceSchema.safeParse(rawTargetPreference);
+  return parsedTargetPreference.success ? parsedTargetPreference.data : { kind: 'any' };
+}
+
+// Un resolver vacÃ­o: sin registry inyectado, el runtime se comporta como antes
+// (sin gate de target) en vez de bloquear la acciÃ³n.
+export const unconfiguredCapabilityTargetResolver: CapabilityTargetResolver =
+  async () => ({
+    status: 'unavailable',
+    reason: 'no_device',
+  });
+
+export function listCommandNameForCapability(
+  capabilityName: CapabilityName,
+): readonly string[] {
+  return describeCapability(capabilityName).commandList;
+}
+
+// Adaptador in-process: mismo Registry, sin RPC. Es lo que usan los tests y lo
+// que usarÃ­a un runtime que ya tenga el registry en memoria.
+export function buildRegistryCapabilityTargetResolver(registry: {
+  resolveTarget: (input: {
+    readonly capabilityName: CapabilityName;
+    readonly targetPreference: TargetPreference;
+  }) => {
+    readonly status: 'resolved' | 'unavailable';
+    readonly device?: { readonly deviceId: string; readonly deviceType: DeviceType };
+    readonly reason?: CapabilityUnavailableReason;
+  };
+  resolvePresence: (deviceId: string) => PresenceState | null;
+}): CapabilityTargetResolver {
+  return async ({ capabilityName, targetPreference }) => {
+    const resolution = registry.resolveTarget({ capabilityName, targetPreference });
+    if (resolution.status === 'unavailable' || resolution.device === undefined) {
+      return {
+        status: 'unavailable',
+        reason: resolution.reason ?? 'capability_absent',
+      };
+    }
+    return {
+      status: 'resolved',
+      target: {
+        deviceId: resolution.device.deviceId,
+        deviceType: resolution.device.deviceType,
+        presence: normalizePresence(registry.resolvePresence(resolution.device.deviceId)),
+      },
+    };
+  };
+}
+
+export function normalizeUnavailableReason(
+  rawReason: string | null,
+): CapabilityUnavailableReason {
+  switch (rawReason) {
+    case 'no_device':
+    case 'capability_absent':
+    case 'target_unavailable':
+    case 'unimplemented':
+      return rawReason;
+    default:
+      return 'target_unavailable';
+  }
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Resolver device-agnostic (Block 7).
+//
+// Un resolver por tipo de device. El cÃ³digo futuro pregunta por el resolver de
+// 'mobile' sin importar PcBridge ni ningÃºn handler de escritorio: sÃ³lo el
+// mÃ³dulo de transporte de cada deviceType registra el suyo.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+export type CapabilityResolverMap = ReadonlyMap<DeviceType, CapabilityTargetResolver>;
+
+export function buildCapabilityResolverMap(
+  resolverByDeviceTypeMap: Partial<Record<DeviceType, CapabilityTargetResolver>>,
+): CapabilityResolverMap {
+  return new Map(
+    Object.entries(resolverByDeviceTypeMap) as [DeviceType, CapabilityTargetResolver][],
+  );
+}
+
+export function resolveCapabilityTargetForDeviceType(input: {
+  readonly resolverMap: CapabilityResolverMap;
+  readonly deviceType: DeviceType;
+  readonly capabilityName: CapabilityName;
+  readonly targetPreference: TargetPreference;
+}): Promise<CapabilityTargetResolution> {
+  const resolver = input.resolverMap.get(input.deviceType);
+  if (resolver === undefined) {
+    return Promise.resolve({ status: 'unavailable', reason: 'no_device' });
+  }
+  return resolver({
+    capabilityName: input.capabilityName,
+    targetPreference: input.targetPreference,
+  });
+}
+
+// El target preference de una capability sale del CONTRATO (deviceType), no de
+// un prefijo de texto.
+export function buildTargetPreferenceForCapabilityName(
+  capabilityName: CapabilityName,
+): TargetPreference {
+  return describeCapabilityDeviceType(capabilityName) === 'desktop'
+    ? desktopTargetPreference
+    : mobileTargetPreference;
+}
+
+export function normalizePresence(rawPresence: string | null): PresenceState {
+  switch (rawPresence) {
+    case 'online':
+    case 'offline':
+    case 'degraded':
+    case 'unknown':
+      return rawPresence;
+    default:
+      return 'unknown';
+  }
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\04-rpc\resolve.ts =====
+
+import { describeCapabilityDeviceType } from '@/devices/capability';
+import { buildPcBridgeCapabilityTargetResolver } from '@/devices/desktop';
+import { resolveMobileBridgeClient } from '@/devices/bridge-client';
+import {
+  buildCapabilityResolverMap,
+  resolveCapabilityTargetForDeviceType,
+  type CapabilityResolverMap,
+  type CapabilityTargetResolution,
+  type CapabilityTargetResolver,
+} from '@/devices/target';
+import type { CapabilityName } from '@/devices/capability';
+import type { DeviceType } from '@/devices/identity';
+import type { PresenceState, TargetPreference } from '@/devices/schema';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Resolver de targets device-agnostic.
+//
+// El runtime (Apollo) no sabe que hay dos bridges: le pasa UN resolver y este
+// decide a quiÃ©n preguntar segÃºn el deviceType que declara el CONTRATO de la
+// capability. Por construcciÃ³n una capability mobile nunca cae en un desktop ni
+// al revÃ©s â€” no hay fallback, porque no hay lista de candidatos mezclada.
+//
+//   discovery â†’ target â†’ authorization â†’ execution, igual que siempre.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+type MobileBridgeTargetAnswer = {
+  readonly status: 'resolved' | 'unavailable';
+  readonly deviceId: string | null;
+  readonly deviceType: string | null;
+  readonly presence: string | null;
+  readonly reason: string | null;
+};
+
+function normalizeUnavailableReason(
+  reason: string | null,
+): CapabilityTargetResolution extends never
+  ? never
+  : Extract<CapabilityTargetResolution, { status: 'unavailable' }>['reason'] {
+  switch (reason) {
+    case 'capability_absent':
+      return 'capability_absent';
+    case 'target_unavailable':
+      return 'target_unavailable';
+    case 'unimplemented':
+      return 'unimplemented';
+    default:
+      return 'no_device';
+  }
+}
+
+function normalizePresence(presence: string | null): PresenceState {
+  if (presence === 'online' || presence === 'degraded' || presence === 'offline') {
+    return presence;
+  }
+  return 'unknown';
+}
+
+// El resolver mobile habla con el MobileBridge por RPC interno, igual que el
+// desktop con PcBridge: el transporte no se importa, sÃ³lo se pregunta.
+function buildMobileBridgeCapabilityTargetResolver(
+  environment: Env,
+): CapabilityTargetResolver {
+  return async ({ capabilityName, targetPreference }) => {
+    const stub = resolveMobileBridgeClient(environment);
+    if (stub === undefined) {
+      return { status: 'unavailable', reason: 'no_device' };
+    }
+    const answer = (await stub.resolveCapabilityTarget({
+      capabilityName,
+      targetPreference,
+    })) as MobileBridgeTargetAnswer;
+    if (
+      answer.status !== 'resolved' ||
+      answer.deviceId === null ||
+      answer.deviceType === null
+    ) {
+      return { status: 'unavailable', reason: normalizeUnavailableReason(answer.reason) };
+    }
+    return {
+      status: 'resolved',
+      target: {
+        deviceId: answer.deviceId,
+        deviceType: answer.deviceType === 'mobile' ? 'mobile' : 'desktop',
+        presence: normalizePresence(answer.presence),
+      },
+    };
+  };
+}
+
+export function buildCapabilityTargetResolver(
+  environment: Env,
+): CapabilityTargetResolver {
+  const resolverMap: CapabilityResolverMap = buildCapabilityResolverMap({
+    desktop: buildPcBridgeCapabilityTargetResolver(environment),
+    mobile: buildMobileBridgeCapabilityTargetResolver(environment),
+  });
+  return async ({ capabilityName, targetPreference }) =>
+    resolveCapabilityTargetForDeviceType({
+      resolverMap,
+      deviceType: describeCapabilityDeviceType(capabilityName) as DeviceType,
+      capabilityName: capabilityName as CapabilityName,
+      targetPreference: targetPreference as TargetPreference,
+    });
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\04-rpc\command.ts =====
+
+import {
+  describeCapability,
+  isImplementedCapability,
+  type CapabilityName,
+  type MobileCapabilityName,
+} from '@/devices/capability';
+import { parseMobileCommandPayload } from '@/devices/payload';
+
+// ResoluciÃ³n capability â†’ comando mobile (BLOCK 11 Â§4).
+//
+// El comando NUNCA se inventa: se valida contra el `commandList` de la
+// capability en el catÃ¡logo. Un caller que pida `capability: 'mobile.media'` con
+// `command: 'rm -rf'` recibe `unsupported_command` antes de tocar el socket, y no
+// hay forma de ejecutar un comando que su capability no declare (BLOCK 11 Â§16).
+
+export type MobileCommandResolution =
+  | {
+      readonly isResolved: true;
+      readonly commandName: string;
+      readonly payload: Record<string, unknown>;
+    }
+  | {
+      readonly isResolved: false;
+      // Solo dos razones, y las dos son `DeviceCommandFailureReason`: la
+      // capability no es mobile, no estÃ¡ implementada o no declara ese comando es
+      // indistinguible desde el bridge de "este puente no sabe hacer eso"
+      // (BLOCK 11 Â§5), y el aislamiento cross-device impide que una capability
+      // desktop llegue siquiera a evaluarse acÃ¡.
+      readonly reason: 'unsupported_command' | 'invalid_payload';
+      readonly detail: string;
+    };
+
+export function isMobileCapabilityName(
+  candidateCapabilityName: string,
+): candidateCapabilityName is MobileCapabilityName {
+  try {
+    return (
+      describeCapability(candidateCapabilityName as CapabilityName).deviceType ===
+      'mobile'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resuelve una capability mobile a un comando concreto y valida el payload con el
+ * schema de esa capability.
+ *
+ * `commandName` ausente = comando canÃ³nico (el primero del commandList), que es
+ * exactamente lo que mandaba un peer de Block 9.
+ */
+export function resolveMobileCommand(
+  capabilityName: string,
+  payload: unknown,
+  commandName?: string,
+): MobileCommandResolution {
+  if (!isMobileCapabilityName(capabilityName)) {
+    return {
+      isResolved: false,
+      reason: 'unsupported_command',
+      detail: `La capability ${capabilityName} no es mobile.`,
+    };
+  }
+  if (!isImplementedCapability(capabilityName)) {
+    return {
+      isResolved: false,
+      reason: 'unsupported_command',
+      detail: `La capability ${capabilityName} todavÃ­a no estÃ¡ implementada.`,
+    };
+  }
+  const declaredCommandList = describeCapability(capabilityName)
+    .commandList as readonly string[];
+  const resolvedCommandName =
+    commandName === undefined || commandName === ''
+      ? declaredCommandList[0]
+      : commandName;
+  if (
+    resolvedCommandName === undefined ||
+    !declaredCommandList.includes(resolvedCommandName)
+  ) {
+    return {
+      isResolved: false,
+      reason: 'unsupported_command',
+      detail: `La capability ${capabilityName} no declara el comando ${resolvedCommandName}.`,
+    };
+  }
+  // El schema se elige por comando, no por capability: `alarm_set` y
+  // `alarm_cancel` tienen payloads distintos (BLOCK 11 Â§4).
+  const parsedPayload = parseMobileCommandPayload(resolvedCommandName, payload);
+  if (!parsedPayload.isValid) {
+    return {
+      isResolved: false,
+      reason: 'invalid_payload',
+      detail: parsedPayload.detail,
+    };
+  }
+  return {
+    isResolved: true,
+    commandName: resolvedCommandName,
+    payload: parsedPayload.payload,
+  };
+}
+
+/** El peer sÃ³lo acepta comandos que su capability declara (BLOCK 11 Â§16). */
+export function isCommandDeclaredByCapability(
+  capabilityName: string,
+  commandName: string,
+): boolean {
+  try {
+    return (
+      describeCapability(capabilityName as CapabilityName)
+        .commandList as readonly string[]
+    ).includes(commandName);
+  } catch {
+    return false;
+  }
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\08-config\wrangler.jsonc =====
+
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "apollo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-05",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Usamos el dominio workers.dev mientras no configuremos
+  // el dominio personalizado agent.heyapollo.dev.
+  "workers_dev": true,
+
+  "preview_urls": false,
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+
+  "vars": {
+    "GEMINI_MODEL": "gemini-3.6-flash",
+    "GEMINI_STT_MODEL": "gemini-3.6-flash",
+    "GEMINI_LIVE_MODEL": "gemini-3.1-flash-live-preview",
+    "GEMINI_TTS_MODEL": "gemini-3.1-flash-tts-preview",
+    "GEMINI_EMBEDDING_MODEL": "text-embedding-004",
+  },
+
+  "ai": {
+    "binding": "AI"
+  },
+
+  "durable_objects": {    "bindings": [
+      {
+        "name": "Apollo",
+        "class_name": "Apollo",
+      },
+      {
+        "name": "PcBridge",
+        "class_name": "PcBridge",
+      },
+      {
+        "name": "MobileBridge",
+        "class_name": "MobileBridge",
+      },
+    ],
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Apollo"],
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["Sandbox"],
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["PcBridge"],
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["MobileBridge"],
+    },
+  ],
+
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "apollo-memory",
+      "remote": true,
+    },
+  ],
+
+  "queues": {
+    "producers": [
+      {
+        "binding": "APOLLO_QUEUE",
+        "queue": "apollo-jobs",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "apollo-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+      },
+    ],
+  },
+
+  "workflows": [
+    {
+      "name": "apollo-background",
+      "binding": "BACKGROUND",
+      "class_name": "ApolloBackground",
+    },
+    {
+      "name": "apollo-coding",
+      "binding": "CODING",
+      "class_name": "ApolloCoding",
+    },
+  ],
+}
+

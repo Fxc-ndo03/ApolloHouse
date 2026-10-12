@@ -23,9 +23,7 @@ export type Mp3DecodeResult = {
   readonly sampleRate: number;
 };
 
-export type Mp3DecodeImplementation = (
-  mp3Bytes: Uint8Array,
-) => Promise<Mp3DecodeResult>;
+export type Mp3DecodeImplementation = (mp3Bytes: Uint8Array) => Promise<Mp3DecodeResult>;
 
 const base64AudioResponseSchema = z.object({ audio: z.string() });
 
@@ -139,10 +137,7 @@ export async function synthesizeWithWorkersAi(input: {
         runModel,
         decodeMp3: input.decodeMp3Implementation ?? decodeMp3Audio,
       }),
-      rejectAfterTimeout(
-        WORKERS_AI_TTS_TIMEOUT_MILLISECONDS,
-        'MeloTTS tardó demasiado',
-      ),
+      rejectAfterTimeout(WORKERS_AI_TTS_TIMEOUT_MILLISECONDS, 'MeloTTS tardó demasiado'),
     ]);
   } catch (error) {
     logFallbackWarning('MeloTTS falló', error);

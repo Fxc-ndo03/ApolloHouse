@@ -22,6 +22,22 @@ import {
 import type { DeskUiMachine } from '@/session/machine';
 import { buildTelemetryPromptNote, type DeskTelemetrySnapshot } from '@/telemetry/logic';
 import { createBuiltinToolDefinitionMap } from '@/tools/catalog';
+import {
+  buildExposedToolNameList,
+  filterExposedToolDefinitions,
+  resolveToolDomain,
+} from '@/tools/domain';
+import { selectRouterToolRequest } from '@/tools/selection';
+import {
+  buildDeviceContextNote,
+  buildEmptyReachableCapabilitySnapshot,
+  filterToolByReachableDevice,
+  type ReachableCapabilitySnapshot,
+} from '@/devices/exposure';
+import { resolveCapabilityIntent } from '@/devices/intent';
+import { executeToolWithTargetResolution } from '@/tools/target';
+import { buildCapabilityTimingLogLine } from '@/devices/events';
+import type { CapabilityTargetResolver } from '@/devices/target';
 import type {
   DeskToolEffects,
   PendingToolConfirmation,
@@ -30,6 +46,8 @@ import type {
 import { runDeskTurn, type TurnInput, type VoiceAdapters } from '@/turn/run';
 import { TTS_PCM_CHANNEL_COUNT, TTS_PCM_SAMPLE_RATE_HZ } from '@/voice/elevenlabs';
 import { handleGeminiLiveTurn, isGeminiLiveAvailable } from '@/voice/geminiLive';
+import { routeDeterministic, type RouterOutcome } from '@/voice/router';
+import { chatWithWorkersAi } from '@/voice/workersai';
 import {
   streamAudioChunksAtPlaybackPace,
   type PlaybackAckSnapshot,
@@ -60,7 +78,13 @@ export type ApolloTurnRuntimeDependencies = {
   readonly session: Session;
   readonly deviceId: string;
   readonly effects: DeskToolEffects;
-  readonly toolDefinitionMap?: ReadonlyMap<string, ToolDefinition>;
+  readonly loadToolDefinitionMap?: () => Promise<ReadonlyMap<string, ToolDefinition>>;
+  // BLOCK 6: puerto de target selection. Ausente = el runtime se comporta como
+  // antes (sin gate de target); presente = toda capability pasa por el registry.
+  readonly resolveCapabilityTarget?: CapabilityTargetResolver;
+  // BLOCK 11 §11/§13: qué devices están realmente conectados. Ausente = el
+  // turno se comporta como antes (catálogo completo, sin contexto).
+  readonly loadReachableCapabilitySnapshot?: () => Promise<ReachableCapabilitySnapshot>;
   readonly isSpeechAborted?: () => boolean;
   readonly telemetrySnapshot?: DeskTelemetrySnapshot;
   readonly allocateTtsSequence?: () => number;
@@ -77,8 +101,19 @@ export async function executeApolloTurn(
     readonly audioBuffer?: ArrayBuffer;
     readonly confirmOk?: boolean;
     readonly pendingConfirmation?: PendingToolConfirmation;
+    readonly ttsConfig?: {
+      provider?: string;
+      voice?: string;
+      language?: string;
+      speed?: number;
+    };
+    readonly request_id?: string;
+    readonly client_turn_id?: string;
+    readonly generation?: number;
   },
 ): Promise<void> {
+  const requestId = turnPart.request_id ?? 'unknown';
+  const clientTurnId = turnPart.client_turn_id ?? 'none';
   const nowMilliseconds = Date.now();
   const focusState = tickDeskFocus(
     dependencies.currentState.focusEndsAt === null
@@ -91,6 +126,72 @@ export async function executeApolloTurn(
   );
 
   const isMockVoice = dependencies.environment.MOCK_VOICE === '1';
+  const focusNote = focusState.active
+    ? '\n\nFocus activo: evitá announces ruidosos; sed breve.'
+    : '\n\nFocus inactivo.';
+  const telemetryNote = buildTelemetryPromptNote(
+    dependencies.telemetrySnapshot,
+    nowMilliseconds,
+  );
+
+  // ── Pipeline: routing → tool selection → authorization → execution ──────
+  // El router corre PRIMERO y con contexto mínimo. Todo lo caro (memoria
+  // semántica, historial, prompt de sesión, descubrimiento MCP) se arma
+  // después, solo si el turno no se resolvió aquí. Antes se armaba
+  // todo antes de saber si el turno iba a ser determinista.
+  const isDeterministicCandidate =
+    turnPart.text !== undefined &&
+    turnPart.text.trim().length > 0 &&
+    turnPart.pendingConfirmation === undefined;
+
+  // Tools que el router determinista puede pedir son TODOS builtin (ver
+  // listRouterReachableToolNameList + buildTurnToolDefinitionMap: los builtins
+  // ganan colisiones de nombre). Por eso el fast path usa el mapa builtin, sin
+  // descubrir MCP ni leer settings: misma definición, cero I/O.
+  if (isDeterministicCandidate) {
+    const routerStartMs = Date.now();
+    const routerOutcome = routeDeterministic(turnPart.text, new Date(nowMilliseconds));
+    const routerElapsedMs = Date.now() - routerStartMs;
+
+    if (routerOutcome.kind !== 'ai_needed') {
+      logRouterDecision({
+        requestId,
+        clientTurnId,
+        generation: turnPart.generation ?? null,
+        deviceId: dependencies.deviceId,
+        routeType: 'deterministic',
+        routeKind: routerOutcome.kind,
+        ...(routerOutcome.kind === 'pc_command'
+          ? { commandType: routerOutcome.commandType }
+          : {}),
+        domain: routerOutcome.kind === 'pc_command' ? 'pc' : 'memory',
+        confidence: 'high',
+        toolCatalogSize: 1,
+        fallbackUsed: false,
+        routerElapsedMs,
+      });
+      return await executeDeterministicTurn({
+        connection,
+        dependencies,
+        routerOutcome,
+        userText: turnPart.text.trim(),
+        toolDefinitionMap: createBuiltinToolDefinitionMap(),
+        nowMilliseconds,
+        requestId,
+        clientTurnId,
+        routerElapsedMs,
+        generation: turnPart.generation,
+      });
+    }
+  }
+
+  // ── LLM path: acá sí se arma el contexto que el turno necesita ────────
+  let cachedToolDefinitionMap: Promise<ReadonlyMap<string, ToolDefinition>> | undefined;
+  const loadTurnToolDefinitionMap = (): Promise<ReadonlyMap<string, ToolDefinition>> =>
+    (cachedToolDefinitionMap ??=
+      dependencies.loadToolDefinitionMap?.() ??
+      Promise.resolve(createBuiltinToolDefinitionMap()));
+
   const sessionSystemPrompt = await buildSessionSystemPrompt(dependencies.session);
   const recentHistoryMessageList = await buildRecentTurnHistoryMessageList(
     dependencies.session,
@@ -107,18 +208,52 @@ export async function executeApolloTurn(
       deviceId: dependencies.deviceId,
     });
 
-  const focusNote = focusState.active
-    ? '\n\nFocus activo: evitá announces ruidosos; sé breve.'
-    : '\n\nFocus inactivo.';
-  const telemetryNote = buildTelemetryPromptNote(
-    dependencies.telemetrySnapshot,
-    nowMilliseconds,
+  // BLOCK 11 §11: una tool mobile sin teléfono conectado no se le ofrece al
+  // modelo. Es UNA llamada al bridge y sirve para el filtro de tools y para
+  // el contexto cross-device. Sin bridge, el snapshot es vacío y el turno se
+  // comporta exactamente como antes.
+  const reachableCapabilitySnapshot =
+    (await dependencies.loadReachableCapabilitySnapshot?.()) ??
+    buildEmptyReachableCapabilitySnapshot();
+  const deviceContextNote = buildDeviceContextNote(
+    dependencies.deviceId,
+    reachableCapabilitySnapshot,
   );
-  const toolDefinitionMap =
-    dependencies.toolDefinitionMap ?? createBuiltinToolDefinitionMap();
+
+  const toolDefinitionMap = await loadTurnToolDefinitionMap();
+  const toolDefinitionMapWithReachableDevice = filterToolByReachableDevice(
+    [...toolDefinitionMap.values()],
+    reachableCapabilitySnapshot,
+  );
   const installedToolNote = buildInstalledToolPromptNote(
     [...toolDefinitionMap.keys()].filter((toolName) => isNamespacedMcpToolName(toolName)),
   );
+
+  let exposedToolNames: readonly string[] | undefined;
+  if (isDeterministicCandidate) {
+    const domainStartMs = Date.now();
+    const domainResolution = resolveToolDomain(turnPart.text ?? '');
+    const exposedNameList = buildExposedToolNameList(domainResolution);
+    const exposedFilteredList = filterExposedToolDefinitions(
+      [...toolDefinitionMap.values()],
+      exposedNameList,
+    );
+    exposedToolNames =
+      exposedNameList === null ? undefined : exposedFilteredList.map((tool) => tool.name);
+    logRouterDecision({
+      requestId,
+      clientTurnId,
+      generation: turnPart.generation ?? null,
+      deviceId: dependencies.deviceId,
+      routeType: 'llm',
+      routeKind: 'ai_needed',
+      domain: domainResolution.domain,
+      confidence: domainResolution.confidence,
+      toolCatalogSize: exposedToolNames?.length ?? toolDefinitionMap.size,
+      fallbackUsed: exposedNameList === null,
+      routerElapsedMs: Date.now() - domainStartMs,
+    });
+  }
 
   // Gemini Live: audio → Gemini → audio (bypass STT/LLM/TTS)
   // Si el setup viene fallando (esta key no tiene Live), se salta directo
@@ -133,23 +268,29 @@ export async function executeApolloTurn(
     console.log(
       JSON.stringify({ level: 'info', message: 'ApolloGemini: TURN_START gemini live' }),
     );
-    const toolDefinitionList = [...toolDefinitionMap.values()].map((tool) => ({
+    const toolDefinitionList = toolDefinitionMapWithReachableDevice.map((tool) => ({
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
     }));
-    const systemPrompt = `${sessionSystemPrompt}${focusNote}${telemetryNote}${installedToolNote}`;
+    const systemPrompt = `${sessionSystemPrompt}${focusNote}${telemetryNote}${deviceContextNote}${installedToolNote}`;
     try {
       const geminiResult = await handleGeminiLiveTurn({
         audioBuffer: turnPart.audioBuffer,
         environment: dependencies.environment,
         systemPrompt,
         toolDefinitionList,
-        toolDefinitionMap,
+        toolDefinitionMap: new Map(
+          toolDefinitionMapWithReachableDevice.map((toolDefinition) => [
+            toolDefinition.name,
+            toolDefinition,
+          ]),
+        ),
         nowMilliseconds,
         deviceId: dependencies.deviceId,
         effects: dependencies.effects,
         recentHistoryMessageList,
+        request_id: requestId,
       });
 
       // Map Gemini result to TurnOutput for existing playback/messaging logic
@@ -250,14 +391,10 @@ export async function executeApolloTurn(
           createdAt: new Date(),
         });
       }
-      trackLiveOutcome(() =>
-        clearLiveSetupFailure(dependencies.sqlExecutor),
-      );
+      trackLiveOutcome(() => clearLiveSetupFailure(dependencies.sqlExecutor));
       return;
     } catch (error) {
-      trackLiveOutcome(() =>
-        recordLiveSetupFailure(dependencies.sqlExecutor),
-      );
+      trackLiveOutcome(() => recordLiveSetupFailure(dependencies.sqlExecutor));
       console.error(
         JSON.stringify({
           level: 'error',
@@ -275,12 +412,42 @@ export async function executeApolloTurn(
         llm: async ({ messageList }) => {
           const userMessage = messageList.findLast((message) => message.role === 'user');
           const userText = userMessage?.role === 'user' ? userMessage.content : '';
-          return {
+          console.log(
+            JSON.stringify({
+              level: 'debug',
+              message: '[worker-debug] llm_start',
+              request_id: requestId,
+              mode: 'mock',
+            }),
+          );
+          const result = {
             text: `Mock: ${userText}`,
             toolCallList: [],
           };
+          console.log(
+            JSON.stringify({
+              level: 'debug',
+              message: '[worker-debug] llm_end',
+              request_id: requestId,
+              mode: 'mock',
+              textLength: result.text.length,
+            }),
+          );
+          return result;
         },
-        tts: async (text) => encodeMockSpeechAudio(text),
+        tts: async (text) => {
+          const result = encodeMockSpeechAudio(text);
+          console.log(
+            JSON.stringify({
+              level: 'debug',
+              message: '[worker-debug] tts_end',
+              request_id: requestId,
+              mode: 'mock',
+              audioBytes: result.byteLength,
+            }),
+          );
+          return result;
+        },
       }
     : {
         stt: async (audioBuffer) => {
@@ -292,9 +459,7 @@ export async function executeApolloTurn(
             isLlmQuotaCooldownActive,
           } = await import('@/voice/provider');
           const useFallbackStt = async (reason: string) => {
-            console.log(
-              JSON.stringify({ level: 'warn', message: reason }),
-            );
+            console.log(JSON.stringify({ level: 'warn', message: reason }));
             return transcribeWithFallbackStt({
               environment: dependencies.environment,
               audioBuffer,
@@ -329,6 +494,75 @@ export async function executeApolloTurn(
           }
         },
         llm: async ({ messageList, toolDefinitionList, onTextDelta }) => {
+          const llmStartMs = Date.now();
+          console.log(
+            JSON.stringify({
+              level: 'debug',
+              message: '[worker-debug] llm_start',
+              request_id: requestId,
+              mode: 'gemini',
+              messageListLength: messageList.length,
+            }),
+          );
+
+          // ── Workers AI fast path (Llama 3.2 1B) ──────────────────
+          // Try Workers AI first for simple questions.  It's free,
+          // runs on Cloudflare's edge, and returns in <1 s for short
+          // prompts.  If the model is unavailable or returns empty, we
+          // fall through to Gemini below.
+          if (dependencies.environment.AI !== undefined) {
+            try {
+              const workersAiResult = await chatWithWorkersAi({
+                environment: dependencies.environment,
+                messageList: messageList as unknown as {
+                  readonly role: string;
+                  readonly content: string | null;
+                }[],
+                onTextDelta,
+                request_id: requestId,
+              });
+              const workersAiElapsedMs = Date.now() - llmStartMs;
+              console.log(
+                JSON.stringify({
+                  level: 'info',
+                  message: 'WorkersAI_LLM_success',
+                  elapsedMs: workersAiElapsedMs,
+                  responseLength: workersAiResult.text.length,
+                  toolCallCount: workersAiResult.toolCallList.length,
+                }),
+              );
+              // Workers AI 1B doesn't support function calling, so if it
+              // returned tool calls we ignore them and fall through to Gemini.
+              if (
+                workersAiResult.toolCallList.length === 0 &&
+                workersAiResult.text.length > 0
+              ) {
+                return workersAiResult;
+              }
+              console.log(
+                JSON.stringify({
+                  level: 'info',
+                  message: 'WorkersAI_LLM_no_useful_result, escalating to Gemini',
+                  hasToolCalls: workersAiResult.toolCallList.length > 0,
+                  hasText: workersAiResult.text.length > 0,
+                }),
+              );
+            } catch (workersAiError) {
+              console.log(
+                JSON.stringify({
+                  level: 'warn',
+                  message: 'WorkersAI_LLM_failed, escalating to Gemini',
+                  error:
+                    workersAiError instanceof Error
+                      ? workersAiError.message
+                      : String(workersAiError),
+                  elapsedMs: Date.now() - llmStartMs,
+                }),
+              );
+            }
+          }
+          // ── End Workers AI path ───────────────────────────────────
+
           await dependencies.acquireGeminiToken();
           const {
             isLlmFallbackConfigured,
@@ -341,31 +575,60 @@ export async function executeApolloTurn(
             typeof chatWithFallbackLlm
           >[0]['messageList'];
           const useFallbackForTurn = async (reason: string) => {
+            const llmElapsedMs = Date.now() - llmStartMs;
             console.log(
-              JSON.stringify({ level: 'warn', message: reason }),
+              JSON.stringify({
+                level: 'debug',
+                message: '[worker-debug] llm_end',
+                request_id: requestId,
+                mode: 'gemini',
+                elapsedMs: llmElapsedMs,
+                error: reason,
+              }),
             );
+            console.log(JSON.stringify({ level: 'warn', message: reason }));
             return chatWithFallbackLlm({
               environment: dependencies.environment,
               messageList: fallbackMessageList,
               toolDefinitionList,
               onTextDelta,
+              request_id: requestId,
             });
           };
           if (
             dependencies.environment.LLM_FALLBACK_FORCE === '1' &&
             isLlmFallbackConfigured(dependencies.environment)
           ) {
+            const llmElapsedMs = Date.now() - llmStartMs;
+            console.log(
+              JSON.stringify({
+                level: 'debug',
+                message: '[worker-debug] llm_end',
+                request_id: requestId,
+                mode: 'gemini',
+                elapsedMs: llmElapsedMs,
+                error: 'LLM_FALLBACK_FORCE',
+              }),
+            );
             return useFallbackForTurn(
               'ApolloGemini: LLM_FALLBACK_FORCE active, skipping Gemini for this turn',
             );
           }
           if (
             isLlmFallbackConfigured(dependencies.environment) &&
-            isLlmQuotaCooldownActive(
-              dependencies.sqlExecutor,
-              dependencies.environment,
-            )
+            isLlmQuotaCooldownActive(dependencies.sqlExecutor, dependencies.environment)
           ) {
+            const llmElapsedMs = Date.now() - llmStartMs;
+            console.log(
+              JSON.stringify({
+                level: 'debug',
+                message: '[worker-debug] llm_end',
+                request_id: requestId,
+                mode: 'gemini',
+                elapsedMs: llmElapsedMs,
+                error: 'quota_cooldown',
+              }),
+            );
             return useFallbackForTurn(
               'ApolloGemini: quota cooldown active, skipping Gemini for this turn',
             );
@@ -388,6 +651,7 @@ export async function executeApolloTurn(
               }[],
               toolDefinitionList,
               onTextDelta: streamDeltas ? onTextDelta : undefined,
+              request_id: requestId,
             });
           const defaultModelId =
             dependencies.environment.GEMINI_MODEL ?? 'models/gemini-3.6-flash';
@@ -400,8 +664,7 @@ export async function executeApolloTurn(
               console.log(
                 JSON.stringify({
                   level: 'warn',
-                  message:
-                    'ApolloGemini: TOOL_CALL sin firma, reintentando el request',
+                  message: 'ApolloGemini: TOOL_CALL sin firma, reintentando el request',
                 }),
               );
               geminiResult = await runGeminiLlm(defaultModelId, false);
@@ -421,23 +684,41 @@ export async function executeApolloTurn(
                 );
               }
             }
-            trackQuotaOutcome(() =>
-              clearLlmQuotaFailure(dependencies.sqlExecutor),
+            trackQuotaOutcome(() => clearLlmQuotaFailure(dependencies.sqlExecutor));
+            const llmElapsedMs = Date.now() - llmStartMs;
+            console.log(
+              JSON.stringify({
+                level: 'debug',
+                message: '[worker-debug] llm_end',
+                request_id: requestId,
+                mode: 'gemini',
+                elapsedMs: llmElapsedMs,
+                textLength: geminiResult.text.length,
+                toolCallCount: geminiResult.toolCallList.length,
+              }),
             );
             return geminiResult;
           } catch (llmError) {
             const isThoughtSig400 =
-              llmError instanceof Error &&
-              llmError.message.includes('thought_signature');
+              llmError instanceof Error && llmError.message.includes('thought_signature');
             if (isThoughtSig400 && isLlmFallbackConfigured(dependencies.environment)) {
+              const llmElapsedMs = Date.now() - llmStartMs;
+              console.log(
+                JSON.stringify({
+                  level: 'debug',
+                  message: '[worker-debug] llm_end',
+                  request_id: requestId,
+                  mode: 'gemini',
+                  elapsedMs: llmElapsedMs,
+                  error: 'thought_sig_400_fallback',
+                }),
+              );
               return useFallbackForTurn(
                 'ApolloGemini: 400 sin firma (historial Groq→Gemini), usando fallback',
               );
             }
             if (isGeminiQuotaExceededError(llmError)) {
-              trackQuotaOutcome(() =>
-                recordLlmQuotaFailure(dependencies.sqlExecutor),
-              );
+              trackQuotaOutcome(() => recordLlmQuotaFailure(dependencies.sqlExecutor));
               if (isLlmFallbackConfigured(dependencies.environment)) {
                 return useFallbackForTurn(
                   'ApolloGemini: QUOTA_EXCEEDED using LLM fallback for this turn',
@@ -447,22 +728,103 @@ export async function executeApolloTurn(
             throw llmError;
           }
         },
-        tts: async (text) => {
-          const { shouldUseFallbackTts, recordGeminiTtsUsageCharCount } = await import(
-            '@/voice/quota'
+        tts: async (text, voiceId) => {
+          const ttsConfig = turnPart.ttsConfig;
+          const provider = ttsConfig?.provider ?? 'cloudflare';
+          const voice = ttsConfig?.voice ?? voiceId ?? 'carina';
+          const ttsStartMs = Date.now();
+          console.log(
+            JSON.stringify({
+              level: 'debug',
+              message: '[worker-debug] tts_start',
+              request_id: requestId,
+              textLength: text.length,
+              provider,
+              voice,
+            }),
           );
-          const { isWorkersAiTtsAvailable, synthesizeWithWorkersAi } = await import(
-            '@/voice/fallback'
-          );
+
+          if (provider === 'cloudflare') {
+            const {
+              synthesizeWithAura2,
+              AURA2_VOICE_LIST,
+              isAura2QuotaExceededError,
+              Aura2QuotaExceededError,
+            } = await import('@/voice/aura2');
+            const aura2Voice =
+              AURA2_VOICE_LIST.find((v) => v.id === voice)?.id ?? 'carina';
+            try {
+              const result = await synthesizeWithAura2({
+                text,
+                voice: aura2Voice,
+                environment: dependencies.environment,
+              });
+              console.log(
+                JSON.stringify({
+                  level: 'debug',
+                  message: '[worker-debug] tts_end',
+                  request_id: requestId,
+                  elapsedMs: Date.now() - ttsStartMs,
+                  audioBytes: result.byteLength,
+                  provider: 'aura2',
+                }),
+              );
+              return result;
+            } catch (aura2Error) {
+              if (isAura2QuotaExceededError(aura2Error)) {
+                console.error(
+                  JSON.stringify({
+                    level: 'error',
+                    message: 'apollo_tts_aura2_quota_exceeded_daily_limit_reached',
+                  }),
+                );
+                console.log(
+                  JSON.stringify({
+                    level: 'debug',
+                    message: '[worker-debug] tts_end',
+                    request_id: requestId,
+                    elapsedMs: Date.now() - ttsStartMs,
+                    audioBytes: 0,
+                    provider: 'aura2_quota_exceeded',
+                  }),
+                );
+                return new ArrayBuffer(0);
+              }
+              console.error(
+                JSON.stringify({
+                  level: 'error',
+                  message: 'apollo_tts_aura2_failed_falling_back_to_gemini',
+                  error:
+                    aura2Error instanceof Error ? aura2Error.message : String(aura2Error),
+                }),
+              );
+            }
+          }
+
+          const { shouldUseFallbackTts, recordGeminiTtsUsageCharCount } =
+            await import('@/voice/quota');
+          const { isWorkersAiTtsAvailable, synthesizeWithWorkersAi } =
+            await import('@/voice/fallback');
           const tryWorkersAiTts = async (): Promise<ArrayBuffer | null> => {
             if (!isWorkersAiTtsAvailable(dependencies.environment)) {
               return null;
             }
             try {
-              return await synthesizeWithWorkersAi({
+              const result = await synthesizeWithWorkersAi({
                 text,
                 environment: dependencies.environment,
               });
+              console.log(
+                JSON.stringify({
+                  level: 'debug',
+                  message: '[worker-debug] tts_end',
+                  request_id: requestId,
+                  elapsedMs: Date.now() - ttsStartMs,
+                  audioBytes: result.byteLength,
+                  provider: 'workersai',
+                }),
+              );
+              return result;
             } catch (fallbackTtsError) {
               console.error(
                 JSON.stringify({
@@ -483,9 +845,8 @@ export async function executeApolloTurn(
               return fallbackAudio;
             }
           }
-          const { synthesizeWithGemini, isGeminiTtsQuotaExceededError } = await import(
-            '@/voice/gemini'
-          );
+          const { synthesizeWithGemini, isGeminiTtsQuotaExceededError } =
+            await import('@/voice/gemini');
           try {
             const geminiAudio = await synthesizeWithGemini({
               text,
@@ -518,16 +879,28 @@ export async function executeApolloTurn(
   const baseTurnInput: TurnInput = {
     text: turnPart.text,
     audioBuffer: turnPart.audioBuffer,
+    request_id: requestId,
+    client_turn_id: turnPart.client_turn_id,
+    generation: turnPart.generation,
+    exposedToolNames,
+    // BLOCK 6.1: el tool loop del LLM y la resolución de confirmaciones usan el
+    // mismo pipeline de target que el router determinista.
+    resolveCapabilityTarget: dependencies.resolveCapabilityTarget,
     speechMode: dependencies.currentState.speechMode,
     focusState,
     sqlExecutor: dependencies.sqlExecutor,
     environment: dependencies.environment,
-    toolDefinitionMap,
+    toolDefinitionMap: new Map(
+      toolDefinitionMapWithReachableDevice.map((toolDefinition) => [
+        toolDefinition.name,
+        toolDefinition,
+      ]),
+    ),
     pendingConfirmation: turnPart.pendingConfirmation,
     confirmOk: turnPart.confirmOk,
     nowMilliseconds,
     deviceId: dependencies.deviceId,
-    systemPromptOverride: `${sessionSystemPrompt}${focusNote}${telemetryNote}${installedToolNote}`,
+    systemPromptOverride: `${sessionSystemPrompt}${focusNote}${telemetryNote}${deviceContextNote}${installedToolNote}`,
     recentHistoryMessageList,
     effects: dependencies.effects,
     onThinkingCaption: async (caption) => {
@@ -565,7 +938,9 @@ export async function executeApolloTurn(
     isMockVoice ? baseTurnInput : { ...baseTurnInput, recallSemanticMemoryContentList },
   );
 
-  for (const uiEventName of turnOutput.uiEventList) {
+  // Filter out SPEAK_DONE — TTS audio streams asynchronously below.
+  const uiEventList = turnOutput.uiEventList.filter((e) => e !== 'SPEAK_DONE');
+  for (const uiEventName of uiEventList) {
     dependencies.uiMachine.transition(uiEventName);
   }
 
@@ -634,9 +1009,12 @@ export async function executeApolloTurn(
   }
 
   let speechWasAborted = false;
-  if (turnOutput.ttsAudio !== undefined) {
+  const ttsPromise = turnOutput.ttsAudioPromise;
+  if (ttsPromise !== undefined) {
     const followUpSegmentTextList = turnOutput.ttsFollowUpSegmentTextList ?? [];
-    let currentAudioBuffer: ArrayBuffer | undefined = turnOutput.ttsAudio;
+    let currentAudioBuffer: ArrayBuffer | undefined = await ttsPromise.catch(
+      () => undefined,
+    );
     let followUpIndex = 0;
     let wasAborted = false;
 
@@ -661,9 +1039,6 @@ export async function executeApolloTurn(
     };
 
     while (currentAudioBuffer !== undefined) {
-      // The next segment renders while this one plays, so synthesis latency
-      // hides behind the paced stream instead of gapping the speech. A failed
-      // follow-up just ends the reply early — the turn already committed.
       const nextAudioBufferPromise =
         followUpIndex < followUpSegmentTextList.length
           ? synthesizeFollowUpSegmentAudio(followUpSegmentTextList[followUpIndex])
@@ -687,10 +1062,6 @@ export async function executeApolloTurn(
       const getPlaybackAckForSequence = dependencies.getPlaybackAckForSequence;
       const playbackPacingOptions: PlaybackPacingOptions = {};
       if (!isFirstSegment) {
-        // Follow-up segments land on a device that is still draining the
-        // previous one, so the full 2 s burst would risk the same queue
-        // overflow the pacing exists to avoid; a small allowance only
-        // covers network jitter.
         playbackPacingOptions.prebufferMilliseconds = 500;
       }
       if (dependencies.isSpeechAborted !== undefined) {
@@ -719,8 +1090,6 @@ export async function executeApolloTurn(
     }
 
     if (wasAborted) {
-      // The device counts bytes against what tts_start promised to know when
-      // speech ends, and that total will never arrive now.
       audioTargetConnection.send(encodeAudioMessage({ type: 'tts_aborted' }));
     }
     speechWasAborted = wasAborted;
@@ -779,8 +1148,7 @@ function trackQuotaOutcome(record: () => void): void {
       JSON.stringify({
         level: 'error',
         message: 'apollo_llm_quota_tracking_failed',
-        error:
-          quotaError instanceof Error ? quotaError.message : String(quotaError),
+        error: quotaError instanceof Error ? quotaError.message : String(quotaError),
       }),
     );
   }
@@ -794,7 +1162,8 @@ async function shouldAttemptLiveTurn(
       console.log(
         JSON.stringify({
           level: 'warn',
-          message: 'ApolloGemini: live skip active (sin Live en esta key), usando rama clásica',
+          message:
+            'ApolloGemini: live skip active (sin Live en esta key), usando rama clásica',
         }),
       );
       return false;
@@ -805,7 +1174,277 @@ async function shouldAttemptLiveTurn(
   }
 }
 
-function encodeMockSpeechAudio(spokenText: string): ArrayBuffer {  const encodedSpokenTextBytes = new TextEncoder().encode(spokenText);
+// ── Deterministic turn executor ────────────────────────────────────────
+// Handles PC commands, time, and date queries without any LLM call.
+// Sends text responses as streaming chunks so the Desktop can display them
+// incrementally, then sends turn_end like the classic path.
+
+type DeterministicTurnInput = {
+  connection: Connection;
+  dependencies: ApolloTurnRuntimeDependencies;
+  routerOutcome: Extract<
+    RouterOutcome,
+    {
+      kind:
+        | 'pc_command'
+        | 'mobile_command'
+        | 'time_answer'
+        | 'date_answer'
+        | 'memory_write';
+    }
+  >;
+  userText: string;
+  toolDefinitionMap: ReadonlyMap<string, ToolDefinition>;
+  nowMilliseconds: number;
+  requestId: string;
+  clientTurnId: string;
+  routerElapsedMs: number;
+  generation?: number;
+};
+
+async function executeDeterministicTurn(input: DeterministicTurnInput): Promise<void> {
+  const {
+    connection,
+    dependencies,
+    routerOutcome,
+    userText,
+    toolDefinitionMap,
+    nowMilliseconds,
+    requestId,
+    clientTurnId,
+    routerElapsedMs,
+    generation,
+  } = input;
+
+  const startMs = Date.now();
+
+  // 1. Push thinking state
+  dependencies.uiMachine.transition('START_THINK');
+  const thinkingState = dependencies.getCurrentState();
+  const thinkingCaption =
+    routerOutcome.kind === 'mobile_command'
+      ? `Ejecutando ${routerOutcome.commandType} en el teléfono…`
+      : routerOutcome.kind === 'pc_command'
+        ? `Ejecutando ${routerOutcome.commandType}…`
+        : routerOutcome.kind === 'time_answer'
+          ? ' Consultando hora…'
+          : ' Consultando fecha…';
+  dependencies.setAgentState({
+    ...thinkingState,
+    uiState: 'thinking',
+    caption: thinkingCaption,
+  });
+  connection.send(
+    encodeServerToDeviceMessage({
+      type: 'ui_state',
+      state: 'thinking',
+      speechMode: thinkingState.speechMode,
+      caption: thinkingCaption,
+      emotion: resolveDeskFaceEmotion('thinking'),
+      accentColor: resolveDeskSpeechMode(thinkingState.speechMode).accentColor,
+    }),
+  );
+
+  // 2. Tool selection + authorization. El router NO ejecuta: elige la
+  // intención, selectRouterToolRequest elige la tool, y resolveToolExecution
+  // aplica safety. Una tool 'unsafe' (close_pc_app, lock_pc_screen) devuelve
+  // needs_confirm y NO se ejecuta hasta que el usuario apruebe.
+  let responseText = routerOutcome.responseText;
+  let pendingConfirmation: PendingToolConfirmation | undefined;
+
+  if (
+    routerOutcome.kind === 'pc_command' ||
+    routerOutcome.kind === 'mobile_command' ||
+    routerOutcome.kind === 'memory_write'
+  ) {
+    const selectedToolRequest = selectRouterToolRequest(routerOutcome);
+    const capabilityIntent = resolveCapabilityIntent(routerOutcome);
+    const actionStartMs = Date.now();
+
+    // Un solo pipeline para deterministic y LLM: capability → target →
+    // authorization → confirmation → revalidación → execution.
+    const outcome = await executeToolWithTargetResolution({
+      toolName: selectedToolRequest.toolName,
+      args: selectedToolRequest.args,
+      origin: 'deterministic_router',
+      toolDefinitionMap,
+      context: {
+        environment: dependencies.environment,
+        nowMilliseconds,
+        deviceId: dependencies.deviceId,
+        effects: dependencies.effects,
+      },
+      resolver: dependencies.resolveCapabilityTarget,
+      ...(capabilityIntent === null
+        ? {}
+        : { targetPreference: capabilityIntent.targetPreference }),
+      correlation: { requestId, clientTurnId, generation },
+      onTiming: (timing) => {
+        console.log(
+          buildCapabilityTimingLogLine({
+            requestId,
+            clientTurnId,
+            generation,
+            toolName: selectedToolRequest.toolName,
+            capabilityName: capabilityIntent?.capabilityName ?? null,
+            timing,
+            routingMs: routerElapsedMs,
+            totalActionMs: Date.now() - actionStartMs,
+          }),
+        );
+      },
+    });
+
+    if (outcome.status === 'needs_confirm') {
+      pendingConfirmation = outcome.pending;
+      responseText = outcome.pending.summary;
+    } else if (outcome.status === 'skipped') {
+      responseText = outcome.cancellation.message;
+    } else if (!outcome.result.ok) {
+      responseText = outcome.result.summary;
+    }
+  }
+
+  // 3. Same order as the LLM path: persist BEFORE confirm_request so #resolveConfirm
+  // finds it even if the device answers while this turn is still speaking.
+  if (pendingConfirmation !== undefined) {
+    await dependencies.persistPendingConfirmation(pendingConfirmation);
+    await dependencies.scheduleConfirmExpiry(pendingConfirmation.id);
+    connection.send(encodeServerToDeviceMessage({ type: 'play_effect', name: 'chime' }));
+    connection.send(
+      encodeServerToDeviceMessage({
+        type: 'confirm_request',
+        id: pendingConfirmation.id,
+        summary: pendingConfirmation.summary,
+        expiresAt: pendingConfirmation.expiresAt,
+      }),
+    );
+  }
+
+  // 4. Send streaming text response
+  connection.send(
+    encodeServerToDeviceMessage({
+      type: 'text_response_chunk',
+      text: responseText,
+    }),
+  );
+  connection.send(
+    encodeServerToDeviceMessage({
+      type: 'text_response_end',
+    }),
+  );
+
+  // 5. Push speaking state then turn_end
+  dependencies.uiMachine.transition('START_SPEAK');
+  const speakState = dependencies.getCurrentState();
+  dependencies.setAgentState({
+    ...speakState,
+    uiState: 'speaking',
+    caption: responseText,
+    pendingConfirmId: pendingConfirmation?.id ?? null,
+    pendingConfirmSummary: pendingConfirmation?.summary ?? null,
+  });
+  connection.send(
+    encodeServerToDeviceMessage({
+      type: 'ui_state',
+      state: 'speaking',
+      speechMode: speakState.speechMode,
+      caption: responseText,
+      emotion: resolveDeskFaceEmotion('speaking'),
+      accentColor: resolveDeskSpeechMode(speakState.speechMode).accentColor,
+    }),
+  );
+
+  // 6. turn_end
+  connection.send(
+    encodeServerToDeviceMessage({
+      type: 'turn_end',
+      expectsReply: false,
+    }),
+  );
+
+  // 7. Save to session
+  if (userText.length > 0) {
+    await dependencies.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: 'user',
+      parts: [{ type: 'text', text: userText }],
+      createdAt: new Date(),
+    });
+    await dependencies.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      parts: [{ type: 'text', text: responseText }],
+      createdAt: new Date(),
+    });
+  }
+
+  // 8. Back to idle
+  dependencies.uiMachine.transition('SPEAK_DONE');
+  const idleState = dependencies.getCurrentState();
+  dependencies.setAgentState({
+    ...idleState,
+    uiState: dependencies.uiMachine.state,
+    caption: responseText,
+  });
+
+  const elapsedMs = Date.now() - startMs;
+  console.log(
+    JSON.stringify({
+      level: 'info',
+      message: 'deterministic_turn_complete',
+      kind: routerOutcome.kind,
+      commandType:
+        routerOutcome.kind === 'pc_command' ? routerOutcome.commandType : undefined,
+      authorization: pendingConfirmation === undefined ? 'executed' : 'needs_confirm',
+      pendingConfirmId: pendingConfirmation?.id ?? null,
+      elapsedMs,
+      responseLength: responseText.length,
+      request_id: requestId,
+      client_turn_id: clientTurnId,
+      device_id: dependencies.deviceId,
+    }),
+  );
+}
+
+function logRouterDecision(input: {
+  readonly requestId: string;
+  readonly clientTurnId: string;
+  readonly generation: number | null;
+  readonly deviceId: string;
+  readonly routeType: 'deterministic' | 'llm';
+  readonly routeKind: string;
+  readonly commandType?: string;
+  readonly domain: string;
+  readonly confidence: string;
+  readonly toolCatalogSize: number;
+  readonly fallbackUsed: boolean;
+  readonly routerElapsedMs: number;
+}): void {
+  console.log(
+    JSON.stringify({
+      level: 'info',
+      message: 'router_decision',
+      route_type: input.routeType,
+      route_kind: input.routeKind,
+      command_type: input.commandType,
+      domain: input.domain,
+      confidence: input.confidence,
+      tool_catalog_size: input.toolCatalogSize,
+      fallback_used: input.fallbackUsed,
+      routing_duration_ms: input.routerElapsedMs,
+      request_id: input.requestId,
+      client_turn_id: input.clientTurnId,
+      // El turn_id del cliente Python viaja como client_turn_id (FASE 26); no se
+      // duplica bajo otro nombre. generation si viene en el mismo mensaje.
+      generation: input.generation,
+      device_id: input.deviceId,
+    }),
+  );
+}
+
+function encodeMockSpeechAudio(spokenText: string): ArrayBuffer {
+  const encodedSpokenTextBytes = new TextEncoder().encode(spokenText);
   const mockSpeechAudioBuffer = new ArrayBuffer(encodedSpokenTextBytes.byteLength);
   new Uint8Array(mockSpeechAudioBuffer).set(encodedSpokenTextBytes);
   return mockSpeechAudioBuffer;

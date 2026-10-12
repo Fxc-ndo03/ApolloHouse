@@ -1,0 +1,69 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Apollo Desktop",
+  "version": "0.1.1",
+  "identifier": "com.apollo.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": {
+      "script": "bun run dev",
+      "cwd": "../ui"
+    },
+    "beforeBuildCommand": {
+      "script": "bun run build && bun ../src-tauri/bundle-resources.mjs && bun ../src-tauri/bundle-python-runtime.mjs",
+      "cwd": "../ui"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Apollo",
+        "url": "/",
+        "width": 1000,
+        "height": 650,
+        "minWidth": 750,
+        "minHeight": 520,
+        "maxWidth": 1400,
+        "maxHeight": 900,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": true,
+        "visible": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": [
+      "resources/juana-client",
+      "resources/python-runtime"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "allowDowngrades": true,
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {}
+}

@@ -16,10 +16,12 @@ import { translateTool } from '@/tools/translate';
 import { webSearchTool } from '@/tools/web';
 import type { ToolDefinition } from '@/tools/types';
 import { weatherNowTool } from '@/tools/weather';
+import { listMobileToolDefinitionList } from '@/tools/mobile';
 import { listPcToolDefinitionList } from '@/tools/pc';
 
 export function listBuiltinToolDefinitionList(): readonly ToolDefinition[] {
   return [
+    ...listMobileToolDefinitionList(),
     weatherNowTool,
     setWeatherLocationTool,
     rememberFactTool,

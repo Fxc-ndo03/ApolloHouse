@@ -4,7 +4,15 @@ import { recallMemoryRecords, type MemorySqlExecutor } from '@/memory/store';
 import { buildCurrentTimePromptNote } from '@/persona/clock';
 import { buildApolloSoulPrompt } from '@/persona/soul';
 import type { DeskUiEventName } from '@/session/machine';
-import { executeToolByName, resolvePendingToolConfirmation } from '@/tools/router';
+import { resolvePendingToolConfirmation } from '@/tools/router';
+import { executeToolWithTargetResolution } from '@/tools/target';
+import {
+  buildCancellationResult,
+  buildCancellationToolResult,
+  type CancellationReason,
+} from '@/tools/cancellation';
+import { resolveCapabilityForToolName } from '@/tools/capability-index';
+import type { CapabilityTargetResolver } from '@/devices/target';
 import type {
   DeskToolEffects,
   PendingToolConfirmation,
@@ -47,6 +55,16 @@ export type VoiceAdapters = {
 export type TurnInput = {
   readonly audioBuffer?: ArrayBuffer;
   readonly text?: string;
+  readonly request_id?: string;
+  readonly client_turn_id?: string;
+  // BLOCK 6.2.1: ancla de correlación para los eventos de TTS de cancelación.
+  readonly generation?: number;
+  // Nombres expuestos al LLM (domain routing). undefined = catálogo completo.
+  // El mapa de EJECUCION (input.toolDefinitionMap) queda siempre completo.
+  readonly exposedToolNames?: readonly string[];
+  // BLOCK 6.1: el LLM usa el mismo pipeline de target que el router
+  // determinista. Ausente = sin registry, la tool se ejecuta como antes.
+  readonly resolveCapabilityTarget?: CapabilityTargetResolver;
   readonly speechMode: string;
   readonly focusState: DeskFocusState;
   readonly sqlExecutor: MemorySqlExecutor;
@@ -72,6 +90,7 @@ export type TurnOutput = {
   readonly transcript: string;
   readonly spokenText: string;
   readonly ttsAudio?: ArrayBuffer;
+  readonly ttsAudioPromise?: Promise<ArrayBuffer | undefined>;
   // Segments after the first, still as text: the caller synthesizes them while
   // the device is already playing ttsAudio, hiding synthesis latency.
   readonly ttsFollowUpSegmentTextList?: readonly string[];
@@ -91,12 +110,20 @@ export type TurnOutput = {
 
 function buildToolDefinitionListFromMap(
   toolDefinitionMap: ReadonlyMap<string, ToolDefinition>,
+  exposedToolNames?: readonly string[],
 ): readonly LanguageModelToolDescriptor[] {
-  return [...toolDefinitionMap.values()].map((toolDefinition) => ({
-    name: toolDefinition.name,
-    description: toolDefinition.description,
-    parameters: toolDefinition.parameters,
-  }));
+  const exposedNameSet =
+    exposedToolNames === undefined ? null : new Set(exposedToolNames);
+  return [...toolDefinitionMap.values()]
+    .filter(
+      (toolDefinition) =>
+        exposedNameSet === null || exposedNameSet.has(toolDefinition.name),
+    )
+    .map((toolDefinition) => ({
+      name: toolDefinition.name,
+      description: toolDefinition.description,
+      parameters: toolDefinition.parameters,
+    }));
 }
 
 function buildAssistantToolCallMessage(
@@ -131,15 +158,132 @@ function buildToolResultMessage(
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancelación hablada (Block 6.2): una sola construcción de turno para todos
+// los motivos. El caption y el TTS salen del MISMO string que produce el mapa
+// central, así que no puede haber un texto hablado que no sea el del caption.
+// ─────────────────────────────────────────────────────────────────────────────
+// Sin `async` a propósito: la cancelación no puede volver a serializarse
+// detrás de la síntesis. La promesa de audio se entrega al runtime como
+// trabajo asíncrono del turno.
+function buildSpokenCancellationTurn(input: {
+  readonly input: TurnInput;
+  readonly uiEventList: DeskUiEventName[];
+  readonly transcript: string;
+  readonly spokenText: string;
+  readonly toolResultList: ToolExecutionResult[];
+  readonly executedToolCallList: { name: string; summary: string }[];
+}): TurnOutput {
+  // Los anchors se capturan AHORA: la promesa puede resolverse más tarde y sus
+  // eventos tienen que seguirority lb착 de este turno, nunca de otro.
+  const requestId = input.input.request_id ?? null;
+  const clientTurnId = input.input.client_turn_id ?? null;
+  const generation = input.input.generation ?? null;
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] cancellation_tts_started',
+      request_id: requestId,
+      client_turn_id: clientTurnId,
+      generation,
+      textLength: input.spokenText.length,
+    }),
+  );
+  const ttsAudioPromise = input.input.adapters
+    .tts(input.spokenText, APOLLO_TTS_VOICE)
+    .then((audioBuffer) => {
+      console.log(
+        JSON.stringify({
+          level: 'debug',
+          message: '[worker-debug] cancellation_tts_completed',
+          request_id: requestId,
+          client_turn_id: clientTurnId,
+          generation,
+          audioBytes: audioBuffer.byteLength,
+        }),
+      );
+      return audioBuffer;
+    })
+    // Un fallo de TTS no cambia el resultado de la cancelación: el turno ya
+    // está cerrado con su caption.
+    .catch(() => undefined);
+  return {
+    uiEventList: input.uiEventList,
+    transcript: input.transcript,
+    spokenText: input.spokenText,
+    speechMode: input.input.speechMode,
+    focusState: input.input.focusState,
+    memoryContentList: [],
+    toolResultList: input.toolResultList,
+    executedToolCallList: input.executedToolCallList,
+    expectsReply: false,
+    ttsAudioPromise,
+  };
+}
+
+function emitCancellationTelemetry(input: {
+  readonly reason: string;
+  readonly retryable: boolean;
+  readonly toolName: string;
+  readonly capabilityName: string | null;
+  readonly targetDeviceId: string | null;
+  readonly targetDeviceType: string | null;
+  readonly requestId: string;
+  readonly clientTurnId: string | null;
+  readonly phase: 'tool' | 'confirmation';
+}): void {
+  console.log(
+    JSON.stringify({
+      level: 'info',
+      message: 'device_execution_cancelled',
+      reason: input.reason,
+      retryable: input.retryable,
+      phase: input.phase,
+      tool_name: input.toolName,
+      capability: input.capabilityName,
+      target_device_id: input.targetDeviceId,
+      target_device_type: input.targetDeviceType,
+      request_id: input.requestId,
+      client_turn_id: input.clientTurnId,
+      generation: null,
+    }),
+  );
+}
+
 export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
+  const requestId = input.request_id ?? 'unknown';
+  const clientTurnId = input.client_turn_id ?? 'none';
+  const turnStartMs = Date.now();
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] turn_start',
+      request_id: requestId,
+      client_turn_id: clientTurnId,
+      textLength: input.text?.length ?? 0,
+      hasAudio: input.audioBuffer !== undefined,
+    }),
+  );
   const uiEventList: DeskUiEventName[] = ['START_THINK'];
   const toolResultList: ToolExecutionResult[] = [];
   const executedToolCallList: { name: string; summary: string }[] = [];
+  // Un registro por turno: qué tool yacanceló de forma no-retryable.
+  const nonRetryableCancellationByToolName = new Map<
+    string,
+    ReturnType<typeof buildCancellationResult>
+  >();
   let pendingConfirmation = input.pendingConfirmation;
   let resolvedConfirmation: PendingToolConfirmation | undefined;
   let resolvedConfirmationResult: ToolExecutionResult | undefined;
 
   if (pendingConfirmation !== undefined && input.confirmOk !== undefined) {
+    console.log(
+      JSON.stringify({
+        level: 'debug',
+        message: '[worker-debug] confirm_resolution_start',
+        request_id: requestId,
+      }),
+    );
     const resolved = await resolvePendingToolConfirmation(
       input.toolDefinitionMap,
       pendingConfirmation,
@@ -150,30 +294,49 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
         deviceId: input.deviceId,
         effects: input.effects,
       },
+      input.resolveCapabilityTarget,
     );
-    if (!('cancelled' in resolved)) {
-      resolvedConfirmation = pendingConfirmation;
-      resolvedConfirmationResult = resolved;
-      executedToolCallList.push({
-        name: pendingConfirmation.toolName,
-        summary: resolved.summary,
-      });
-    }
-    pendingConfirmation = undefined;
+    const cancelledToolName = pendingConfirmation.toolName;
+    const cancelledCapabilityName = resolveCapabilityForToolName(
+      input.toolDefinitionMap,
+      cancelledToolName,
+    );
+    const cancelledTargetDeviceId = pendingConfirmation.targetDeviceId ?? null;
+    const cancelledTargetDeviceType = pendingConfirmation.targetDeviceType ?? null;
     if ('cancelled' in resolved) {
+      pendingConfirmation = undefined;
+      // Una sola ruta de cancelación: reason → mensaje → caption + TTS.
+      const cancellation = buildCancellationResult(resolved.reason as CancellationReason);
+      emitCancellationTelemetry({
+        reason: cancellation.reason,
+        retryable: cancellation.retryable,
+        toolName: cancelledToolName,
+        capabilityName: cancelledCapabilityName ?? null,
+        targetDeviceId: cancelledTargetDeviceId,
+        targetDeviceType: cancelledTargetDeviceType,
+        requestId,
+        clientTurnId: input.client_turn_id ?? null,
+        phase: 'confirmation',
+      });
       uiEventList.push('CANCEL');
-      return {
+      return buildSpokenCancellationTurn({
+        input,
         uiEventList,
         transcript: input.text?.trim() ?? '',
-        spokenText: 'Cancelado.',
-        speechMode: input.speechMode,
-        focusState: input.focusState,
-        memoryContentList: [],
+        spokenText: cancellation.message,
         toolResultList,
         executedToolCallList,
-        expectsReply: false,
-      };
+      });
     }
+
+    const approvedConfirmation = pendingConfirmation;
+    pendingConfirmation = undefined;
+    resolvedConfirmation = approvedConfirmation;
+    resolvedConfirmationResult = resolved;
+    executedToolCallList.push({
+      name: approvedConfirmation?.toolName ?? resolvedConfirmationResult.summary,
+      summary: resolved.summary,
+    });
     toolResultList.push(resolved);
   }
 
@@ -219,7 +382,10 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
   const systemPrompt =
     systemPromptBase + buildCurrentTimePromptNote(input.nowMilliseconds);
 
-  const toolDefinitionList = buildToolDefinitionListFromMap(input.toolDefinitionMap);
+  const toolDefinitionList = buildToolDefinitionListFromMap(
+    input.toolDefinitionMap,
+    input.exposedToolNames,
+  );
   const toolExecutionContext = {
     environment: input.environment,
     nowMilliseconds: input.nowMilliseconds,
@@ -264,6 +430,16 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
 
   for (let toolRoundIndex = 0; toolRoundIndex < maxToolRoundCount; toolRoundIndex += 1) {
     streamedRoundText = '';
+    console.log(
+      JSON.stringify({
+        level: 'debug',
+        message: '[worker-debug] llm_start',
+        request_id: requestId,
+        toolRoundIndex,
+        messageListLength: messageList.length,
+      }),
+    );
+    const llmStartMs = Date.now();
     const llmResult = await input.adapters.llm({
       messageList,
       toolDefinitionList,
@@ -291,6 +467,19 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
       },
     });
 
+    const llmElapsedMs = Date.now() - llmStartMs;
+    console.log(
+      JSON.stringify({
+        level: 'debug',
+        message: '[worker-debug] llm_end',
+        request_id: requestId,
+        toolRoundIndex,
+        elapsedMs: llmElapsedMs,
+        textLength: llmResult.text.length,
+        toolCallCount: llmResult.toolCallList.length,
+      }),
+    );
+
     if (llmResult.toolCallList.length === 0) {
       spokenText = llmResult.text.trim();
       break;
@@ -303,13 +492,73 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
     );
 
     for (const toolCall of llmResult.toolCallList) {
-      await input.onThinkingCaption?.(mapToolNameToThinkingCaption(toolCall.name));
-      const outcome = await executeToolByName(
-        input.toolDefinitionMap,
-        toolCall.name,
-        toolCall.args,
-        toolExecutionContext,
+      const toolStartMs = Date.now();
+      // Una cancelación no-retryable es estructural: si el modelo la pide
+      // otra vez en este turno, se le devuelve el mismo resultado sin tocar
+      // ninguna tool. El retry lo decide el pipeline, no el modelo.
+      const previousCancellation = nonRetryableCancellationByToolName.get(toolCall.name);
+      if (previousCancellation !== undefined) {
+        const repeatedResult = buildCancellationToolResult(previousCancellation);
+        console.log(
+          JSON.stringify({
+            level: 'debug',
+            message: '[worker-debug] tool_retry_suppressed',
+            request_id: requestId,
+            toolName: toolCall.name,
+            reason: previousCancellation.reason,
+          }),
+        );
+        toolResultList.push(repeatedResult);
+        messageList.push(buildToolResultMessage(toolCall.id, repeatedResult));
+        continue;
+      }
+      console.log(
+        JSON.stringify({
+          level: 'debug',
+          message: '[worker-debug] tool_start',
+          request_id: requestId,
+          toolName: toolCall.name,
+        }),
       );
+      await input.onThinkingCaption?.(mapToolNameToThinkingCaption(toolCall.name));
+      // Un solo camino de ejecución: el LLM no tiene un atajo que esquive la
+      // resolución de target que usa el router determinista.
+      const outcome = await executeToolWithTargetResolution({
+        toolName: toolCall.name,
+        args: toolCall.args,
+        origin: 'llm',
+        toolDefinitionMap: input.toolDefinitionMap,
+        context: toolExecutionContext,
+        resolver: input.resolveCapabilityTarget,
+        correlation: {
+          requestId,
+          clientTurnId: input.client_turn_id ?? null,
+        },
+      });
+      if (outcome.status === 'skipped') {
+        const skippedResult = buildCancellationToolResult(outcome.cancellation);
+        if (!outcome.cancellation.retryable) {
+          nonRetryableCancellationByToolName.set(toolCall.name, outcome.cancellation);
+        }
+        emitCancellationTelemetry({
+          reason: outcome.cancellation.reason,
+          retryable: outcome.cancellation.retryable,
+          toolName: toolCall.name,
+          capabilityName: outcome.capabilityName ?? null,
+          targetDeviceId: null,
+          targetDeviceType: null,
+          requestId,
+          clientTurnId: input.client_turn_id ?? null,
+          phase: 'tool',
+        });
+        toolResultList.push(skippedResult);
+        executedToolCallList.push({
+          name: toolCall.name,
+          summary: skippedResult.summary,
+        });
+        messageList.push(buildToolResultMessage(toolCall.id, skippedResult));
+        continue;
+      }
       if (outcome.status === 'needs_confirm') {
         uiEventList.push('NEED_CONFIRM');
         return {
@@ -330,6 +579,15 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
         name: toolCall.name,
         summary: outcome.result.summary,
       });
+      console.log(
+        JSON.stringify({
+          level: 'debug',
+          message: '[worker-debug] tool_end',
+          request_id: requestId,
+          toolName: toolCall.name,
+          elapsedMs: Date.now() - toolStartMs,
+        }),
+      );
       messageList.push(buildToolResultMessage(toolCall.id, outcome.result));
     }
 
@@ -353,20 +611,41 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
   const targetFirstSegmentText = firstSegmentText ?? spokenText;
 
   uiEventList.push('START_SPEAK');
+  const ttsStartMs = Date.now();
   const speculativeAudio =
     speculativeSegment !== undefined && speculativeSegment.text === targetFirstSegmentText
       ? await speculativeSegment.audioPromise
       : undefined;
-  const ttsAudio =
-    speculativeAudio ??
-    (await input.adapters.tts(targetFirstSegmentText, APOLLO_TTS_VOICE));
-  uiEventList.push('SPEAK_DONE');
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] tts_start',
+      request_id: requestId,
+      textLength: targetFirstSegmentText.length,
+      hasSpeculativeAudio: speculativeAudio !== undefined,
+    }),
+  );
+  const ttsAudioPromise =
+    speculativeAudio !== undefined
+      ? Promise.resolve(speculativeAudio)
+      : input.adapters.tts(targetFirstSegmentText, APOLLO_TTS_VOICE);
+  const turnElapsedMs = Date.now() - turnStartMs;
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] turn_end',
+      request_id: requestId,
+      elapsedMs: turnElapsedMs,
+      transcriptLength: userText.length,
+    }),
+  );
 
   return {
     uiEventList,
     transcript: userText,
     spokenText,
-    ttsAudio,
+    ttsAudio: undefined,
+    ttsAudioPromise,
     ttsFollowUpSegmentTextList,
     speechMode: input.speechMode,
     focusState: input.focusState,

@@ -30,13 +30,12 @@ DEFAULT_PORT = 9876
 PORT = int(os.environ.get("JUANA_CORE_PORT", str(DEFAULT_PORT)))
 SECRET_ENV_VAR = "DEVICE_SHARED_SECRET"
 
-# TTS (piper, es_AR-daniela-high instalado en el venv de la .8)
-TTS_VOICE = os.environ.get("JARVIS_TTS_VOICE", "es_AR-daniela-high")
-TTS_SAMPLE_RATE_IN = 22050  # rate nativo de piper (es_AR-daniela-high)
-TTS_SAMPLE_RATE_OUT = 24000  # rate de playback del sidecar (config.sample_rate_playback)
-_TTS_VENV_PYTHON = os.environ.get(
-    "JARVIS_TTS_PYTHON",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python"),
+# TTS (edge-tts con Microsoft Elena Neural, gratis y rápido)
+TTS_VOICE = os.environ.get("JARVIS_TTS_VOICE", "es-AR-ElenaNeural")
+TTS_SAMPLE_RATE_OUT = 24000  # edge-tts emite a 24kHz; no necesita resample
+_FFMPEG_PATH = os.environ.get(
+    "FFMPEG_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg-7.0.2-amd64-static", "ffmpeg"),
 )
 RESPONSE_TARGET_DEFAULT = "pc"  # "pc" → stream TTS al sidecar; "server" → aplay local
 
@@ -101,33 +100,53 @@ def run_whisper_transcribe(audio_chunks: bytes, language: str = "es") -> str:
 
 
 def synth_pcm(text: str) -> bytes | None:
-    """Genera PCM int16 mono a 24000 Hz con piper (es_AR-daniela-high).
+    """Genera PCM int16 mono a 24000 Hz con edge-tts (es-AR-ElenaNeural).
 
-    Piper emite PCM a 22050 Hz; se resamplea a 24000 (el rate que el sidecar
-    usa en AudioPlayback) con numpy. Devuelve None si falla.
+    Usa edge-tts (Microsoft cloud, gratis) + ffmpeg para convertir MP3→PCM.
+    ~1.7s de latencia vs ~5-12s de Piper local.
     """
     if not text.strip():
         return None
     try:
+        import asyncio
+        import edge_tts
+
+        async def _synthesize():
+            communicate = edge_tts.Communicate(text, TTS_VOICE)
+            mp3_data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    mp3_data += chunk["data"]
+            return mp3_data
+
+        # Usar thread pool para no bloquear el event loop de asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                mp3_data = pool.submit(asyncio.run, _synthesize()).result(timeout=20)
+        else:
+            mp3_data = asyncio.new_event_loop().run_until_complete(_synthesize())
+
+        if not mp3_data:
+            return None
+
+        ffmpeg_bin = _FFMPEG_PATH if os.path.isfile(_FFMPEG_PATH) else "ffmpeg"
         proc = subprocess.run(
-            [_TTS_VENV_PYTHON, "-m", "piper", "-m", TTS_VOICE, "--output-raw", "-f", "-"],
-            input=text.encode("utf-8"),
+            [ffmpeg_bin, "-i", "pipe:0", "-f", "s16le", "-ar", str(TTS_SAMPLE_RATE_OUT),
+             "-ac", "1", "-loglevel", "error", "pipe:1"],
+            input=mp3_data,
             capture_output=True,
-            timeout=90,
+            timeout=15,
         )
         if proc.returncode != 0:
-            _safe_print(f"[juana-core] Error piper: {proc.stderr.decode()[:300]}")
+            _safe_print(f"[juana-core] ffmpeg error: {proc.stderr.decode()[:200]}")
             return None
-        raw = proc.stdout
-        if not raw or np is None:
-            return None
-        samples = np.frombuffer(raw, dtype=np.int16)
-        # Piper AR siempre emite a 22050; resampleo lineal a 24000 para el sidecar.
-        old_x = np.linspace(0, 1, len(samples), endpoint=False)
-        new_len = int(len(samples) * TTS_SAMPLE_RATE_OUT / TTS_SAMPLE_RATE_IN)
-        new_x = np.linspace(0, 1, new_len, endpoint=False)
-        resampled = np.interp(new_x, old_x, samples).astype(np.int16)
-        return resampled.tobytes()
+        return proc.stdout if proc.stdout else None
     except Exception as e:
         _safe_print(f"[juana-core] Error TTS: {e}")
         return None

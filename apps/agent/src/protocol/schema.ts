@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+import { capabilityNameSchema } from '@/devices/capability';
+import { deviceIdSchema } from '@/devices/identity';
+
 export const deskUiStateSchema = z.enum([
   'idle',
   'listening',
@@ -79,6 +82,17 @@ export const deviceToServerMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('text_input'),
     text: z.string().min(1),
     ts: z.number().int().nonnegative(),
+    request_id: z.string().optional(),
+    client_turn_id: z.string().optional(),
+    generation: z.number().int().optional(),
+    tts: z
+      .object({
+        provider: z.enum(['cloudflare', 'gemini']).optional(),
+        voice: z.string().optional(),
+        language: z.string().optional(),
+        speed: z.number().min(0.5).max(2.0).optional(),
+      })
+      .optional(),
   }),
   z.object({
     type: z.literal('abort'),
@@ -229,6 +243,13 @@ export const serverToDeviceMessageSchema = z.discriminatedUnion('type', [
     label: z.string().optional(),
   }),
   z.object({
+    type: z.literal('text_response_chunk'),
+    text: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('text_response_end'),
+  }),
+  z.object({
     type: z.literal('set_response_output_target'),
     target: z.enum(['pc', 'server']),
     ts: z.number().int().nonnegative(),
@@ -250,6 +271,11 @@ export const pcToServerMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('hello'),
     hostname: z.string().min(1),
     ts: z.number().int().nonnegative(),
+    // BLOCK 5: identidad y contrato del cliente. Opcionales para no romper los
+    // clientes actuales: si no llegan, el worker aplica la política legacy
+    // (LEGACY_PROTOCOL_VERSION + capabilities desktop implementadas).
+    protocolVersion: z.number().int().positive().optional(),
+    capabilities: z.array(capabilityNameSchema).max(64).optional(),
   }),
   z.object({
     type: z.literal('command_result'),
@@ -353,4 +379,114 @@ export function parsePcToServerMessage(rawMessageText: string): PcToServerMessag
 }
 
 export type PcToServerMessage = z.infer<typeof pcToServerMessageSchema>;
+export type PcToServerHelloMessage = Extract<PcToServerMessage, { type: 'hello' }>;
 export type ServerToPcMessage = z.infer<typeof serverToPcMessageSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payload de mobile.notifications (Block 9).
+//
+// Es el contrato del peer: lo que el mobile recibe y lo que devuelve. Mínimo y
+// explícito a propósito — sin campos especulativos. El peer valida el mismo
+// schema que el Worker, así que un cliente viejo o malicioso no puede colar
+// campos extra.
+// ─────────────────────────────────────────────────────────────────────────────
+// strict(): un cliente que manda campos de más es un cliente con otra versión.
+// Es preferible que el peer lo rechace a que cada lado invente campos.
+export const mobileNotificationPayloadSchema = z
+  .object({
+    title: z.string().min(1).max(120),
+    body: z.string().min(1).max(500),
+  })
+  .strict();
+
+export type MobileNotificationPayload = z.infer<typeof mobileNotificationPayloadSchema>;
+
+export type MobileCommandResult = MobileNotificationPayload;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mobile transport (Block 8 §2).
+//
+// Mismo concepto de handshake que el desktop: el cliente se presenta con su
+// identidad y sus capabilities, y el Worker decide si esa identidad vale. Lo que
+// cambia es que mobile NO tiene hostname, así que deviceId es obligatorio y
+// tiene que venir estructurado ('mobile:<valor>').
+//
+// 'capabilities' se parsea como lista de strings, no de capabilityName: un
+// cliente puede anunciar un nombre que este Worker todavía no conoce y eso se
+// IGNORA explícitamente en vez de tirar la sesión (devices/mobile.ts).
+// ─────────────────────────────────────────────────────────────────────────────
+export const mobileToServerMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('hello'),
+    deviceId: deviceIdSchema,
+    deviceType: z.literal('mobile'),
+    protocolVersion: z.number().int().positive(),
+    capabilities: z.array(z.string().min(1)).max(64).optional(),
+    ts: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal('heartbeat'),
+    ts: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal('command_result'),
+    requestId: z.string().min(1).max(128),
+    capability: capabilityNameSchema,
+    ok: z.boolean(),
+    result: z.unknown().optional(),
+    error: z.string().max(512).optional(),
+    clientTurnId: z.string().min(1).max(128).optional(),
+    generation: z.number().int().nonnegative().optional(),
+    ts: z.number().int().nonnegative(),
+  }),
+]);
+
+export const serverToMobileMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('hello_accepted'),
+    deviceId: deviceIdSchema,
+    protocolVersion: z.number().int().positive(),
+    availableCapabilities: z.array(capabilityNameSchema).max(64),
+    ignoredCapabilityCount: z.number().int().nonnegative(),
+    heartbeatIntervalMilliseconds: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal('hello_rejected'),
+    reason: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('heartbeat_probe'),
+    ts: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal('command'),
+    requestId: z.string().min(1).max(128),
+    capability: capabilityNameSchema,
+    // BLOCK 11 §4: una capability puede tener varios comandos (mobile.alarm es
+    // alarm_set y alarm_cancel) y el payload NO alcanza para distinguirlos sin
+    // adivinar. El comando va explicito y se valida contra el commandList de la
+    // capability. Opcional para no romper a los peers de Block 9, que mandan el
+    // comando canonico y nada mas.
+    command: z.string().min(1).max(48).optional(),
+    payload: z.record(z.unknown()),
+    clientTurnId: z.string().min(1).max(128).optional(),
+    generation: z.number().int().nonnegative().optional(),
+  }),
+]);
+
+export function parseMobileToServerMessage(
+  rawMessageText: string,
+): MobileToServerMessage {
+  return mobileToServerMessageSchema.parse(JSON.parse(rawMessageText));
+}
+
+export function encodeServerToMobileMessage(message: ServerToMobileMessage): string {
+  return JSON.stringify(serverToMobileMessageSchema.parse(message));
+}
+
+export type MobileToServerMessage = z.infer<typeof mobileToServerMessageSchema>;
+export type MobileToServerHelloMessage = Extract<
+  MobileToServerMessage,
+  { type: 'hello' }
+>;
+export type ServerToMobileMessage = z.infer<typeof serverToMobileMessageSchema>;

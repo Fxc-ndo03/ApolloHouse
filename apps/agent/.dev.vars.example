@@ -10,6 +10,19 @@ GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 MOCK_VOICE=1
 
+# Diagnósticos. Vacíos = apagados, que es como deben estar en cualquier deploy.
+#
+# MOBILE_SESSION_INSPECTOR=enabled publica el roster de sesiones del bridge
+# mobile en /agents/mobile-bridge/mobile/__inspect: el deviceId, la presencia y
+# las capabilities de todos los teléfonos. Se abre con el secreto global por
+# `?token=` y una credencial de teléfono NO lo abre. Es HTTP, no WebSocket.
+#
+# APOLLO_TOOL_HARNESS=enabled expone /agents/apollo/__tool-harness para pruebas.
+# Es superficie de ejecución de herramientas: dejala prendida sólo mientras
+# corrés pruebas, nunca en un deploy que Ataprecea strangers.
+MOBILE_SESSION_INSPECTOR=
+APOLLO_TOOL_HARNESS=
+
 # Remote one-time setup (when you deploy):
 # bunx wrangler vectorize create apollo-memory --dimensions=1536 --metric=cosine
 # bunx wrangler r2 bucket create apollo-media

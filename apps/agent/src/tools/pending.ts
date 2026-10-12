@@ -13,6 +13,10 @@ const pendingToolConfirmationRowSchema = z.object({
   args_json: z.string(),
   summary: z.string().min(1),
   expires_at: z.number().int().nonnegative(),
+  // BLOCK 6: target opcional. ausente en filas viejas y en confirmaciones que
+  // no pasaron por el registry (camino LLM).
+  target_device_id: z.string().min(1).nullish(),
+  target_device_type: z.string().min(1).nullish(),
 });
 
 // The agent tracks a single pending confirmation, so the table holds at most
@@ -24,12 +28,14 @@ export async function savePendingToolConfirmation(
 ): Promise<void> {
   sqlExecutor.execute('DELETE FROM pending_confirmations');
   sqlExecutor.execute(
-    'INSERT INTO pending_confirmations (id, tool_name, args_json, summary, expires_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO pending_confirmations (id, tool_name, args_json, summary, expires_at, target_device_id, target_device_type) VALUES (?, ?, ?, ?, ?, ?, ?)',
     confirmation.id,
     confirmation.toolName,
     JSON.stringify(confirmation.args ?? null),
     confirmation.summary,
     confirmation.expiresAt,
+    confirmation.targetDeviceId ?? null,
+    confirmation.targetDeviceType ?? null,
   );
 }
 
@@ -37,7 +43,7 @@ export async function readPendingToolConfirmation(
   sqlExecutor: MemorySqlExecutor,
 ): Promise<PendingToolConfirmation | undefined> {
   const rows = sqlExecutor.execute(
-    'SELECT id, tool_name, args_json, summary, expires_at FROM pending_confirmations LIMIT 1',
+    'SELECT id, tool_name, args_json, summary, expires_at, target_device_id, target_device_type FROM pending_confirmations LIMIT 1',
   );
   const firstRow = rows[0];
   if (firstRow === undefined) {
@@ -65,6 +71,14 @@ export async function readPendingToolConfirmation(
     args: storedArguments,
     summary: parsedRow.data.summary,
     expiresAt: parsedRow.data.expires_at,
+    ...(parsedRow.data.target_device_id === null ||
+    parsedRow.data.target_device_id === undefined
+      ? {}
+      : { targetDeviceId: parsedRow.data.target_device_id }),
+    ...(parsedRow.data.target_device_type === null ||
+    parsedRow.data.target_device_type === undefined
+      ? {}
+      : { targetDeviceType: parsedRow.data.target_device_type }),
   };
 }
 

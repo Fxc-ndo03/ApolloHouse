@@ -1,0 +1,732 @@
+# BLOQUE: bloque4e-tests-guards
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\guards.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { MobileDeviceEndpoint } from '@/devices/endpoint';
+import { buildAuthenticatedDeviceProof } from '@/devices/registry';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Guards de seguridad del endpoint (Â§13).
+//
+// Estas pruebas leen el cÃ³digo fuente: no reachedan con un mock, fallan si
+// alguien reintroduce un atajo en el endpoint.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const SOURCE_ROOT = join(import.meta.dir, '..', '..');
+
+function listSourceFilePathList(): string[] {
+  const filePathList: string[] = [];
+  const walk = (directoryPath: string): void => {
+    for (const entryName of readdirSync(directoryPath)) {
+      const entryPath = join(directoryPath, entryName);
+      if (statSync(entryPath).isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      if (entryName.endsWith('.ts') && !entryName.endsWith('.spec.ts')) {
+        filePathList.push(entryPath);
+      }
+    }
+  };
+  walk(SOURCE_ROOT);
+  return filePathList;
+}
+
+function stripComment(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+/**
+ * El cuerpo de una funciÃ³n o mÃ©todo, desde su firma hasta la llave que la cierra.
+ * Lo usan los guards que necesitan afirmar sobre UNA parte del archivo: cuando
+ * un mÃ³dulo gana rutas legÃ­timas que no toca el camino que se quiere proteger,
+ * un `not.toContain` sobre el archivo entero empieza a mentir.
+ */
+function readFunctionBody(source: string, signatureFragment: string): string {
+  // Un fragmento puede aparecer primero como LUGAR DE LLAMADA y despuÃ©s como
+  // declaraciÃ³n (`this.#buildHelloAuthorizer(auth);` vs `#buildHelloAuthorizer(
+  // auth: ...)`). La llamada termina en `;` y no tiene cuerpo, asÃ­ que se prueban
+  // todas las apariciones y se toma la primera que tenga cuerpo real.
+  let searchFrom = 0;
+  while (searchFrom < source.length) {
+    const signatureIndex = source.indexOf(signatureFragment, searchFrom);
+    if (signatureIndex === -1) {
+      break;
+    }
+    const bodyBraceIndex = findBodyBraceIndex(source, signatureIndex);
+    if (bodyBraceIndex !== -1) {
+      return readBraceBlock(source, bodyBraceIndex, signatureFragment);
+    }
+    searchFrom = signatureIndex + signatureFragment.length;
+  }
+  throw new Error(`no se encontro el cuerpo de ${signatureFragment}`);
+}
+
+/**
+ * La llave del CUERPO, no la de un tipo. Hay que saltar la lista de parÃ¡metros:
+ * un input tipado como `{ readonly request: Request }` abre una llave que no es
+ * la del cuerpo y el balance arrancarÃ­a desde el lugar equivocado.
+ */
+function findBodyBraceIndex(source: string, signatureIndex: number): number {
+  let parenDepth = 0;
+  for (let index = signatureIndex; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '(') {
+      parenDepth += 1;
+      continue;
+    }
+    if (character === ')') {
+      parenDepth -= 1;
+      continue;
+    }
+    if (parenDepth !== 0) {
+      continue;
+    }
+    if (character === '{') {
+      return index;
+    }
+    if (character === ';') {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+function readBraceBlock(
+  source: string,
+  openBraceIndex: number,
+  signatureFragment: string,
+): string {
+  let depth = 0;
+  for (let index = openBraceIndex; index < source.length; index += 1) {
+    if (source[index] === '{') {
+      depth += 1;
+      continue;
+    }
+    if (source[index] !== '}') {
+      continue;
+    }
+    depth -= 1;
+    if (depth === 0) {
+      return source.slice(openBraceIndex, index + 1);
+    }
+  }
+  throw new Error(`el cuerpo de ${signatureFragment} no cierra`);
+}
+
+function readSource(relativePath: string): string {
+  return stripComment(readFileSync(join(SOURCE_ROOT, relativePath), 'utf8'));
+}
+
+const ENDPOINT_MODULE_LIST = [
+  'devices/endpoint.ts',
+  'devices/route.ts',
+  'devices/mobile.ts',
+  'devices/connection.ts',
+  'agents/mobile-bridge.ts',
+];
+
+describe('B8.1 Â§13: security guards', () => {
+  it('the endpoint never executes tools', () => {
+    for (const moduleName of ENDPOINT_MODULE_LIST) {
+      const source = readSource(moduleName);
+      expect(source).not.toContain('@/tools/execution');
+      expect(source).not.toContain('@/tools/router');
+      expect(source).not.toContain('.handler(');
+      expect(source).not.toContain('executeAuthorizedTool');
+      expect(source).not.toContain('executeToolWithTargetResolution');
+    }
+  });
+
+  it('the endpoint never imports PcBridge', () => {
+    for (const moduleName of ENDPOINT_MODULE_LIST) {
+      const source = readSource(moduleName);
+      expect(source).not.toContain('getAgentByName');
+      expect(source).not.toContain('@/devices/desktop');
+      expect(source).not.toContain('PcBridge');
+    }
+  });
+
+  it('the transport and session layers do no target resolution', () => {
+    // BLOCK 9: el bridge tiene el RPC de discovery (espejo de PcBridge) pero
+    // delega en el registry. La polÃ­tica de selecciÃ³n tiene un solo dueÃ±o, asÃ­
+    // que ninguna capa de devices/selecciona targets por su cuenta.
+    for (const moduleName of [
+      'devices/endpoint.ts',
+      'devices/route.ts',
+      'devices/mobile.ts',
+      'devices/connection.ts',
+      'devices/session.ts',
+      'devices/dispatch.ts',
+      'devices/envelope.ts',
+      'devices/inspector.ts',
+    ]) {
+      const source = readSource(moduleName);
+      expect(source).not.toContain('resolveTarget');
+      expect(source).not.toContain('resolveCapabilityTarget');
+    }
+    const bridgeSource = readSource('agents/mobile-bridge.ts');
+    expect(bridgeSource).toContain('registry.resolveTarget');
+    expect(bridgeSource).not.toContain('doesSessionMatchSnapshot');
+  });
+
+  it('a deviceId alone never authenticates', () => {
+    // El Ãºnico lugar que puede fabricar un proof es el registry, con el mismo
+    // helper que usa el desktop. El endpoint lo pide, no lo crea por deviceId.
+    const mintModuleList = listSourceFilePathList()
+      .filter((filePath) =>
+        stripComment(readFileSync(filePath, 'utf8')).includes(
+          'buildAuthenticatedDeviceProof(',
+        ),
+      )
+      .map((filePath) =>
+        filePath.replace(SOURCE_ROOT, '').replace(/\\/g, '/').replace(/^\//, ''),
+      );
+    expect(mintModuleList).not.toContain('devices/endpoint.ts');
+    expect(mintModuleList).not.toContain('devices/route.ts');
+    expect(mintModuleList).not.toContain('devices/mobile.ts');
+
+    // BLOCK 12: la FUNCIÃ“N que autoriza el WebSocket no puede mirar un deviceId.
+    // Antes el guard cubrÃ­a `route.ts` entero; ahora route.ts tambiÃ©n tiene las
+    // rutas HTTP de enrollment, que sÃ­ reciben un deviceId en el body pero NO
+    // autentican un socket. Por eso el guard se.apply sobre el cuerpo de
+    // `authorizeMobileDeviceRequest`, que es la Ãºnica parte que decide si un
+    // socket entra.
+    const routeSource = readSource('devices/route.ts');
+    const websocketAuthorizerBody = readFunctionBody(
+      routeSource,
+      'export async function authorizeMobileDeviceRequest',
+    );
+    expect(websocketAuthorizerBody).not.toContain('deviceId');
+    expect(websocketAuthorizerBody).not.toContain('device_id');
+    // ...y decide el Ã¡mbito antes de dejar pasar, leyendo el header, no la URL.
+    expect(websocketAuthorizerBody).toContain('readBearerCredentialFromRequest');
+
+    // La ruta legacy conserva su regla: rol 'device' por el secreto global.
+    expect(routeSource).toContain('isDeviceSharedSecretValid');
+    expect(routeSource).toContain('environment.DEVICE_SHARED_SECRET');
+  });
+
+  it('BLOCK 12 Â§1: the enrolled scope binds the deviceId from the credential', () => {
+    // La identidad atada sale del hash verificado en el servidor. Un `?deviceId=`
+    // en la URL no puede cambiar quiÃ©n es la conexiÃ³n, asÃ­ que el scope
+    // enrolado no lee deviceId de ningÃºn lado de la peticiÃ³n.
+    const endpointSource = readSource('devices/endpoint.ts');
+    const authorizerBody = readFunctionBody(endpointSource, '#buildHelloAuthorizer(');
+    expect(authorizerBody).toContain("auth.scope === 'enrolled_android'");
+    expect(authorizerBody).toContain('helloDeviceId !== boundDeviceId');
+    expect(authorizerBody).toContain('credential_device_mismatch');
+    expect(authorizerBody).not.toContain('searchParams');
+    expect(authorizerBody).not.toContain('headers.get');
+
+    // Y el camino legacy consulta el store, que es el cierre del bypass.
+    expect(authorizerBody).toContain('#enrolledDeviceIdSet.has(helloDeviceId)');
+    expect(authorizerBody).toContain('device_is_enrolled_or_revoked');
+  });
+
+  it('an unauthenticated socket cannot enter the registry', () => {
+    const endpoint = new MobileDeviceEndpoint({ nowMilliseconds: () => 1_000 });
+    endpoint.handleConnect({
+      connectionId: 'mobile-1',
+      port: { send: () => undefined, close: () => undefined },
+      proof: null,
+    });
+    endpoint.handleMessage(
+      'mobile-1',
+      JSON.stringify({
+        type: 'hello',
+        deviceId: 'mobile:phone-123',
+        deviceType: 'mobile',
+        protocolVersion: 1,
+        capabilities: ['mobile.notifications'],
+        ts: 1_000,
+      }),
+    );
+    expect(endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(endpoint.registry.listSelectableSessionList()).toHaveLength(0);
+    expect(endpoint.lifecycle.listHeartbeatSchedulerCount()).toBe(0);
+  });
+
+  it('a partially negotiated session is not selectable', () => {
+    const endpoint = new MobileDeviceEndpoint({ nowMilliseconds: () => 1_000 });
+    // Proof vÃ¡lido pero hello que nunca llega: hay conexiÃ³n, no hay sesiÃ³n.
+    endpoint.handleConnect({
+      connectionId: 'mobile-1',
+      port: { send: () => undefined, close: () => undefined },
+      proof: buildAuthenticatedDeviceProof('device'),
+    });
+    expect(endpoint.registry.listDeviceList()).toHaveLength(0);
+    expect(endpoint.registry.listSelectableSessionList()).toHaveLength(0);
+    expect(endpoint.getTransport('mobile-1')?.getDeviceId()).toBeNull();
+    // Tampoco hay scheduler antes del hello.
+    expect(endpoint.lifecycle.listHeartbeatSchedulerCount()).toBe(0);
+  });
+
+  it('mobile sessions carry no secrets', () => {
+    const endpoint = new MobileDeviceEndpoint({ nowMilliseconds: () => 1_000 });
+    endpoint.handleConnect({
+      connectionId: 'mobile-1',
+      port: { send: () => undefined, close: () => undefined },
+      proof: buildAuthenticatedDeviceProof('device'),
+    });
+    endpoint.handleMessage(
+      'mobile-1',
+      JSON.stringify({
+        type: 'hello',
+        deviceId: 'mobile:phone-123',
+        deviceType: 'mobile',
+        protocolVersion: 1,
+        capabilities: [],
+        ts: 1_000,
+      }),
+    );
+    const session = endpoint.registry.getDevice('mobile:phone-123');
+    expect(session).toBeDefined();
+    const serialized = JSON.stringify(session);
+    for (const forbidden of ['token', 'secret', 'proof', 'password', 'authorization']) {
+      expect(serialized.toLowerCase()).not.toContain(forbidden);
+    }
+  });
+
+  it('the DO owns exactly one endpoint, so no state is duplicated per socket', () => {
+    // La clase del DO no se puede instanciar bajo bun (importa cloudflare:), asÃ­
+    // que esta invariante se verifica sobre el fuente: un solo
+    // `new MobileDeviceEndpoint()` y ningÃºn get/setter que lo fabrique por
+    // conexiÃ³n.
+    const source = readSource('agents/mobile-bridge.ts');
+    const constructionCount = source.split('new MobileDeviceEndpoint(').length - 1;
+    expect(constructionCount).toBe(1);
+    expect(source).toMatch(/readonly #endpoint = new MobileDeviceEndpoint\(\);/);
+    expect(source).not.toContain('get #endpoint');
+  });
+
+  it('the DO adapter has no device logic of its own', () => {
+    // El DO debe delegar: si aparece lÃ³gica de sesiÃ³n acÃ¡, el endpoint real deja
+    // de estar cubierto por los tests.
+    const source = readSource('agents/mobile-bridge.ts');
+    expect(source).toContain('MobileDeviceEndpoint');
+    expect(source).not.toContain('deviceSessionSchema');
+    expect(source).not.toContain('splitDeclaredCapabilityList');
+    expect(source).not.toContain('resolveAvailableCapabilityList');
+    expect(source).not.toContain('HeartbeatScheduler');
+  });
+
+  it('no endpoint module builds its own device identity from a hostname', () => {
+    for (const moduleName of ENDPOINT_MODULE_LIST) {
+      expect(readSource(moduleName)).not.toContain('buildDesktopDeviceIdFromHostname');
+    }
+  });
+});
+
+it('BLOCK 12 Â§5: the DO really attaches the enrollment store to the endpoint', () => {
+  // Regression de un bug real: el endpoint se construÃ­a como campo de clase,
+  // cuando `ctx` todavÃ­a no existe, asÃ­ que nunca recibÃ­a el store. El
+  // authorizer quedaba `null`, la regla anti-bypass no corrÃ­a, y un telÃ©fono
+  // revocado entraba igual por `?token=`. El smoke lo detectÃ³; este guard lo
+  // deja cerrado en `bun run test`.
+  const bridgeSource = readSource('agents/mobile-bridge.ts');
+  expect(bridgeSource).toContain('this.#endpoint.attachEnrollmentStore(store)');
+  expect(bridgeSource).toContain('createSqliteEnrollmentStore');
+
+  // Y el endpoint tiene que tener la forma de adjuntarlo, no un campo readonly
+  // que sÃ³lo se pueda setear en el constructor.
+  const endpointSource = readSource('devices/endpoint.ts');
+  expect(endpointSource).toContain('attachEnrollmentStore(store: EnrollmentStore)');
+  expect(endpointSource).not.toContain('readonly #enrollmentStore');
+  // Un authorizer `null` significa "no hay anti-bypass", asÃ­ que tiene que
+  // quedar explÃ­cito que sin store NO se filtran tools.
+  const buildBody = readFunctionBody(endpointSource, '#buildHelloAuthorizer(');
+  expect(buildBody).toContain('if (store === null)');
+  expect(buildBody).toContain('return null');
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\route.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+
+import {
+  authorizeMobileDeviceRequest,
+  MOBILE_BRIDGE_AGENT_NAME,
+  MOBILE_BRIDGE_ROUTE_PREFIX,
+  resolveMobileBridgeRoute,
+  resolveMobileBridgeStub,
+} from '@/devices/route';
+
+// BLOCK 12: `authorizeMobileDeviceRequest` ahora recibe la autoridad de
+// credenciales, porque el Ã¡mbito se decide antes de tocar nada. Estos casos de
+// Block 8.1 probaban todos el camino legacy (`?token=`), que no la necesita, asÃ­
+// que el doble devuelve un deviceId cualquiera. Los casos per-device viven en
+// `enrollment.spec.ts` y `revocation.spec.ts`.
+async function authorize(request: Request): Promise<Response | undefined> {
+  const decision = await authorizeMobileDeviceRequest({
+    request,
+    environment: ENVIRONMENT,
+  });
+  return decision.isAuthorized ? undefined : decision.response;
+}
+import { MOBILE_BRIDGE_INSTANCE_NAME } from '@/devices/bridge-client';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Route + upgrade (Â§2, Â§3, Â§11).
+//
+// El mÃ³dulo de ruta es puro: no importa el SDK de agents, asÃ­ que la decisiÃ³n
+// "esto es una conexiÃ³n mobile" y el lÃ­mite de autenticaciÃ³n se testean sin
+// workerd. Lo que NO se puede probar bajo bun es el upgrade real del Durable
+// Object, porque la clase del DO importa `cloudflare:` a travÃ©s del SDK.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// Los secrets son bindings del Worker (`wrangler secret put`), no valores del
+// repo: el test define los suyos y los pasa por Env.
+const TEST_DEVICE_SHARED_SECRET = 'test-device-shared-secret';
+const TEST_DASHBOARD_SHARED_SECRET = 'test-dashboard-shared-secret';
+
+const ENVIRONMENT = {
+  DEVICE_SHARED_SECRET: TEST_DEVICE_SHARED_SECRET,
+  DASHBOARD_SHARED_SECRET: TEST_DASHBOARD_SHARED_SECRET,
+} as unknown as Env;
+
+function buildUpgradeRequest(pathname: string, token?: string): Request {
+  const url = new URL(`https://apollo.example${pathname}`);
+  if (token !== undefined) {
+    url.searchParams.set('token', token);
+  }
+  return new Request(url.toString(), { headers: { Upgrade: 'websocket' } });
+}
+
+describe('B8.1 Â§1: route resolution', () => {
+  it('a websocket upgrade on the mobile route is a mobile connection', () => {
+    const decision = resolveMobileBridgeRoute({
+      pathname: `${MOBILE_BRIDGE_ROUTE_PREFIX}/${MOBILE_BRIDGE_INSTANCE_NAME}`,
+      upgradeHeader: 'websocket',
+    });
+    expect(decision).toEqual({
+      isMobileBridgeRoute: true,
+      instanceName: MOBILE_BRIDGE_INSTANCE_NAME,
+    });
+  });
+
+  it('the upgrade header is matched case-insensitively', () => {
+    expect(
+      resolveMobileBridgeRoute({
+        pathname: `${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`,
+        upgradeHeader: 'WebSocket',
+      }).isMobileBridgeRoute,
+    ).toBe(true);
+  });
+
+  it('a plain HTTP request on the mobile route is not a device connection', () => {
+    expect(
+      resolveMobileBridgeRoute({
+        pathname: `${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`,
+        upgradeHeader: null,
+      }),
+    ).toEqual({ isMobileBridgeRoute: false });
+    expect(
+      resolveMobileBridgeRoute({
+        pathname: `${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`,
+        upgradeHeader: 'h2c',
+      }).isMobileBridgeRoute,
+    ).toBe(false);
+  });
+
+  it('the desktop routes are NOT mobile routes', () => {
+    // PcBridge y Apollo deben seguir yendo por routeAgentRequest, sin tocar.
+    for (const pathname of [
+      '/agents/apollo/default',
+      '/agents/apollo/desk',
+      '/agents/pc-bridge/pc-bridge',
+      '/health',
+      '/ota/',
+    ]) {
+      expect(resolveMobileBridgeRoute({ pathname, upgradeHeader: 'websocket' })).toEqual({
+        isMobileBridgeRoute: false,
+      });
+    }
+  });
+
+  it('a mobile route without an instance name is not routable', () => {
+    expect(
+      resolveMobileBridgeRoute({
+        pathname: MOBILE_BRIDGE_ROUTE_PREFIX,
+        upgradeHeader: 'websocket',
+      }),
+    ).toEqual({ isMobileBridgeRoute: false });
+    expect(
+      resolveMobileBridgeRoute({
+        pathname: `${MOBILE_BRIDGE_ROUTE_PREFIX}/`,
+        upgradeHeader: 'websocket',
+      }),
+    ).toEqual({ isMobileBridgeRoute: false });
+  });
+
+  it('a lookalike route does not match', () => {
+    expect(
+      resolveMobileBridgeRoute({
+        pathname: `/agents/${MOBILE_BRIDGE_AGENT_NAME}-evil/mobile`,
+        upgradeHeader: 'websocket',
+      }),
+    ).toEqual({ isMobileBridgeRoute: false });
+  });
+
+  it('the bridge stub is a single shared instance, not one per device', () => {
+    const requestedNameList: string[] = [];
+    const environment = {
+      MobileBridge: {
+        idFromName: (name: string) => {
+          requestedNameList.push(name);
+          return { name: 'id' };
+        },
+        get: (id: unknown) => ({ fetch: () => new Response('stub'), id }),
+      },
+    } as unknown as Env;
+    resolveMobileBridgeStub(environment);
+    resolveMobileBridgeStub(environment);
+    // Ambas veces el mismo nombre de instancia: una sola identidad lÃ³gica.
+    expect(requestedNameList).toEqual([
+      MOBILE_BRIDGE_INSTANCE_NAME,
+      MOBILE_BRIDGE_INSTANCE_NAME,
+    ]);
+  });
+});
+
+describe('B8.1 Â§3: authentication boundary', () => {
+  it('a device token authorizes the mobile endpoint', async () => {
+    const response = await authorize(
+      buildUpgradeRequest(
+        `${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`,
+        TEST_DEVICE_SHARED_SECRET,
+      ),
+    );
+    expect(response).toBeUndefined();
+  });
+
+  it('a missing token is rejected with 401', async () => {
+    const response = await authorize(
+      buildUpgradeRequest(`${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`),
+    );
+    expect(response?.status).toBe(401);
+  });
+
+  it('a wrong token is rejected with 401', async () => {
+    const response = await authorize(
+      buildUpgradeRequest(`${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`, 'not-the-secret'),
+    );
+    expect(response?.status).toBe(401);
+  });
+
+  it('a dashboard token does NOT open a device socket', async () => {
+    // El dashboard abre la consola, no un dispositivo. Mobile exige 'device'.
+    const response = await authorize(
+      buildUpgradeRequest(
+        `${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`,
+        TEST_DASHBOARD_SHARED_SECRET,
+      ),
+    );
+    expect(response?.status).toBe(401);
+  });
+
+  it('a deviceId in the query does not authenticate anything', async () => {
+    const url = new URL(
+      `https://apollo.example${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile?deviceId=mobile:phone-123`,
+    );
+    const response = await authorize(
+      new Request(url.toString(), { headers: { Upgrade: 'websocket' } }),
+    );
+    expect(response?.status).toBe(401);
+  });
+
+  it('the auth decision never echoes the presented secret', async () => {
+    const response = await authorize(
+      buildUpgradeRequest(`${MOBILE_BRIDGE_ROUTE_PREFIX}/mobile`, 'leaked-secret-value'),
+    );
+    expect(response?.status).toBe(401);
+    expect(await response?.text()).toBe('Unauthorized');
+    expect(JSON.stringify([...(response?.headers ?? [])])).not.toContain(
+      'leaked-secret-value',
+    );
+  });
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\wiring.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { listBuiltinToolDefinitionList } from '@/tools/catalog';
+import {
+  listCapabilityNameForToolName,
+  listConnectedCapabilityNameList,
+  listToolNameForCapability,
+} from '@/devices/target';
+import { listImplementedCapabilityNameList } from '@/devices/capability';
+import { resolveCapabilityIntent } from '@/devices/intent';
+import { routeDeterministic } from '@/voice/router';
+
+const SOURCE_ROOT = join(import.meta.dir, '..', '..');
+
+function listSourceFilePathList(): string[] {
+  const filePathList: string[] = [];
+  const walk = (directoryPath: string): void => {
+    for (const entryName of readdirSync(directoryPath)) {
+      const entryPath = join(directoryPath, entryName);
+      if (statSync(entryPath).isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      if (entryName.endsWith('.ts') && !entryName.endsWith('.spec.ts')) {
+        filePathList.push(entryPath);
+      }
+    }
+  };
+  walk(SOURCE_ROOT);
+  return filePathList;
+}
+
+function toRelativePath(filePath: string): string {
+  return filePath.replace(SOURCE_ROOT, '').replace(/\\/g, '/').replace(/^\//, '');
+}
+
+function readModuleSource(moduleRelativePath: string): string {
+  return readFileSync(join(SOURCE_ROOT, moduleRelativePath), 'utf8');
+}
+
+function listImportPathList(source: string): string[] {
+  return [...source.matchAll(/from '(@\/[^']+)'/g)].map((match) => match[1] ?? '');
+}
+
+const FIXED_NOW = new Date('2026-10-04T12:00:00-03:00');
+
+describe('B6 security: the registry cannot execute or authorize', () => {
+  it('12. no device module imports authorization or execution', () => {
+    const forbiddenImportList = ['@/tools/execution', '@/tools/router', '@/tools/types'];
+    const offenderList = listSourceFilePathList()
+      .filter((filePath) => filePath.replace(/\\/g, '/').includes('/devices/'))
+      .filter((filePath) => {
+        const importPathList = listImportPathList(readFileSync(filePath, 'utf8'));
+        return importPathList.some((importPath) =>
+          forbiddenImportList.includes(importPath),
+        );
+      });
+    expect(offenderList.map(toRelativePath)).toEqual([]);
+  });
+
+  it('12b. no device module invokes a handler or a tool executor', () => {
+    const offenderList = listSourceFilePathList()
+      .filter((filePath) => filePath.replace(/\\/g, '/').includes('/devices/'))
+      .filter((filePath) => {
+        const source = readFileSync(filePath, 'utf8');
+        return (
+          /\.handler\s*\(/.test(source) ||
+          source.includes('executeToolByName(') ||
+          source.includes('resolveToolExecution(') ||
+          source.includes('authorizeToolExecution(')
+        );
+      });
+    expect(offenderList.map(toRelativePath)).toEqual([]);
+  });
+
+  it('12c. execution.ts is still the only module with a handler call', () => {
+    const offenderList = listSourceFilePathList().filter(
+      (filePath) =>
+        /\.handler\s*\(/.test(readFileSync(filePath, 'utf8')) &&
+        !filePath.endsWith(join('tools', 'execution.ts')),
+    );
+    expect(offenderList.map(toRelativePath)).toEqual([]);
+  });
+});
+
+describe('B6 capability â†’ tool mapping', () => {
+  it('only connects implemented capabilities', () => {
+    const implementedList = listImplementedCapabilityNameList();
+    for (const capabilityName of listConnectedCapabilityNameList()) {
+      expect(implementedList).toContain(capabilityName);
+    }
+  });
+
+  it('every mapped tool exists in the builtin catalog', () => {
+    const builtinToolNameSet = new Set(
+      listBuiltinToolDefinitionList().map((toolDefinition) => toolDefinition.name),
+    );
+    for (const capabilityName of listConnectedCapabilityNameList()) {
+      const toolNameList = listToolNameForCapability(capabilityName);
+      expect(toolNameList.length).toBeGreaterThan(0);
+      for (const toolName of toolNameList) {
+        expect(builtinToolNameSet.has(toolName)).toBe(true);
+      }
+    }
+  });
+
+  it('does not connect unimplemented capabilities', () => {
+    expect(listToolNameForCapability('desktop.volume')).toEqual([]);
+    expect(listToolNameForCapability('desktop.files')).toEqual([]);
+    expect(listToolNameForCapability('mobile.media')).toEqual([]);
+    expect(listConnectedCapabilityNameList()).not.toContain('desktop.volume');
+    expect(listConnectedCapabilityNameList()).not.toContain('mobile.media');
+  });
+
+  it('maps each of the six required capabilities to its existing tool', () => {
+    expect(listToolNameForCapability('desktop.open_app')).toEqual(['open_pc_app']);
+    expect(listToolNameForCapability('desktop.focus_app')).toEqual(['focus_pc_app']);
+    expect(listToolNameForCapability('desktop.close_app')).toEqual(['close_pc_app']);
+    expect(listToolNameForCapability('desktop.list_apps')).toEqual(['list_pc_apps']);
+    expect(listToolNameForCapability('desktop.lock')).toEqual(['lock_pc_screen']);
+    expect(listToolNameForCapability('desktop.spotify')).toContain('spotify_play');
+  });
+
+  it('round-trips tool â†’ capability for every connected tool', () => {
+    for (const capabilityName of listConnectedCapabilityNameList()) {
+      for (const toolName of listToolNameForCapability(capabilityName)) {
+        expect(listCapabilityNameForToolName(toolName)).toBe(capabilityName);
+      }
+    }
+  });
+});
+
+describe('B6 router integration is not duplicated', () => {
+  it('does not redefine router patterns', () => {
+    // El mapping intenciÃ³n â†’ capability no puede repetir regex del router.
+    const intentSource = readModuleSource(join('devices', 'intent.ts'));
+    expect(intentSource).not.toMatch(/= *\/.*\/[a-z]*;/);
+    expect(intentSource).not.toContain('routeDeterministic');
+  });
+
+  it('maps every pc command the router can emit', () => {
+    const pcCommandList = [
+      'abrÃ­ chrome',
+      'enfocÃ¡ chrome',
+      'cerrÃ¡ chrome',
+      'bloqueÃ¡ la pantalla',
+      'ponÃ© mÃºsica',
+      'pausÃ¡ mÃºsica',
+      'siguiente canciÃ³n',
+    ];
+    for (const text of pcCommandList) {
+      const outcome = routeDeterministic(text, FIXED_NOW);
+      expect(outcome.kind).toBe('pc_command');
+      const intent = resolveCapabilityIntent(outcome);
+      expect(intent).not.toBeNull();
+      expect(
+        listToolNameForCapability(intent?.capabilityName ?? 'desktop.open_app').length,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns no intent for non pc outcomes', () => {
+    expect(
+      resolveCapabilityIntent(routeDeterministic('quÃ© hora es', FIXED_NOW)),
+    ).toBeNull();
+    expect(
+      resolveCapabilityIntent(
+        routeDeterministic('recordÃ¡ que mi cumple es en mayo', FIXED_NOW),
+      ),
+    ).toBeNull();
+  });
+});
+

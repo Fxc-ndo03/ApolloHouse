@@ -14,15 +14,20 @@
 
     "types": "bun run --cwd apps/agent types",
     "typecheck": "bun run --cwd apps/agent typecheck",
+    "typecheck:mobile": "tsc --noEmit --project apps/mobile/tsconfig.json",
 
     "lint": "oxlint --deny-warnings",
     "format": "oxfmt --write",
     "format:check": "oxfmt --check",
 
     "test": "bun run --cwd apps/agent test",
+    "test:mobile": "bun test apps/mobile",
+    "test:smoke": "bun run --cwd apps/agent test && bun test apps/mobile",
     "test:coverage": "bun run --cwd apps/agent test:coverage",
+    "smoke:multi-device": "bun run --cwd apps/agent smoke/multi-device.ts",
+    "smoke:enrollment": "bun run --cwd apps/agent smoke/enrollment-revocation.ts",
 
-    "check": "bun run lint && bun run format:check && bun run typecheck && bun run test"
+    "check": "bun run lint && bun run format:check && bun run typecheck && bun run typecheck:mobile && bun run test:smoke"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.1",

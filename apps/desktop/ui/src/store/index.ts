@@ -7,6 +7,7 @@ export interface OrbState {
     | 'listening'
     | 'thinking'
     | 'speaking'
+    | 'responding'
     | 'confirming'
     | 'focusing'
     | 'alarm'
@@ -28,6 +29,13 @@ export interface ConnectionStatus {
   error?: string;
 }
 
+export interface TtsSettings {
+  provider: 'cloudflare' | 'gemini';
+  voice: string;
+  language: string;
+  speed: number;
+}
+
 export interface Settings {
   workerUrl: string;
   deviceSharedSecret: string;
@@ -35,28 +43,57 @@ export interface Settings {
   useVoskWake: boolean;
   wakeModelDir: string;
   responseOutputTarget: 'pc' | 'server';
+  tts: TtsSettings;
 }
 
+export type ActiveSection = 'dashboard' | 'chat' | 'settings';
+
+export type AppearanceAccent = 'ocean' | 'cyan' | 'mint' | 'blue';
+export type AppearanceTextSize = 'small' | 'default' | 'large' | 'xl';
+export type AppearanceUiStyle = 'rounded' | 'soft' | 'crisp';
+export type AppearanceMode = 'dark' | 'light';
+
+export interface Appearance {
+  accent: AppearanceAccent;
+  textSize: AppearanceTextSize;
+  uiStyle: AppearanceUiStyle;
+  mode: AppearanceMode;
+}
+
+export const defaultAppearance: Appearance = {
+  accent: 'cyan',
+  textSize: 'default',
+  uiStyle: 'rounded',
+  mode: 'dark',
+};
+
 interface AppStore {
-  // Orb
   orbState: OrbState;
   setOrbState: (state: Partial<OrbState>) => void;
 
-  // Chat
   messages: ChatMessage[];
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
+  updateLastAssistantMessage: (content: string) => void;
+  dropTrailingEmptyAssistant: () => void;
   clearMessages: () => void;
 
-  // Connection
+  activeSection: ActiveSection;
+  setActiveSection: (section: ActiveSection) => void;
+
+  voiceOpen: boolean;
+  setVoiceOpen: (open: boolean) => void;
+
   connectionStatus: ConnectionStatus;
   setConnectionStatus: (status: ConnectionStatus) => void;
 
-  // Settings
   settings: Settings;
   updateSettings: (settings: Partial<Settings>) => void;
   resetSettings: () => void;
 
-  // Sidecar
+  appearance: Appearance;
+  updateAppearance: (partial: Partial<Appearance>) => void;
+  resetAppearance: () => void;
+
   sidecarRunning: boolean;
   setSidecarRunning: (running: boolean) => void;
 }
@@ -64,10 +101,16 @@ interface AppStore {
 const defaultSettings: Settings = {
   workerUrl: 'wss://apollo.facupapollo.workers.dev/agents/apollo/default',
   deviceSharedSecret: '',
-  wakeWords: ['juana', 'hey juana'],
+  wakeWords: ['apollo', 'hey apollo'],
   useVoskWake: true,
   wakeModelDir: '',
   responseOutputTarget: 'pc',
+  tts: {
+    provider: 'cloudflare',
+    voice: 'carina',
+    language: 'es',
+    speed: 1.0,
+  },
 };
 
 const defaultOrbState: OrbState = {
@@ -77,14 +120,12 @@ const defaultOrbState: OrbState = {
 export const useAppStore = create<AppStore>()(
   persist(
     (set) => ({
-      // Orb
       orbState: defaultOrbState,
       setOrbState: (partial) =>
         set((state) => ({
           orbState: { ...state.orbState, ...partial },
         })),
 
-      // Chat
       messages: [],
       addMessage: (message) =>
         set((state) => ({
@@ -95,15 +136,38 @@ export const useAppStore = create<AppStore>()(
               id: crypto.randomUUID(),
               timestamp: Date.now(),
             },
-          ].slice(-100), // Keep last 100 messages
+          ].slice(-200),
         })),
+      updateLastAssistantMessage: (content) =>
+        set((state) => {
+          const msgs = [...state.messages];
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === 'assistant') {
+              msgs[i] = { ...msgs[i], content };
+              break;
+            }
+          }
+          return { messages: msgs };
+        }),
       clearMessages: () => set({ messages: [] }),
+      dropTrailingEmptyAssistant: () =>
+        set((state) => {
+          const last = state.messages[state.messages.length - 1];
+          if (last && last.role === 'assistant' && last.content === '') {
+            return { messages: state.messages.slice(0, -1) };
+          }
+          return { messages: state.messages };
+        }),
 
-      // Connection
+      activeSection: 'dashboard' as ActiveSection,
+      setActiveSection: (section) => set({ activeSection: section }),
+
+      voiceOpen: false,
+      setVoiceOpen: (open) => set({ voiceOpen: open }),
+
       connectionStatus: { status: 'disconnected' },
       setConnectionStatus: (status) => set({ connectionStatus: status }),
 
-      // Settings
       settings: defaultSettings,
       updateSettings: (partial) =>
         set((state) => ({
@@ -111,7 +175,13 @@ export const useAppStore = create<AppStore>()(
         })),
       resetSettings: () => set({ settings: defaultSettings }),
 
-      // Sidecar
+      appearance: defaultAppearance,
+      updateAppearance: (partial) =>
+        set((state) => ({
+          appearance: { ...state.appearance, ...partial },
+        })),
+      resetAppearance: () => set({ appearance: defaultAppearance }),
+
       sidecarRunning: false,
       setSidecarRunning: (running) => set({ sidecarRunning: running }),
     }),
@@ -119,6 +189,8 @@ export const useAppStore = create<AppStore>()(
       name: 'apollo-desktop-store',
       partialize: (state) => ({
         settings: state.settings,
+        messages: state.messages,
+        appearance: state.appearance,
       }),
     },
   ),

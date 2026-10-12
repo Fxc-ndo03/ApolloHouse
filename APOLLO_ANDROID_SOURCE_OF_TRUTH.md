@@ -103,7 +103,57 @@
 
 **Timing-safe**: Sí, `areByteArraysEqualTimingSafe()` en `token.ts:5-18` compara byte a byte con XOR acumulado.
 
-**Separación mobile/device**: **NO EXISTE**. Solo `device` y `dashboard`. Agregar mobile requeriría modificar `resolveApolloConnectionRole()` en `role.ts:11-24` para agregar tercera verificación.
+**Separación mobile/device (BLOCK 12)**: existe, pero NO como un tercer rol de
+`resolveApolloConnectionRole()`. Es un eje ortogonal: `device` y `dashboard` siguen
+resolviéndose por `?token=`, y para mobile hay un segundo ámbito que viaja en el header
+`Authorization: Bearer`.
+
+| Ámbito | Transporte | Verificación |
+|---|---|---|
+| `enrolled_android` | `Authorization: Bearer <credencial individual>` | hash SHA-256 contra el registro del DO |
+| `legacy_shared_secret` | `?token=<DEVICE_SHARED_SECRET>` | comparación timing-safe (sin cambios) |
+
+Tres invariantes:
+
+1. Si viene `Authorization`, el ámbito es enrolled: **no hay fallback** al secreto global,
+   y un bearer nunca se compara contra `DEVICE_SHARED_SECRET`.
+2. La identidad sale del **hash guardado**, no del `deviceId` que manda el cliente. Una
+   credencial atada a A no abre sesión declarando B.
+3. El camino `?token=` rechaza cualquier `deviceId` que aparezca en el registro de
+   enrollment, activo **o revocado**. Sin esta regla la revocación sería decorativa: un
+   teléfono revocado volvería por el secreto global.
+
+**Credenciales por dispositivo (BLOCK 12)**
+
+| Pieza | Dónde |
+|---|---|
+| Núcleo de enrollment (puro, sin Cloudflare) | `apps/agent/src/devices/enrollment.ts` |
+| Registro persistente (SQLite del DO) | `apps/agent/src/devices/credential-store.ts` |
+| Frontera de auth y rutas HTTP de enrollment | `apps/agent/src/devices/route.ts` |
+| Verificación autoritativa y revocación | `apps/agent/src/agents/mobile-bridge.ts` |
+
+Se guardan **hashes**, nunca credenciales. Los desafíos también se guardan hasheados y se
+**borran** al consumirse, así que son de un solo uso por construcción. TTL: 5 minutos,
+medido contra el reloj del servidor.
+
+**Rutas de enrollment** (sobre el mismo path del bridge, `POST`):
+
+| Ruta | Auth | Qué hace |
+|---|---|---|
+| `/enrollment/challenge` | `Authorization: Bearer <DASHBOARD_SHARED_SECRET>` | emite un desafío de un solo uso |
+| `/enrollment/claim` | ninguna: lo autoriza el desafío | canjea el desafío por una credencial |
+| `/enrollment/revoke` | `Authorization: Bearer <DASHBOARD_SHARED_SECRET>` | revoca un `deviceId` y cierra su socket vivo |
+
+El rol `dashboard` viaja **sólo** en `Authorization: Bearer` (`isOwnerAuthorized()` en
+`route.ts`). Estas rutas **no** aceptan `?token=`, aunque el ámbito legacy del socket
+sí lo use: un `?token=<DASHBOARD_SHARED_SECRET>` en `/enrollment/challenge` o
+`/enrollment/revoke` responde `401`, comprobado sobre workerd. `apps/mobile` es el
+único cliente y ya usa el header.
+
+**Android**: la credencial se cifra con AES/GCM y una clave en `AndroidKeyStore`
+(`KeystoreCredentialCipher`); en las preferencias queda el ciphertext. La sesión deja de
+reconectar cuando el servidor cierra con 1008 (credencial revocada), que es lo que
+distingue una revocación de una caída de red.
 
 ---
 

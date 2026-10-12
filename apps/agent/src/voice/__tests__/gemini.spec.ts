@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import {
-  chatWithGemini,
-  needsThoughtSignatureRetry,
-} from '@/voice/gemini';
+import { chatWithGemini, needsThoughtSignatureRetry } from '@/voice/gemini';
 
 function createSequenceFetchMock(statusList: readonly number[], body: unknown) {
   let callIndex = 0;

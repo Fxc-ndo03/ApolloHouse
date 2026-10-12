@@ -67,6 +67,18 @@ Desktop.ini
 # rust build artifacts
 target/
 
+# android / gradle build artifacts
+# `apps/mobile/.gitignore` ya cubria build/ y local.properties, pero como
+# `apps/mobile` venia sin trackear, Git lo trata como directorio nuevo y NO
+# aplica el .gitignore anidado. Sin estas reglas, un `git add` arrastraba 800+
+# artefactos generados.
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+*.iml
+
 # python local buffers and backups
 .venv/
 __pycache__/

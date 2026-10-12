@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 use crate::sidecar::SidecarManager;
@@ -69,30 +70,20 @@ pub async fn start_sidecar(
     settings: State<'_, Mutex<AppSettings>>,
 ) -> Result<(), String> {
     let config = settings.lock().unwrap().clone();
-    let worker_url = config.worker_url.clone();
-    let device_secret = config.device_shared_secret.clone();
     let wake_words = config.wake_words.clone();
     let use_vosk = config.use_vosk_wake;
     let model_dir = config.wake_model_dir.clone();
-    let use_local_core = config.use_local_core;
-    let core_lan_url = config.core_lan_url.clone();
-    let response_output_target = config.response_output_target.clone();
-
-    if worker_url.is_empty() || device_secret.is_empty() {
-        return Err("Worker URL y Device Shared Secret son requeridos".into());
-    }
+    let input_device = config.input_device_name.clone();
+    let output_device = config.output_device_name.clone();
 
     sidecar
         .start(
-            worker_url,
-            device_secret,
             wake_words,
             use_vosk,
             model_dir,
             app.clone(),
-            use_local_core,
-            core_lan_url,
-            response_output_target,
+            Some(input_device),
+            Some(output_device),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -613,10 +604,10 @@ async fn send_pc_command(
 #[tauri::command]
 pub async fn get_settings(settings: State<'_, Mutex<AppSettings>>) -> Result<AppSettingsData, String> {
     let s = settings.lock().unwrap();
+    let secret_diag = if s.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" };
     eprintln!(
-        "[apollo] comando get_settings ejecutado: url={} secret={}",
-        if s.worker_url.is_empty() { "(vacia)" } else { "(ok)" },
-        if s.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" }
+        "[apollo] comando get_settings ejecutado: url={} secret={secret_diag}",
+        if s.worker_url.is_empty() { "(vacia)" } else { "(ok)" }
     );
     Ok(AppSettingsData {
         worker_url: s.worker_url.clone(),
@@ -626,6 +617,13 @@ pub async fn get_settings(settings: State<'_, Mutex<AppSettings>>) -> Result<App
         wake_model_dir: s.wake_model_dir.clone(),
         response_output_target: s.response_output_target.clone(),
         autostart_enabled: s.autostart_enabled,
+        tts_provider: s.tts_provider.clone(),
+        tts_voice: s.tts_voice.clone(),
+        tts_language: s.tts_language.clone(),
+        tts_speed: s.tts_speed,
+        input_device_name: s.input_device_name.clone(),
+        output_device_name: s.output_device_name.clone(),
+        device_preferences: s.device_preferences.clone(),
     })
 }
 
@@ -633,30 +631,88 @@ pub async fn get_settings(settings: State<'_, Mutex<AppSettings>>) -> Result<App
 pub async fn update_settings(
     app: AppHandle,
     settings: State<'_, Mutex<AppSettings>>,
-    sidecar: State<'_, SidecarManager>,
     data: AppSettingsData,
 ) -> Result<(), String> {
     let mut updated = settings.lock().unwrap().clone();
+    let had_secret = !updated.device_shared_secret.is_empty();
+    let new_secret = data.device_shared_secret.clone();
     updated.worker_url = data.worker_url;
-    updated.device_shared_secret = data.device_shared_secret;
+    // Solo sobrescribir el secret si viene no vacío. Si viene vacío y ya existía,
+    // preservar el secret existente para no destruir la configuración persistida.
+    if !new_secret.is_empty() {
+        updated.device_shared_secret = new_secret;
+    } else if had_secret {
+        // Secret existente se preserva — no se sobrescribe con vacío
+    }
     updated.wake_words = data.wake_words;
     updated.use_vosk_wake = data.use_vosk_wake;
     updated.wake_model_dir = data.wake_model_dir;
     updated.response_output_target = data.response_output_target;
     updated.autostart_enabled = data.autostart_enabled;
+    updated.tts_provider = data.tts_provider;
+    updated.tts_voice = data.tts_voice;
+    updated.tts_language = data.tts_language;
+    updated.tts_speed = data.tts_speed;
+    if !data.input_device_name.trim().is_empty() {
+        updated.input_device_name = data.input_device_name;
+    }
+    if !data.output_device_name.trim().is_empty() {
+        updated.output_device_name = data.output_device_name;
+    }
+    updated.device_preferences = data.device_preferences;
     updated.save(&app).await.map_err(|e| e.to_string())?;
     *settings.lock().unwrap() = updated.clone();
-    // Propagar el target de audio al sidecar en vivo (aplica sin reiniciar).
-    sidecar
-        .send_json(&serde_json::json!({
-            "action": "set_response_output_target",
-            "target": updated.response_output_target,
-        }))
-        .await
-        .or_else(|_| {
-            // Sidecar puede no estar corriendo; se aplica al conectar vía env.
-            Ok::<(), String>(())
-        })?;
+    eprintln!("[apollo] update_settings: secret={}", if updated.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" });
+    Ok(())
+}
+
+/// Obtiene las preferencias de dispositivo guardadas.
+#[tauri::command]
+pub async fn get_device_preferences(settings: State<'_, Mutex<AppSettings>>) -> Result<crate::state::DevicePreferences, String> {
+    let s = settings.lock().unwrap();
+    Ok(s.device_preferences.clone())
+}
+
+/// Actualiza la preferencia de dispositivo.
+#[tauri::command]
+pub async fn update_device_preference(
+    app: AppHandle,
+    settings: State<'_, Mutex<AppSettings>>,
+    device_type: String,
+    device_name: String,
+    device_index: i32,
+) -> Result<(), String> {
+    let mut updated = settings.lock().unwrap().clone();
+    if device_type == "input" {
+        updated.device_preferences.input_device_name = device_name.clone();
+        updated.device_preferences.input_device_index = device_index;
+        updated.input_device_name = device_name.clone();
+    } else if device_type == "output" {
+        updated.device_preferences.output_device_name = device_name.clone();
+        updated.device_preferences.output_device_index = device_index;
+        updated.output_device_name = device_name.clone();
+    }
+    updated.device_preferences.last_validated = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+    updated.save(&app).await.map_err(|e| e.to_string())?;
+    *settings.lock().unwrap() = updated.clone();
+    eprintln!("[apollo] update_device_preference: type={} name={} index={}", device_type, device_name, device_index);
+    Ok(())
+}
+
+/// Establece el device_shared_secret directamente (para setup inicial o recuperación).
+/// Siempre sobrescribe — el secret nunca se pierde una vez guardado.
+#[tauri::command]
+pub async fn set_device_shared_secret(
+    app: AppHandle,
+    settings: State<'_, Mutex<AppSettings>>,
+    secret: String,
+) -> Result<(), String> {
+    let mut stored = settings.lock().unwrap().clone();
+    stored.device_shared_secret = secret;
+    stored.save(&app).await.map_err(|e| e.to_string())?;
+    *settings.lock().unwrap() = stored.clone();
+    let secret_diag = if stored.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" };
+    eprintln!("[apollo] set_device_shared_secret: secret={secret_diag}");
     Ok(())
 }
 
@@ -665,7 +721,6 @@ pub async fn update_settings(
 pub async fn set_response_output_target(
     app: AppHandle,
     settings: State<'_, Mutex<AppSettings>>,
-    sidecar: State<'_, SidecarManager>,
     target: String,
 ) -> Result<(), String> {
     if target != "pc" && target != "server" {
@@ -677,16 +732,6 @@ pub async fn set_response_output_target(
         stored.save(&app).await.map_err(|e| e.to_string())?;
         *settings.lock().unwrap() = stored;
     }
-    sidecar
-        .send_json(&serde_json::json!({
-            "action": "set_response_output_target",
-            "target": target,
-        }))
-        .await
-        .or_else(|_| {
-            // Sidecar puede no estar corriendo; se aplica al conectar vía env.
-            Ok::<(), String>(())
-        })?;
     Ok(())
 }
 
@@ -769,6 +814,8 @@ pub async fn start_pcbridge(
     settings: State<'_, Mutex<AppSettings>>,
 ) -> Result<(), String> {
     let config = settings.lock().unwrap().clone();
+    let secret_diag = if config.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" };
+    eprintln!("[apollo] pcbridge: start config worker={} secret={secret_diag}", !config.worker_url.is_empty());
     if config.worker_url.is_empty() || config.device_shared_secret.is_empty() {
         return Err("Worker URL y Device Shared Secret son requeridos".into());
     }
@@ -798,6 +845,83 @@ pub async fn pcbridge_status(
         running: bridge.is_running(),
         connected: bridge.is_connected(),
     })
+}
+
+/// Cloud Core management commands (direct WebSocket to Worker)
+#[tauri::command]
+pub async fn start_cloud_core(
+    app: AppHandle,
+    bridge: State<'_, crate::cloudcore::CloudCoreManager>,
+    settings: State<'_, Mutex<AppSettings>>,
+) -> Result<(), String> {
+    let config = settings.lock().unwrap().clone();
+    let secret_diag = if config.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" };
+    eprintln!("[apollo] cloudcore: start config worker={} secret={secret_diag}", !config.worker_url.is_empty());
+    if config.worker_url.is_empty() || config.device_shared_secret.is_empty() {
+        return Err("Worker URL y Device Shared Secret son requeridos".into());
+    }
+    let device_id = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "apollo-desktop".to_string());
+    bridge
+        .start(
+            app.clone(),
+            config.worker_url,
+            config.device_shared_secret,
+            device_id,
+        )
+        .await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_cloud_core(
+    bridge: State<'_, crate::cloudcore::CloudCoreManager>,
+) -> Result<(), String> {
+    bridge.stop().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cloud_core_status(
+    bridge: State<'_, crate::cloudcore::CloudCoreManager>,
+) -> Result<CloudCoreStatus, String> {
+    Ok(CloudCoreStatus {
+        running: bridge.is_running(),
+        connected: bridge.is_connected(),
+    })
+}
+
+#[tauri::command]
+pub async fn send_text_to_cloud_core(
+    bridge: State<'_, crate::cloudcore::CloudCoreManager>,
+    settings: State<'_, std::sync::Mutex<AppSettings>>,
+    text: String,
+) -> Result<(), String> {
+    eprintln!("[text-debug] cloudcore-send text=\"{}\"", text);
+    if !bridge.is_connected() {
+        eprintln!("[text-debug] cloudcore-send=error not-connected");
+        return Err("Apollo no está conectado al Worker (reintentando conexión). Probá de nuevo en unos segundos.".to_string());
+    }
+    let config = settings.lock().unwrap().clone();
+    let tts_config = Some(crate::cloudcore::TtsConfig {
+        provider: config.tts_provider,
+        voice: config.tts_voice,
+        language: config.tts_language,
+        speed: config.tts_speed,
+    });
+    let result = bridge.send_text(&text, tts_config, None, None).await;
+    match &result {
+        Ok(request_id) => eprintln!("[text-debug] cloudcore-send=ok request_id={}", request_id),
+        Err(e) => eprintln!("[text-debug] cloudcore-send=error {e}"),
+    }
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CloudCoreStatus {
+    pub running: bool,
+    pub connected: bool,
 }
 
 /// Manual push-to-talk hacia el sidecar (empujon manual, no reemplaza al wake word)
@@ -854,12 +978,23 @@ pub struct PcBridgeStatus {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettingsData {
     pub worker_url: String,
+    #[serde(default)]
     pub device_shared_secret: String,
     pub wake_words: Vec<String>,
     pub use_vosk_wake: bool,
     pub wake_model_dir: Option<String>,
     pub response_output_target: String,
     pub autostart_enabled: bool,
+    pub tts_provider: String,
+    pub tts_voice: String,
+    pub tts_language: String,
+    pub tts_speed: f64,
+    #[serde(default = "crate::state::default_input_device_name")]
+    pub input_device_name: String,
+    #[serde(default = "crate::state::default_output_device_name")]
+    pub output_device_name: String,
+    #[serde(default)]
+    pub device_preferences: crate::state::DevicePreferences,
 }
 
 /// Protocol message handler (called from sidecar)

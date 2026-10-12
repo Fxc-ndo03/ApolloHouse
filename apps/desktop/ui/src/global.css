@@ -1,5 +1,60 @@
 :root {
   color-scheme: dark;
+
+  /* ===== Apollo design tokens (única fuente de verdad para CSS) ===== */
+  --apollo-bg: #050607;
+  --apollo-bg-elevated: #090C10;
+  --apollo-card: #0D1117;
+  --apollo-card-hover: #11161D;
+  --apollo-text: #EAF7FA;
+  --apollo-text-secondary: #8EA3AA;
+  --apollo-text-muted: #5D6D73;
+  --apollo-line: rgba(150, 220, 255, 0.10);
+  --apollo-line-soft: rgba(150, 220, 255, 0.06);
+  --apollo-primary: #67D9FF;
+  --apollo-primary-2: #42E8E0;
+  --apollo-primary-deep: #2FA8C9;
+  --apollo-success: #63F2B0;
+  --apollo-warn: #FFD166;
+  --apollo-danger: #FF6B6B;
+  --apollo-danger-ghost: rgba(255, 107, 107, 0.10);
+  --apollo-glow: rgba(103, 217, 255, 0.25);
+  --apollo-glow-strong: rgba(66, 232, 224, 0.35);
+  --apollo-glass: rgba(13, 17, 23, 0.72);
+  --apollo-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --apollo-radius: 14px;
+  --apollo-radius-sm: 9px;
+  --apollo-fs: 1;
+  --apollo-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --apollo-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Aliases de compatibilidad con componentes existentes */
+  --apollo-surface: var(--apollo-bg-elevated);
+  --apollo-surface2: var(--apollo-card);
+  --apollo-border: var(--apollo-line);
+  --apollo-border-soft: var(--apollo-line-soft);
+  --apollo-blue: var(--apollo-primary);
+  --apollo-blue-soft: #8BE7FF;
+  --apollo-cyan: var(--apollo-primary-2);
+  --apollo-cyan-soft: #6CF0E8;
+  --apollo-green: var(--apollo-success);
+}
+
+:root[data-apollo-theme='light'] {
+  color-scheme: light;
+  --apollo-bg: #EDF4F7;
+  --apollo-bg-elevated: #FFFFFF;
+  --apollo-card: #FFFFFF;
+  --apollo-card-hover: #F2F7FA;
+  --apollo-text: #0E1B21;
+  --apollo-text-secondary: #3D5560;
+  --apollo-text-muted: #7A9099;
+  --apollo-line: rgba(15, 90, 120, 0.14);
+  --apollo-line-soft: rgba(15, 90, 120, 0.08);
+  --apollo-glass: rgba(255, 255, 255, 0.78);
+  --apollo-shadow: 0 12px 32px rgba(20, 60, 90, 0.14);
+  --apollo-glow: rgba(47, 168, 201, 0.25);
+  --apollo-glow-strong: rgba(47, 168, 201, 0.35);
 }
 
 * {
@@ -16,8 +71,8 @@ body,
 }
 
 body {
-  background: #0a0a0f;
-  color: #f4f2fa;
+  background: var(--apollo-bg);
+  color: var(--apollo-text);
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -28,13 +83,22 @@ body {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.apollo-mark {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--apollo-primary), var(--apollo-primary-2));
+  box-shadow: 0 4px 12px var(--apollo-glow);
+}
+
 ::selection {
-  background: rgba(139, 92, 246, 0.4);
+  background: rgba(103, 217, 255, 0.25);
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -42,17 +106,43 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #23232e;
-  border-radius: 4px;
+  background: rgba(150, 220, 255, 0.12);
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #8b5cf6;
+  background: rgba(150, 220, 255, 0.20);
 }
 
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
-  outline: 1px solid #8b5cf6;
+  outline: 1px solid rgba(103, 217, 255, 0.4);
   outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Utilidades de motion compartidas (GPU-friendly: opacity/transform/filter) */
+@keyframes apollo-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes apollo-rise-in {
+  from { opacity: 0; transform: translateY(10px); filter: blur(5px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+@keyframes apollo-pop-in {
+  from { opacity: 0; transform: scale(0.92) translateY(6px); }
+  to { opacity: 1; transform: none; }
 }

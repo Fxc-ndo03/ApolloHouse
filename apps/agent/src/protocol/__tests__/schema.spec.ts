@@ -20,6 +20,32 @@ describe('protocol schema', () => {
     expect(message.type).toBe('audio_end');
   });
 
+  it('parses text_input with client_turn_id', () => {
+    const message = parseDeviceToServerMessage(
+      JSON.stringify({
+        type: 'text_input',
+        text: 'hola',
+        ts: 3,
+        request_id: 'turn-1',
+        client_turn_id: 'abcdef12',
+      }),
+    );
+    expect(message.type).toBe('text_input');
+    if (message.type === 'text_input') {
+      expect(message.client_turn_id).toBe('abcdef12');
+    }
+  });
+
+  it('parses text_input without client_turn_id (backward compatible)', () => {
+    const message = parseDeviceToServerMessage(
+      JSON.stringify({ type: 'text_input', text: 'hola', ts: 3 }),
+    );
+    expect(message.type).toBe('text_input');
+    if (message.type === 'text_input') {
+      expect(message.client_turn_id).toBeUndefined();
+    }
+  });
+
   it('rejects unknown type', () => {
     expect(() => parseDeviceToServerMessage(JSON.stringify({ type: 'nope' }))).toThrow();
   });

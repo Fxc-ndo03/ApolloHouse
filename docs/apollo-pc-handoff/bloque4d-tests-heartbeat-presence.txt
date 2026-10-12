@@ -1,0 +1,478 @@
+# BLOQUE: bloque4d-tests-heartbeat-presence
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\heartbeat.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+
+import { buildAuthenticatedDeviceProof, CapabilityRegistry } from '@/devices/registry';
+import { ANY_TARGET_PREFERENCE } from '@/devices/schema';
+import { PRESENCE_STALE_MILLISECONDS } from '@/devices/presence';
+
+const proof = buildAuthenticatedDeviceProof('device');
+
+describe('regression: a live heartbeat must keep the device available', () => {
+  it('a pong every 30s keeps a desktop selectable past the stale window', () => {
+    let now = 1_000_000;
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => now });
+    registry.register({
+      transport: { transportKind: 'pc_bridge', connectionId: 'connection-under-test' },
+      proof,
+      deviceId: 'desktop:pc',
+      deviceType: 'desktop',
+      capabilityNameList: ['desktop.open_app'],
+      protocolVersion: 1,
+      lastSeenAt: now,
+    });
+
+    // El Worker manda ping cada 30 s y el cliente responde pong. Eso es la
+    // Ãºnica seÃ±al de vida: si el beat no actualiza lastSeenAt, el desktop se
+    // cae solo a los 90 s aunque el proceso siga vivo.
+    for (let elapsed = 30_000; elapsed <= 120_000; elapsed += 30_000) {
+      now = 1_000_000 + elapsed;
+      registry.recordHeartbeat({ proof, deviceId: 'desktop:pc', atMilliseconds: now });
+      expect(
+        registry.resolveTarget({
+          capabilityName: 'desktop.open_app',
+          targetPreference: ANY_TARGET_PREFERENCE,
+        }).status,
+      ).toBe('resolved');
+    }
+  });
+
+  it('without beats the device goes offline after the stale window', () => {
+    let now = 1_000_000;
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => now });
+    registry.register({
+      transport: { transportKind: 'pc_bridge', connectionId: 'connection-under-test' },
+      proof,
+      deviceId: 'desktop:pc',
+      deviceType: 'desktop',
+      capabilityNameList: ['desktop.open_app'],
+      protocolVersion: 1,
+      lastSeenAt: now,
+    });
+    now = 1_000_000 + PRESENCE_STALE_MILLISECONDS + 1;
+    expect(
+      registry.resolveTarget({
+        capabilityName: 'desktop.open_app',
+        targetPreference: ANY_TARGET_PREFERENCE,
+      }).status,
+    ).toBe('unavailable');
+  });
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\heartbeat-scheduler.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+
+import {
+  HeartbeatScheduler,
+  type HeartbeatTimerHandle,
+  type HeartbeatTimerPort,
+} from '@/devices/heartbeat';
+import { HEARTBEAT_INTERVAL_MILLISECONDS } from '@/devices/presence';
+
+type RecordingTimerPort = HeartbeatTimerPort & {
+  readonly startCount: number;
+  readonly clearCount: number;
+  readonly liveCount: number;
+  readonly intervalList: readonly number[];
+  readonly tick: () => void;
+};
+
+function buildRecordingTimerPort(): RecordingTimerPort {
+  let startCount = 0;
+  let clearCount = 0;
+  let liveCount = 0;
+  let beatCallback: (() => void) | null = null;
+  const intervalList: number[] = [];
+  return {
+    get startCount() {
+      return startCount;
+    },
+    get clearCount() {
+      return clearCount;
+    },
+    get liveCount() {
+      return liveCount;
+    },
+    get intervalList() {
+      return intervalList;
+    },
+    tick() {
+      beatCallback?.();
+    },
+    setInterval(callback: () => void, milliseconds: number): HeartbeatTimerHandle {
+      startCount += 1;
+      liveCount += 1;
+      beatCallback = callback;
+      intervalList.push(milliseconds);
+      return startCount;
+    },
+    clearInterval(): void {
+      clearCount += 1;
+      liveCount -= 1;
+      beatCallback = null;
+    },
+  };
+}
+
+describe('single heartbeat task', () => {
+  it('uses the shared interval constant', () => {
+    const timerPort = buildRecordingTimerPort();
+    new HeartbeatScheduler().start(timerPort, () => {});
+    expect(timerPort.intervalList).toEqual([HEARTBEAT_INTERVAL_MILLISECONDS]);
+  });
+
+  it('6. never starts a second heartbeat task', () => {
+    const timerPort = buildRecordingTimerPort();
+    const scheduler = new HeartbeatScheduler();
+    expect(scheduler.start(timerPort, () => {})).toBe(true);
+    expect(scheduler.start(timerPort, () => {})).toBe(false);
+    expect(scheduler.start(timerPort, () => {})).toBe(false);
+    expect(timerPort.startCount).toBe(1);
+    expect(timerPort.liveCount).toBe(1);
+    expect(scheduler.isRunning).toBe(true);
+  });
+
+  it('7. stop prevents any further heartbeat', () => {
+    const timerPort = buildRecordingTimerPort();
+    let beatCount = 0;
+    const scheduler = new HeartbeatScheduler();
+    scheduler.start(timerPort, () => {
+      beatCount += 1;
+    });
+    timerPort.tick();
+    expect(beatCount).toBe(1);
+
+    expect(scheduler.stop(timerPort)).toBe(true);
+    timerPort.tick();
+    expect(beatCount).toBe(1);
+    expect(scheduler.isRunning).toBe(false);
+    // Un segundo stop no invoca al timer port otra vez.
+    expect(scheduler.stop(timerPort)).toBe(false);
+    expect(timerPort.clearCount).toBe(1);
+    expect(timerPort.liveCount).toBe(0);
+  });
+
+  it('8. reconnect creates exactly one heartbeat task', () => {
+    const timerPort = buildRecordingTimerPort();
+    const scheduler = new HeartbeatScheduler();
+    scheduler.start(timerPort, () => {});
+    scheduler.stop(timerPort);
+    expect(scheduler.start(timerPort, () => {})).toBe(true);
+    expect(scheduler.start(timerPort, () => {})).toBe(false);
+    expect(timerPort.startCount).toBe(2);
+    expect(timerPort.clearCount).toBe(1);
+    expect(timerPort.liveCount).toBe(1);
+  });
+
+  it('stays stopped when stop runs before any start', () => {
+    const timerPort = buildRecordingTimerPort();
+    const scheduler = new HeartbeatScheduler();
+    expect(scheduler.stop(timerPort)).toBe(false);
+    expect(timerPort.clearCount).toBe(0);
+    expect(scheduler.isRunning).toBe(false);
+  });
+
+  it('a stopped scheduler can be restarted repeatedly without leaking timers', () => {
+    const timerPort = buildRecordingTimerPort();
+    const scheduler = new HeartbeatScheduler();
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      scheduler.start(timerPort, () => {});
+      scheduler.stop(timerPort);
+    }
+    expect(timerPort.startCount).toBe(5);
+    expect(timerPort.clearCount).toBe(5);
+    expect(timerPort.liveCount).toBe(0);
+  });
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\presence.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { buildAuthenticatedDeviceProof, CapabilityRegistry } from '@/devices/registry';
+import { ANY_TARGET_PREFERENCE, desktopTargetPreference } from '@/devices/schema';
+import {
+  HEARTBEAT_INTERVAL_MILLISECONDS,
+  PRESENCE_DEGRADED_AFTER_MILLISECONDS,
+  PRESENCE_OFFLINE_AFTER_MILLISECONDS,
+  isPresenceSelectable,
+  resolvePresenceFromSignal,
+} from '@/devices/presence';
+import type { CapabilityName } from '@/devices/capability';
+
+const proof = buildAuthenticatedDeviceProof('device');
+const CAPABILITIES: readonly CapabilityName[] = ['desktop.open_app', 'desktop.spotify'];
+const START = 1_700_000_000_000;
+
+function buildRegistry(): {
+  registry: CapabilityRegistry;
+  setNow: (value: number) => void;
+} {
+  let now = START;
+  const registry = new CapabilityRegistry({ nowMilliseconds: () => now });
+  registry.register({
+    transport: { transportKind: 'pc_bridge', connectionId: 'connection-under-test' },
+    proof,
+    deviceId: 'desktop:pc',
+    deviceType: 'desktop',
+    capabilityNameList: CAPABILITIES,
+    protocolVersion: 1,
+    lastSeenAt: START,
+  });
+  return { registry, setNow: (value: number) => (now = value) };
+}
+
+function beat(registry: CapabilityRegistry, atMilliseconds: number): void {
+  registry.recordHeartbeat({ proof, deviceId: 'desktop:pc', atMilliseconds });
+}
+
+function resolveOpenApp(registry: CapabilityRegistry) {
+  return registry.resolveTarget({
+    capabilityName: 'desktop.open_app',
+    targetPreference: ANY_TARGET_PREFERENCE,
+  });
+}
+
+describe('heartbeat interval constants', () => {
+  it('derives both thresholds from the interval', () => {
+    expect(HEARTBEAT_INTERVAL_MILLISECONDS).toBe(30_000);
+    expect(PRESENCE_DEGRADED_AFTER_MILLISECONDS).toBeGreaterThan(
+      HEARTBEAT_INTERVAL_MILLISECONDS,
+    );
+    expect(PRESENCE_OFFLINE_AFTER_MILLISECONDS).toBeGreaterThan(
+      PRESENCE_DEGRADED_AFTER_MILLISECONDS,
+    );
+  });
+});
+
+describe('no second heartbeat timer', () => {
+  const sourceRoot = join(import.meta.dir, '..', '..');
+
+  function listSourceFilePathList(): string[] {
+    const filePathList: string[] = [];
+    const walk = (directoryPath: string): void => {
+      for (const entryName of readdirSync(directoryPath)) {
+        const entryPath = join(directoryPath, entryName);
+        if (statSync(entryPath).isDirectory()) {
+          walk(entryPath);
+          continue;
+        }
+        if (entryName.endsWith('.ts') && !entryName.endsWith('.spec.ts')) {
+          filePathList.push(entryPath);
+        }
+      }
+    };
+    walk(sourceRoot);
+    return filePathList;
+  }
+
+  function toRelativePath(filePath: string): string {
+    return filePath.replace(sourceRoot, '').replace(/\\/g, '/').replace(/^\//, '');
+  }
+
+  it('only the scheduler module creates a heartbeat timer', () => {
+    const schedulerPath = join(sourceRoot, 'devices', 'heartbeat.ts');
+    const offenderList = listSourceFilePathList().filter((filePath) => {
+      if (filePath === schedulerPath) {
+        return false;
+      }
+      const source = readFileSync(filePath, 'utf8');
+      // setInterval propio para presencia/heartbeat: prohibido.
+      return /setInterval\s*\(/.test(source) && /heartbeat|presence|ping/i.test(source);
+    });
+    expect(offenderList.map(toRelativePath)).toEqual([]);
+  });
+
+  it('PcBridge drives the heartbeat through the scheduler, not a raw timer', () => {
+    const pcBridgeSource = readFileSync(
+      join(sourceRoot, 'agents', 'pc-bridge.ts'),
+      'utf8',
+    );
+    expect(pcBridgeSource).not.toMatch(/setInterval\s*\(/);
+    expect(pcBridgeSource).toContain('this.#heartbeat.start(');
+    expect(pcBridgeSource).toContain('this.#heartbeat.stop(');
+  });
+
+  it('the interval is declared in exactly one place', () => {
+    const declaringFileList = listSourceFilePathList().filter((filePath) =>
+      /HEARTBEAT_INTERVAL_MILLISECONDS\s*=\s*\d/.test(readFileSync(filePath, 'utf8')),
+    );
+    expect(declaringFileList.map(toRelativePath)).toEqual(['devices/presence.ts']);
+  });
+});
+
+describe('presence policy', () => {
+  it('1. a recent heartbeat is online', () => {
+    expect(
+      resolvePresenceFromSignal(
+        { connectionState: 'open', lastHeartbeatAt: START },
+        START + 1_000,
+      ),
+    ).toBe('online');
+  });
+
+  it('2. a late heartbeat is degraded', () => {
+    expect(
+      resolvePresenceFromSignal(
+        { connectionState: 'open', lastHeartbeatAt: START },
+        START + PRESENCE_DEGRADED_AFTER_MILLISECONDS,
+      ),
+    ).toBe('degraded');
+  });
+
+  it('3. a heartbeat older than the offline window is offline', () => {
+    expect(
+      resolvePresenceFromSignal(
+        { connectionState: 'open', lastHeartbeatAt: START },
+        START + PRESENCE_OFFLINE_AFTER_MILLISECONDS,
+      ),
+    ).toBe('offline');
+  });
+
+  it('reports offline immediately when the socket is closed, whatever the beat', () => {
+    expect(
+      resolvePresenceFromSignal(
+        { connectionState: 'closed', lastHeartbeatAt: START },
+        START,
+      ),
+    ).toBe('offline');
+  });
+
+  it('reports unknown when there was never a heartbeat', () => {
+    expect(
+      resolvePresenceFromSignal(
+        { connectionState: 'open', lastHeartbeatAt: null },
+        START,
+      ),
+    ).toBe('unknown');
+  });
+
+  it('10. degraded is still selectable, offline is not', () => {
+    expect(isPresenceSelectable('online')).toBe(true);
+    expect(isPresenceSelectable('degraded')).toBe(true);
+    expect(isPresenceSelectable('offline')).toBe(false);
+    expect(isPresenceSelectable('unknown')).toBe(false);
+  });
+
+  it('11. is deterministic for the same inputs', () => {
+    const signal = { connectionState: 'open', lastHeartbeatAt: START } as const;
+    const first = resolvePresenceFromSignal(signal, START + 60_000);
+    const second = resolvePresenceFromSignal(signal, START + 60_000);
+    expect(first).toBe(second);
+    expect(first).toBe('degraded');
+  });
+});
+
+describe('heartbeat keeps the device available', () => {
+  it('a beat every interval keeps a desktop selectable indefinitely', () => {
+    const { registry, setNow } = buildRegistry();
+    for (
+      let elapsed = HEARTBEAT_INTERVAL_MILLISECONDS;
+      elapsed <= 600_000;
+      elapsed += 30_000
+    ) {
+      elapsed += 0;
+      setNow(START + elapsed);
+      beat(registry, START + elapsed);
+      expect(resolveOpenApp(registry).status).toBe('resolved');
+    }
+    expect(registry.getDevice('desktop:pc')?.lastSeenAt).toBe(START + 600_000);
+  });
+
+  it('9. a stale device is not selected', () => {
+    const { registry, setNow } = buildRegistry();
+    setNow(START + PRESENCE_OFFLINE_AFTER_MILLISECONDS + 1);
+    expect(resolveOpenApp(registry).status).toBe('unavailable');
+    if (registry.getDevice('desktop:pc') !== undefined) {
+      expect(registry.getDevice('desktop:pc')?.presence).not.toBe('offline');
+    }
+  });
+
+  it('reports degraded while connected but late', () => {
+    const { registry, setNow } = buildRegistry();
+    setNow(START + PRESENCE_DEGRADED_AFTER_MILLISECONDS);
+    expect(registry.resolvePresence('desktop:pc')).toBe('degraded');
+    // Un device degradado sigue siendo un candidate vÃ¡lido.
+    expect(resolveOpenApp(registry).status).toBe('resolved');
+  });
+
+  it('reports offline once the beat window closes', () => {
+    const { registry, setNow } = buildRegistry();
+    setNow(START + PRESENCE_OFFLINE_AFTER_MILLISECONDS);
+    expect(registry.resolvePresence('desktop:pc')).toBe('offline');
+  });
+});
+
+describe('disconnect and reconnect', () => {
+  it('4. disconnect marks the device offline and stops selection', () => {
+    const { registry } = buildRegistry();
+    registry.markPresence({ proof, deviceId: 'desktop:pc', presence: 'offline' });
+    expect(registry.resolvePresence('desktop:pc')).toBe('offline');
+    expect(
+      registry.resolveTarget({
+        capabilityName: 'desktop.open_app',
+        targetPreference: desktopTargetPreference,
+      }).status,
+    ).toBe('unavailable');
+  });
+
+  it('5. a heartbeat after reconnect brings it back online', () => {
+    const { registry, setNow } = buildRegistry();
+    registry.markPresence({ proof, deviceId: 'desktop:pc', presence: 'offline' });
+    setNow(START + 5 * 60_000);
+    beat(registry, START + 5 * 60_000);
+    expect(registry.resolvePresence('desktop:pc')).toBe('online');
+    expect(resolveOpenApp(registry).status).toBe('resolved');
+  });
+
+  it('re-registering on reconnect refreshes identity without duplicating', () => {
+    const { registry, setNow } = buildRegistry();
+    registry.markPresence({ proof, deviceId: 'desktop:pc', presence: 'offline' });
+    setNow(START + 60_000);
+    const outcome = registry.register({
+      transport: { transportKind: 'pc_bridge', connectionId: 'connection-under-test' },
+      proof,
+      deviceId: 'desktop:pc',
+      deviceType: 'desktop',
+      capabilityNameList: CAPABILITIES,
+      protocolVersion: 1,
+    });
+    expect(outcome.status).toBe('registered');
+    if (outcome.status === 'registered') {
+      expect(outcome.isNewDevice).toBe(false);
+    }
+    expect(registry.listDeviceList()).toHaveLength(1);
+    expect(registry.resolvePresence('desktop:pc')).toBe('online');
+  });
+
+  it('ignores heartbeats from unauthenticated callers', () => {
+    const { registry } = buildRegistry();
+    expect(
+      registry.recordHeartbeat({
+        proof: null,
+        deviceId: 'desktop:pc',
+        atMilliseconds: START,
+      }),
+    ).toBeNull();
+    expect(registry.getDevice('desktop:pc')?.lastSeenAt).toBe(START);
+  });
+
+  it('ignores heartbeats for an unknown device', () => {
+    const { registry } = buildRegistry();
+    expect(
+      registry.recordHeartbeat({
+        proof,
+        deviceId: 'desktop:fantasma',
+        atMilliseconds: START,
+      }),
+    ).toBeNull();
+  });
+});
+

@@ -146,10 +146,23 @@ export async function chatWithGemini(input: {
   >[];
   readonly onTextDelta?: (deltaText: string) => void;
   readonly fetchImplementation?: typeof fetch;
+  readonly request_id?: string;
 }): Promise<GeminiChatResult> {
+  const requestId = input.request_id ?? 'unknown';
+  const geminiStartMs = Date.now();
   if (input.geminiApiKey.length === 0) {
     throw new Error('GEMINI_API_KEY no configurado');
   }
+
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] gemini_llm_start',
+      request_id: requestId,
+      modelId: input.modelId,
+      messageListLength: input.messageList.length,
+    }),
+  );
 
   // Build a map from tool_call_id to tool name for functionResponse (must be before geminiContents loop)
   const toolCallIdToName = new Map<string, string>();
@@ -262,12 +275,13 @@ export async function chatWithGemini(input: {
     ? `${baseUrl}:streamGenerateContent?key=${encodeURIComponent(input.geminiApiKey)}&alt=sse`
     : `${baseUrl}:generateContent?key=${encodeURIComponent(input.geminiApiKey)}`;
 
-  // Diagnóstico: loguear URL y modo
+  // Diagnóstico: loguear URL sin secretos
+  const sanitizedBaseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(input.modelId ?? 'gemini-3.6-flash')}:generateContent`;
   console.log(
     JSON.stringify({
       level: 'info',
       message: 'Gemini LLM request',
-      url: url.replace(input.geminiApiKey, input.geminiApiKey.substring(0, 10) + '...'),
+      url: sanitizedBaseUrl,
       streaming: isStreaming,
       modelId: input.modelId,
       toolsCount: tools?.length ?? 0,
@@ -300,6 +314,17 @@ export async function chatWithGemini(input: {
     if (response.ok) {
       if (isStreaming) {
         const streamedResult = await consumeGeminiStream(response, input.onTextDelta!);
+        const geminiElapsedMs = Date.now() - geminiStartMs;
+        console.log(
+          JSON.stringify({
+            level: 'debug',
+            message: '[worker-debug] gemini_llm_end',
+            request_id: requestId,
+            elapsedMs: geminiElapsedMs,
+            textLength: streamedResult.text.length,
+            toolCallCount: streamedResult.toolCallList.length,
+          }),
+        );
         return { ...streamedResult, hadAvailabilityRetry: availabilityRetried };
       }
 
@@ -307,8 +332,12 @@ export async function chatWithGemini(input: {
       const candidate = payload.candidates?.[0];
       const parts = candidate?.content?.parts ?? [];
       let text = '';
-      const toolCallList: { id: string; name: string; args: JsonSerializableValue; thoughtSignature?: string }[] =
-        [];
+      const toolCallList: {
+        id: string;
+        name: string;
+        args: JsonSerializableValue;
+        thoughtSignature?: string;
+      }[] = [];
       for (const part of parts) {
         if (part.text !== undefined) text += part.text;
         if (part.functionCall !== undefined) {
@@ -336,7 +365,22 @@ export async function chatWithGemini(input: {
           toolCallList.push(toolCall);
         }
       }
-      return { text: text.trim(), toolCallList, hadAvailabilityRetry: availabilityRetried };
+      const geminiElapsedMs = Date.now() - geminiStartMs;
+      console.log(
+        JSON.stringify({
+          level: 'debug',
+          message: '[worker-debug] gemini_llm_end',
+          request_id: requestId,
+          elapsedMs: geminiElapsedMs,
+          textLength: text.trim().length,
+          toolCallCount: toolCallList.length,
+        }),
+      );
+      return {
+        text: text.trim(),
+        toolCallList,
+        hadAvailabilityRetry: availabilityRetried,
+      };
     }
 
     const detail = await response.text().catch(() => '');
@@ -476,12 +520,13 @@ export async function transcribeAudioWithGemini(input: {
   const base64Audio = encodePcmForGemini(input.audioBuffer);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(input.geminiApiKey)}`;
 
-  // Diagnóstico: loguear URL y prefijo de API key (primeros 10 chars)
+  // Diagnóstico: loguear URL sin secretos
+  const sanitizedBaseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   console.log(
     JSON.stringify({
       level: 'info',
       message: 'Gemini STT request',
-      url: url.replace(input.geminiApiKey, input.geminiApiKey.substring(0, 10) + '...'),
+      url: sanitizedBaseUrl,
       model,
       audioBytes: input.audioBuffer.byteLength,
     }),
@@ -554,7 +599,9 @@ export async function transcribeAudioWithGemini(input: {
     if (response.status === 429) {
       lastError = new GeminiSttQuotaExceededError(response.status, detail);
     } else {
-      lastError = new Error(`Gemini STT falló ${response.status}: ${detail.slice(0, 500)}`);
+      lastError = new Error(
+        `Gemini STT falló ${response.status}: ${detail.slice(0, 500)}`,
+      );
     }
     break; // No reintentar en otros errores
   }
@@ -586,12 +633,13 @@ export async function synthesizeWithGemini(input: {
   const model = input.modelId ?? 'models/gemini-2.5-flash-tts';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(input.geminiApiKey)}`;
 
-  // Diagnóstico: loguear URL
+  // Diagnóstico: loguear URL sin secretos
+  const sanitizedBaseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   console.log(
     JSON.stringify({
       level: 'info',
       message: 'Gemini TTS request',
-      url: url.replace(input.geminiApiKey, input.geminiApiKey.substring(0, 10) + '...'),
+      url: sanitizedBaseUrl,
       model,
       textLength: input.text.length,
     }),

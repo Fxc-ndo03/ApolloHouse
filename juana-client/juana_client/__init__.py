@@ -1,60 +1,10 @@
 """Juana Client - Python client for Apollo (Juana) voice assistant."""
 
-from .client import JuanaClient, JuanaConfig, ConnectionState
-from .protocol import (
-    HelloMessage,
-    HoldStartMessage,
-    HoldEndMessage,
-    TextInputMessage,
-    AbortMessage,
-    ConfirmMessage,
-    SetResponseOutputTargetMessage,
-    TelemetryMessage,
-    parse_server_message,
-    TtsStartMessage,
-    TtsEndMessage,
-    TtsAbortedMessage,
-    TurnEndMessage,
-    UiStateMessage,
-    ConfirmRequestMessage,
-    ErrorMessage,
-)
-from .audio import AudioCapture, AudioPlayback
-from .clap import ClapDetector, compute_rms
-from .wake import (
-    VoskWakeWordDetector,
-    ManualWakeWordDetector,
-    create_wake_detector,
-    download_vosk_model,
-)
-
 __version__ = "0.1.0"
-__all__ = [
-    "JuanaClient",
-    "JuanaConfig",
-    "ConnectionState",
-    "HelloMessage",
-    "HoldStartMessage",
-    "HoldEndMessage",
-    "TextInputMessage",
-    "AbortMessage",
-    "ConfirmMessage",
-    "SetResponseOutputTargetMessage",
-    "TelemetryMessage",
-    "parse_server_message",
-    "TtsStartMessage",
-    "TtsEndMessage",
-    "TtsAbortedMessage",
-    "TurnEndMessage",
-    "UiStateMessage",
-    "ConfirmRequestMessage",
-    "ErrorMessage",
-    "AudioCapture",
-    "AudioPlayback",
-    "ClapDetector",
-    "compute_rms",
-    "VoskWakeWordDetector",
-    "ManualWakeWordDetector",
-    "create_wake_detector",
-    "download_vosk_model",
-]
+
+# NO importar .client aqui: cuando se ejecuta `python -m juana_client.client`,
+# Python primero importa este paquete (ejecutando __init__.py) y luego runpy
+# ejecuta client.py como __main__. Si __init__ ya puso `client` en sys.modules,
+# runpy lo detecta como "found in sys.modules after import of package" y emite
+# el RuntimeWarning. Los consumidores que usan `import juana_client` obtienen
+# los simbolos via los submodulos directamente (from juana_client.client import ...).

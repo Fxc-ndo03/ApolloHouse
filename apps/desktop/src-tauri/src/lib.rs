@@ -1,5 +1,6 @@
 //! Apollo Desktop - Library root (hosts the Tauri application builder)
 
+pub mod cloudcore;
 pub mod commands;
 pub mod pcbridge;
 pub mod sidecar;
@@ -17,6 +18,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use commands::*;
+use cloudcore::CloudCoreManager;
 use pcbridge::PcBridgeManager;
 use sidecar::SidecarManager;
 use state::{AppSettings, AppState};
@@ -48,7 +50,7 @@ pub fn run() {
                     log::warn!("autostart: no se pudo habilitar al arrancar: {error}");
                 }
             }
-            app.manage(Mutex::new(settings));
+            app.manage(Mutex::new(settings.clone()));
 
             // Initialize app state
             let state = AppState::new(app_handle.clone());
@@ -58,40 +60,31 @@ pub fn run() {
             // Windows come from app.windows in tauri.conf.json.
             create_tray(app)?;
 
-            // Start sidecar (Python juana-client)
+            // Start sidecar (Python juana-client) — wake word, STT, TTS playback only.
+            // Text goes through CloudCoreManager (single route to Worker).
             let sidecar_manager = SidecarManager::new(app_handle.clone());
-            
-            // Auto-start sidecar if settings already configured
-            let settings = tauri::async_runtime::block_on(AppSettings::load(&app_handle)).unwrap_or_default();
+
+            // Auto-start sidecar using already-loaded settings (no re-read from file)
             eprintln!(
-                "[apollo] settings: url={} secret={} autostart={}",
-                if settings.worker_url.is_empty() { "(vacia)" } else { &settings.worker_url },
-                if settings.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" },
-                settings.autostart_enabled
+                "[apollo] settings: autostart={} secret={}",
+                settings.autostart_enabled,
+                if settings.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" }
             );
-            if !settings.worker_url.is_empty() && !settings.device_shared_secret.is_empty() {
+            if settings.autostart_enabled {
                 let sidecar_manager_for_start = sidecar_manager.clone();
                 let app_handle_for_sidecar = app_handle.clone();
-                let worker_url = settings.worker_url.clone();
-                let device_secret = settings.device_shared_secret.clone();
                 let wake_words = settings.wake_words.clone();
                 let use_vosk = settings.use_vosk_wake;
                 let model_dir = settings.wake_model_dir.clone();
-                let use_local_core = settings.use_local_core;
-                let core_lan_url = settings.core_lan_url.clone();
-                let response_output_target = settings.response_output_target.clone();
                 tauri::async_runtime::spawn(async move {
                     match sidecar_manager_for_start
                         .start(
-                            worker_url,
-                            device_secret,
                             wake_words,
                             use_vosk,
                             model_dir,
                             app_handle_for_sidecar,
-                            use_local_core,
-                            core_lan_url,
-                            response_output_target,
+                            Some(settings.input_device_name.clone()),
+                            Some(settings.output_device_name.clone()),
                         )
                         .await
                     {
@@ -114,6 +107,27 @@ pub fn run() {
                     .await;
             });
             app.manage(pcbridge_manager);
+
+            // Cloud Core: direct WebSocket to Worker (replaces Python sidecar for cloud path)
+            let cloudcore_manager = CloudCoreManager::new();
+            if !settings.worker_url.is_empty() && !settings.device_shared_secret.is_empty() {
+                let cloudcore_for_start = cloudcore_manager.clone();
+                let app_handle_for_cloudcore = app_handle.clone();
+                let worker_url_cc = settings.worker_url.clone();
+                let device_secret_cc = settings.device_shared_secret.clone();
+                let device_id_cc = local_device_id();
+                tauri::async_runtime::spawn(async move {
+                    cloudcore_for_start
+                        .start(
+                            app_handle_for_cloudcore,
+                            worker_url_cc,
+                            device_secret_cc,
+                            device_id_cc,
+                        )
+                        .await;
+                });
+            }
+            app.manage(cloudcore_manager);
 
             // Pivote de diseno: main es ventana flotante, no wallpaper.
             // El modulo wallpaper.rs queda sin invocar para reusarlo despues.
@@ -149,6 +163,11 @@ pub fn run() {
             start_pcbridge,
             stop_pcbridge,
             pcbridge_status,
+            // Cloud Core (direct Worker WebSocket)
+            start_cloud_core,
+            stop_cloud_core,
+            cloud_core_status,
+            send_text_to_cloud_core,
             // Autostart
             get_autostart_enabled,
             set_autostart_enabled,
@@ -174,11 +193,18 @@ pub fn run() {
             // Settings
             get_settings,
             update_settings,
+            set_device_shared_secret,
             // Protocol messages from sidecar
             on_protocol_message,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn local_device_id() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "apollo-desktop".to_string())
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {

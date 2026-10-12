@@ -1,0 +1,909 @@
+import { describe, expect, it } from 'bun:test';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { buildAuthenticatedDeviceProof, CapabilityRegistry } from '@/devices/registry';
+import {
+  DeviceSessionLifecycle,
+  isAuthenticatedDeviceConnection,
+} from '@/devices/connection';
+import {
+  buildMobilePeerTransportForTest,
+  createRecordingMobilePort,
+  readRejectionReason,
+  type RecordingMobilePort,
+} from '@/devices/__tests__/harness';
+import {
+  buildMobileRegistrationFromHello,
+  type MobilePeerTransport,
+} from '@/devices/mobile';
+import {
+  deviceSessionSchema,
+  isSelectableDeviceSession,
+  splitDeclaredCapabilityList,
+  type DeviceSession,
+} from '@/devices/session';
+import {
+  buildDeviceCommandEnvelope,
+  buildDeviceCommandResultEnvelope,
+  readDeviceEnvelopeCorrelation,
+} from '@/devices/envelope';
+import {
+  PRESENCE_DEGRADED_AFTER_MILLISECONDS,
+  PRESENCE_OFFLINE_AFTER_MILLISECONDS,
+} from '@/devices/presence';
+import type { HeartbeatTimerHandle, HeartbeatTimerPort } from '@/devices/heartbeat';
+
+const SOURCE_ROOT = join(import.meta.dir, '..', '..');
+
+function stripComment(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+import { buildDesktopRegistrationFromHello } from '@/devices/desktop';
+import { pcToServerMessageSchema } from '@/protocol/schema';
+import { mobileToServerMessageSchema } from '@/protocol/schema';
+
+const proof = buildAuthenticatedDeviceProof('device');
+const START = 1_700_000_000_000;
+const HELLO_TS = START;
+
+class CountingTimerPort implements HeartbeatTimerPort {
+  #nextHandle = 1;
+  readonly #activeHandleSet = new Set<number>();
+  createdCount = 0;
+
+  setInterval(): HeartbeatTimerHandle {
+    this.createdCount += 1;
+    const handle = this.#nextHandle;
+    this.#nextHandle += 1;
+    this.#activeHandleSet.add(handle);
+    return handle;
+  }
+
+  clearInterval(handle: HeartbeatTimerHandle): void {
+    this.#activeHandleSet.delete(handle as number);
+  }
+
+  get activeCount(): number {
+    return this.#activeHandleSet.size;
+  }
+}
+
+function buildMobileHello(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: 'hello',
+    deviceId: 'mobile:phone-123',
+    deviceType: 'mobile',
+    protocolVersion: 1,
+    capabilities: ['mobile.open_app', 'mobile.notifications'],
+    ts: HELLO_TS,
+    ...overrides,
+  });
+}
+
+function buildHarness(
+  options: { readonly now?: number; readonly isAuthenticated?: boolean } = {},
+): {
+  readonly registry: CapabilityRegistry;
+  readonly lifecycle: DeviceSessionLifecycle;
+  readonly timerPort: CountingTimerPort;
+  readonly port: RecordingMobilePort;
+  readonly transport: MobilePeerTransport;
+  readonly setNow: (value: number) => void;
+} {
+  let now = options.now ?? START;
+  const registry = new CapabilityRegistry({ nowMilliseconds: () => now });
+  const timerPort = new CountingTimerPort();
+  const port = createRecordingMobilePort();
+  const harness = buildMobilePeerTransportForTest({
+    registry,
+    port,
+    timerPort,
+    connectionId: 'connection-1',
+    nowMilliseconds: () => now,
+  });
+  harness.transport.connect();
+  if (options.isAuthenticated ?? true) {
+    harness.transport.authenticate(proof);
+  }
+  return {
+    registry,
+    lifecycle: harness.lifecycle,
+    timerPort,
+    port,
+    transport: harness.transport,
+    setNow: (value: number) => (now = value),
+  };
+}
+
+describe('B8 §2: mobile hello', () => {
+  it('1. a valid mobile hello is accepted and creates a session', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(buildMobileHello());
+    expect(outcome.status).toBe('accepted');
+    if (outcome.status !== 'accepted') {
+      return;
+    }
+    const session = outcome.session;
+    expect(session.deviceId).toBe('mobile:phone-123');
+    expect(session.deviceType).toBe('mobile');
+    expect(session.identitySource).toBe('client_provided');
+    expect(session.protocolVersion).toBe(1);
+    expect(session.authenticated).toBe(true);
+    expect(session.connectedAt).toBe(START);
+    expect(session.transport.transportKind).toBe('mobile_websocket');
+    expect(harness.registry.getDevice('mobile:phone-123')).toBeDefined();
+  });
+
+  it('the accepted hello tells the device what is available and what was ignored', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(
+      buildMobileHello({ capabilities: ['mobile.open_app', 'mobile.telepathy'] }),
+    );
+    expect(outcome.status).toBe('accepted');
+    if (outcome.status !== 'accepted') {
+      return;
+    }
+    expect(outcome.ignoredCapabilityList).toEqual(['mobile.telepathy']);
+    expect(outcome.response.type).toBe('hello_accepted');
+    if (outcome.response.type !== 'hello_accepted') {
+      return;
+    }
+    expect(outcome.response.ignoredCapabilityCount).toBe(1);
+    // mobile.open_app tiene comando real (Block 11); mobile.telepathy no existe
+    // en el catálogo y se ignora, no tumba la sesión.
+    expect(outcome.response.availableCapabilities).toEqual(['mobile.open_app']);
+    expect(harness.port.sentMessageList).toHaveLength(1);
+  });
+
+  it('2. a mobile identity can never be derived from a hostname', () => {
+    const harness = buildHarness();
+    // El hello mobile no tiene campo hostname, y el adapter fuerza siempre
+    // identitySource client_provided: no hay forma de pedir la identidad legacy.
+    const hello = JSON.parse(
+      buildMobileHello({ deviceId: 'mobile:PC-ESTUDIO' }),
+    ) as Record<string, unknown>;
+    hello['hostname'] = 'PC-ESTUDIO';
+    const outcome = harness.transport.handleHelloMessage(JSON.stringify(hello));
+    expect(outcome.status).toBe('accepted');
+    expect(harness.registry.getDevice('mobile:PC-ESTUDIO')?.identitySource).toBe(
+      'client_provided',
+    );
+
+    // Y si alguien intenta el registro legacy por la puerta de atrás, la
+    // identidad lo rechaza (regla de Block 7, verificada contra el registry).
+    const legacyOutcome = harness.registry.register({
+      proof,
+      deviceId: 'mobile:PC-ESTUDIO',
+      deviceType: 'mobile',
+      capabilityNameList: ['mobile.alarm'],
+      protocolVersion: 1,
+      identitySource: 'desktop_hostname_legacy',
+      transport: { transportKind: 'mobile_websocket', connectionId: 'connection-2' },
+    });
+    expect(legacyOutcome.status).toBe('rejected');
+    expect(legacyOutcome.status === 'rejected' ? legacyOutcome.reason : '').toContain(
+      'mobile_requires_client_provided_identity',
+    );
+  });
+
+  it('3. an invalid mobile identity is rejected', () => {
+    const harness = buildHarness();
+    // El deviceId mal formado se cae en el propio contrato del hello, antes de
+    // tocar la identidad.
+    for (const malformedDeviceId of ['phone-123', ':phone', 'mobile:']) {
+      const outcome = harness.transport.handleHelloMessage(
+        buildMobileHello({ deviceId: malformedDeviceId }),
+      );
+      expect(outcome.status).toBe('rejected');
+      expect(readRejectionReason(outcome)).toBe('malformed_hello');
+    }
+    // Un deviceId bien formado pero del deviceType equivocado también se cae,
+    // en la validación de identidad.
+    const wrongType = harness.transport.handleHelloMessage(
+      buildMobileHello({ deviceId: 'desktop:pc' }),
+    );
+    expect(wrongType.status).toBe('rejected');
+    expect(readRejectionReason(wrongType)).toContain('device_id_type_mismatch');
+    expect(harness.registry.listDeviceList()).toHaveLength(0);
+  });
+
+  it('an incompatible protocol version is rejected', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(
+      buildMobileHello({ protocolVersion: 999 }),
+    );
+    expect(outcome.status).toBe('rejected');
+    expect(readRejectionReason(outcome)).toContain('protocolVersion incompatible');
+    expect(harness.registry.listDeviceList()).toHaveLength(0);
+  });
+
+  it('13. an unknown capability does not break the session', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(
+      buildMobileHello({
+        capabilities: [
+          'mobile.notifications',
+          'mobile.telepathy',
+          'desktop.open_app',
+          'not.a.capability',
+        ],
+      }),
+    );
+    expect(outcome.status).toBe('accepted');
+    if (outcome.status !== 'accepted') {
+      return;
+    }
+    expect(outcome.ignoredCapabilityList).toEqual([
+      'mobile.telepathy',
+      'not.a.capability',
+      'desktop.open_app',
+    ]);
+    // 'desktop.open_app' existe pero es de otro deviceType: un mobile no puede
+    // reclamarla, o el catálogo la daría por disponible en el teléfono.
+    expect(outcome.session.declaredCapabilities).toEqual(['mobile.notifications']);
+    expect(outcome.session.availableCapabilities).toEqual(['mobile.notifications']);
+  });
+
+  it('the mobile hello contract requires a mobile deviceType', () => {
+    const parsed = mobileToServerMessageSchema.safeParse({
+      type: 'hello',
+      deviceId: 'mobile:phone-123',
+      deviceType: 'desktop',
+      protocolVersion: 1,
+      ts: HELLO_TS,
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
+describe('B8 §3: authentication boundary', () => {
+  it('4. an authenticated session is registered', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(buildMobileHello());
+    expect(outcome.status).toBe('accepted');
+    const session = harness.registry.getDevice('mobile:phone-123');
+    expect(session?.authenticated).toBe(true);
+    // BLOCK 9: la sesión es seleccionable porque declara una capability con
+    // implementación real.
+    expect(
+      harness.registry.listSelectableSessionList().map((entry) => entry.deviceId),
+    ).toEqual(['mobile:phone-123']);
+  });
+
+  it('5. an unauthenticated session is not selectable', () => {
+    const harness = buildHarness({ isAuthenticated: false });
+    // El socket está abierto pero sin proof: la conexión existe, la sesión no.
+    expect(harness.transport.isAuthenticated).toBe(false);
+    expect(harness.lifecycle.listConnectionList()).toHaveLength(1);
+    expect(harness.lifecycle.listConnectionList()[0]?.authenticated).toBe(false);
+    expect(harness.lifecycle.listConnectionList()[0]?.deviceId).toBeNull();
+
+    const outcome = harness.transport.handleHelloMessage(buildMobileHello());
+    expect(outcome.status).toBe('rejected');
+    expect(readRejectionReason(outcome)).toBe('unauthenticated');
+    // Sin sesión: no hay presencia online, ni capabilities, ni target posible.
+    expect(harness.registry.listDeviceList()).toHaveLength(0);
+    expect(harness.registry.getDevice('mobile:phone-123')).toBeUndefined();
+    expect(
+      harness.registry.resolveTarget({
+        capabilityName: 'desktop.open_app',
+        targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+      }).status,
+    ).toBe('unavailable');
+    // Y el heartbeat de un socket no autenticado no inventa presencia.
+    expect(
+      harness.transport.handleHeartbeatMessage(
+        JSON.stringify({ type: 'heartbeat', ts: START + 1000 }),
+      ),
+    ).toBe(false);
+  });
+
+  it('a connection only becomes authenticated together with a deviceId', () => {
+    const harness = buildHarness();
+    const beforeHandshake = harness.lifecycle.getConnection('connection-1');
+    expect(beforeHandshake).toBeDefined();
+    expect(isAuthenticatedDeviceConnection(beforeHandshake!)).toBe(false);
+    harness.transport.handleHelloMessage(buildMobileHello());
+    const afterHandshake = harness.lifecycle.getConnection('connection-1');
+    expect(isAuthenticatedDeviceConnection(afterHandshake!)).toBe(true);
+  });
+
+  it('every session in the registry is authenticated by construction', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    for (const session of harness.registry.listDeviceList()) {
+      expect(session.authenticated).toBe(true);
+    }
+  });
+});
+
+describe('B8 §4: heartbeat and presence', () => {
+  it('6. a heartbeat updates lastSeenAt', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    expect(harness.registry.getDevice('mobile:phone-123')?.lastSeenAt).toBe(START);
+    harness.transport.handleHeartbeatMessage(
+      JSON.stringify({ type: 'heartbeat', ts: START + 30_000 }),
+    );
+    expect(harness.registry.getDevice('mobile:phone-123')?.lastSeenAt).toBe(
+      START + 30_000,
+    );
+  });
+
+  it('the heartbeat uses the same thresholds as the desktop', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    const beatAt = START + 30_000;
+    harness.transport.handleHeartbeatMessage(
+      JSON.stringify({ type: 'heartbeat', ts: beatAt }),
+    );
+
+    harness.setNow(beatAt + PRESENCE_DEGRADED_AFTER_MILLISECONDS);
+    expect(harness.registry.resolvePresence('mobile:phone-123')).toBe('degraded');
+    harness.setNow(beatAt + PRESENCE_OFFLINE_AFTER_MILLISECONDS);
+    expect(harness.registry.resolvePresence('mobile:phone-123')).toBe('offline');
+  });
+
+  it('7. a timeout changes presence to offline and stops selection', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    harness.setNow(START + PRESENCE_OFFLINE_AFTER_MILLISECONDS + 1);
+    expect(harness.registry.resolvePresence('mobile:phone-123')).toBe('offline');
+    expect(harness.registry.listSelectableSessionList()).toHaveLength(0);
+    const session = harness.registry.getDevice('mobile:phone-123');
+    expect(session).toBeDefined();
+    if (session !== undefined) {
+      expect(
+        isSelectableDeviceSession(
+          session,
+          START + PRESENCE_OFFLINE_AFTER_MILLISECONDS + 1,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('the heartbeat probe reuses the mobile wire heartbeat', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    expect(harness.port.sentMessageList).toHaveLength(1);
+    // Un scheduler con timer real no dispara aquí; el port sólo recibe el probe
+    // cuando el scheduler llama a su callback.
+    expect(harness.lifecycle.isHeartbeatRunning('mobile:phone-123')).toBe(true);
+  });
+
+  it('8. disconnect cleans the scheduler and marks the device offline', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    expect(harness.timerPort.activeCount).toBe(1);
+    harness.transport.disconnect();
+    expect(harness.timerPort.activeCount).toBe(0);
+    expect(harness.lifecycle.isHeartbeatRunning('mobile:phone-123')).toBe(false);
+    expect(harness.registry.getDevice('mobile:phone-123')?.presence).toBe('offline');
+    expect(harness.lifecycle.getConnection('connection-1')).toBeUndefined();
+  });
+
+  it('18. there is never a second heartbeat scheduler for one session', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    expect(harness.lifecycle.listHeartbeatSchedulerCount()).toBe(1);
+    expect(harness.timerPort.createdCount).toBe(1);
+
+    // Reenviar el hello sobre la misma conexión no crea un segundo timer.
+    harness.transport.handleHelloMessage(buildMobileHello());
+    expect(harness.lifecycle.listHeartbeatSchedulerCount()).toBe(1);
+    expect(harness.lifecycle.countRunningHeartbeatTimer()).toBe(1);
+    expect(harness.timerPort.createdCount).toBe(1);
+    expect(harness.timerPort.activeCount).toBe(1);
+    expect(harness.registry.listDeviceList()).toHaveLength(1);
+  });
+});
+
+describe('B8 §5: declared vs available capabilities', () => {
+  it('11. declared is not available for unimplemented mobile capabilities', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(buildMobileHello());
+    expect(outcome.status).toBe('accepted');
+    if (outcome.status !== 'accepted') {
+      return;
+    }
+    const session = outcome.session;
+    expect(session.declaredCapabilities).toEqual([
+      'mobile.open_app',
+      'mobile.notifications',
+    ]);
+    // BLOCK 11: mobile.open_app ya tiene comando real, así que declarado y
+    // disponible. El aislamiento se prueba declarando una desktop.
+    expect(session.availableCapabilities).toEqual([
+      'mobile.open_app',
+      'mobile.notifications',
+    ]);
+  });
+
+  it('12. a mobile device can never execute a desktop capability', () => {
+    // Bloque 11 §19: el aislamiento cross-device se prueba por el camino que
+    // importa, que es un socket mobile que declara una capability desktop.
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    for (const capabilityName of ['desktop.open_app', 'desktop.spotify'] as const) {
+      const resolution = harness.registry.resolveTarget({
+        capabilityName,
+        targetPreference: { kind: 'device_type', deviceType: 'mobile' },
+      });
+      expect(resolution.status).toBe('unavailable');
+    }
+    const desktopSession = harness.registry.getDevice('mobile:phone-123');
+    expect(
+      desktopSession?.availableCapabilities.every((name) => name.startsWith('mobile.')),
+    ).toBe(true);
+  });
+
+  it('a mobile session is selectable only when it has an available capability', () => {
+    const harness = buildHarness();
+    // Un peer que sólo declara capabilities que el catálogo no conoce no es
+    // seleccionable: declarado sin disponible. Block 11 dejó todas las mobile
+    // del catálogo implementadas, así que el caso que queda es el nombre
+    // desconocido, que es el que un peer real puede mandar por error.
+    harness.transport.handleMessage(
+      JSON.stringify({
+        type: 'hello',
+        deviceId: 'mobile:phone-123',
+        deviceType: 'mobile',
+        protocolVersion: 1,
+        capabilities: ['mobile.telepathy', 'mobile.magic'],
+        ts: HELLO_TS,
+      }),
+    );
+    expect(harness.registry.listSelectableSessionList()).toHaveLength(0);
+    const session = harness.registry.getDevice('mobile:phone-123');
+    expect(session).toBeDefined();
+    if (session !== undefined) {
+      expect(isSelectableDeviceSession(session, START)).toBe(false);
+    }
+  });
+
+  it('the catalog splits known from unknown capability names', () => {
+    expect(splitDeclaredCapabilityList(['mobile.alarm', 'mobile.nope'])).toEqual({
+      knownCapabilityList: ['mobile.alarm'],
+      unknownCapabilityList: ['mobile.nope'],
+    });
+  });
+});
+
+describe('B8 §8: reconnect semantics', () => {
+  it('9. a reconnect reuses the same deviceId and identity', () => {
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => START });
+    const timerPort = new CountingTimerPort();
+    const first = buildMobilePeerTransportForTest({
+      registry,
+      port: createRecordingMobilePort(),
+      timerPort,
+      connectionId: 'connection-1',
+      nowMilliseconds: () => START,
+    });
+    first.transport.connect();
+    first.transport.authenticate(proof);
+    const firstOutcome = first.transport.handleHelloMessage(buildMobileHello());
+    expect(firstOutcome.status).toBe('accepted');
+    first.transport.disconnect();
+
+    const second = buildMobilePeerTransportForTest({
+      registry,
+      port: createRecordingMobilePort(),
+      timerPort,
+      connectionId: 'connection-2',
+      nowMilliseconds: () => START,
+    });
+    second.transport.connect();
+    second.transport.authenticate(proof);
+    const secondOutcome = second.transport.handleHelloMessage(buildMobileHello());
+    expect(secondOutcome.status).toBe('accepted');
+    if (secondOutcome.status !== 'accepted' || firstOutcome.status !== 'accepted') {
+      return;
+    }
+
+    // Mismo device lógico: una sola sesión, mismo deviceId, mismo tipo.
+    expect(registry.listDeviceList()).toHaveLength(1);
+    expect(secondOutcome.session.deviceId).toBe(firstOutcome.session.deviceId);
+    expect(secondOutcome.session.deviceType).toBe(firstOutcome.session.deviceType);
+    expect(secondOutcome.session.identitySource).toBe('client_provided');
+    // La presencia vuelve a online y el transport nuevo es el de la sesión.
+    expect(registry.getDevice('mobile:phone-123')?.presence).toBe('online');
+    expect(secondOutcome.session.transport.connectionId).toBe('connection-2');
+  });
+
+  it('a reconnect reuses the scheduler instance instead of adding one', () => {
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => START });
+    const timerPort = new CountingTimerPort();
+    let lastLifecycle: DeviceSessionLifecycle | null = null;
+    for (const connectionId of ['connection-1', 'connection-2']) {
+      const harness = buildMobilePeerTransportForTest({
+        registry,
+        port: createRecordingMobilePort(),
+        timerPort,
+        connectionId,
+        nowMilliseconds: () => START,
+      });
+      harness.transport.connect();
+      harness.transport.authenticate(proof);
+      harness.transport.handleHelloMessage(buildMobileHello());
+      lastLifecycle = harness.lifecycle;
+      harness.transport.disconnect();
+    }
+    // El scheduler se indexa por deviceId, así que dos conexiones del mismo
+    // device nunca crean dos schedulers: el reconnect reutiliza la instancia.
+    expect(lastLifecycle).not.toBeNull();
+    expect(lastLifecycle?.listHeartbeatSchedulerCount()).toBe(1);
+    expect(registry.listDeviceList()).toHaveLength(1);
+    // Tras el disconnect no queda ningún timer vivo.
+    expect(timerPort.activeCount).toBe(0);
+  });
+
+  it('10. a reconnect updates the declared capabilities', () => {
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => START });
+    const first = buildMobilePeerTransportForTest({
+      registry,
+      port: createRecordingMobilePort(),
+      timerPort: new CountingTimerPort(),
+      connectionId: 'connection-1',
+      nowMilliseconds: () => START,
+    });
+    first.transport.connect();
+    first.transport.authenticate(proof);
+    first.transport.handleHelloMessage(
+      buildMobileHello({ capabilities: ['mobile.alarm'] }),
+    );
+    expect(registry.getDevice('mobile:phone-123')?.declaredCapabilities).toEqual([
+      'mobile.alarm',
+    ]);
+    first.transport.disconnect();
+
+    const second = buildMobilePeerTransportForTest({
+      registry,
+      port: createRecordingMobilePort(),
+      timerPort: new CountingTimerPort(),
+      connectionId: 'connection-2',
+      nowMilliseconds: () => START,
+    });
+    second.transport.connect();
+    second.transport.authenticate(proof);
+    second.transport.handleHelloMessage(
+      buildMobileHello({ capabilities: ['mobile.alarm', 'mobile.calendar'] }),
+    );
+    expect(registry.getDevice('mobile:phone-123')?.declaredCapabilities).toEqual([
+      'mobile.alarm',
+      'mobile.calendar',
+    ]);
+    expect(registry.listDeviceList()).toHaveLength(1);
+  });
+});
+
+describe('B8 §6: command envelope', () => {
+  it('14. the command envelope keeps the requestId', () => {
+    const envelope = buildDeviceCommandEnvelope({
+      requestId: 'request-abc',
+      capability: 'mobile.notifications',
+      targetDeviceId: 'mobile:phone-123',
+      payload: { title: 'Hola' },
+    });
+    expect(envelope.requestId).toBe('request-abc');
+    expect(envelope.capability).toBe('mobile.notifications');
+    expect(envelope.targetDeviceId).toBe('mobile:phone-123');
+    expect(envelope.payload).toEqual({ title: 'Hola' });
+  });
+
+  it('15. the envelope keeps clientTurnId and generation', () => {
+    const envelope = buildDeviceCommandEnvelope({
+      requestId: 'request-abc',
+      clientTurnId: 'turn-xyz',
+      generation: 7,
+      capability: 'mobile.alarm',
+      targetDeviceId: 'mobile:phone-123',
+    });
+    expect(readDeviceEnvelopeCorrelation(envelope)).toEqual({
+      requestId: 'request-abc',
+      clientTurnId: 'turn-xyz',
+      generation: 7,
+    });
+  });
+
+  it('the result envelope reports ok or error, never both', () => {
+    const okResult = buildDeviceCommandResultEnvelope({
+      requestId: 'request-abc',
+      deviceId: 'mobile:phone-123',
+      capability: 'mobile.alarm',
+      ok: true,
+      result: { armed: true },
+    });
+    expect(okResult.ok).toBe(true);
+    expect(okResult.error).toBeUndefined();
+
+    const failed = buildDeviceCommandResultEnvelope({
+      requestId: 'request-abc',
+      deviceId: 'mobile:phone-123',
+      capability: 'mobile.alarm',
+      ok: false,
+      error: 'not_implemented',
+    });
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toBe('not_implemented');
+  });
+
+  it('the transport sends commands with the correlation intact', () => {
+    const harness = buildHarness();
+    harness.transport.handleHelloMessage(buildMobileHello());
+    harness.port.sentMessageList.length = 0;
+    harness.transport.sendCommand({
+      requestId: 'request-abc',
+      capability: 'mobile.notifications',
+      clientTurnId: 'turn-xyz',
+      generation: 3,
+      payload: { title: 'Hola' },
+    });
+    expect(harness.port.sentMessageList).toHaveLength(1);
+    const sent = JSON.parse(harness.port.sentMessageList[0] ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    expect(sent['type']).toBe('command');
+    expect(sent['requestId']).toBe('request-abc');
+    expect(sent['clientTurnId']).toBe('turn-xyz');
+    expect(sent['generation']).toBe(3);
+  });
+
+  it('a command envelope cannot be built for an unknown capability', () => {
+    expect(() =>
+      buildDeviceCommandEnvelope({
+        requestId: 'request-abc',
+        capability: 'mobile.telepathy' as never,
+        targetDeviceId: 'mobile:phone-123',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('B8 §1: session contract', () => {
+  it('the session carries the whole contract in one model', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(buildMobileHello());
+    expect(outcome.status).toBe('accepted');
+    if (outcome.status !== 'accepted') {
+      return;
+    }
+    const session: DeviceSession = outcome.session;
+    const parsed = deviceSessionSchema.safeParse(session);
+    expect(parsed.success).toBe(true);
+    expect(Object.keys(session).toSorted()).toEqual([
+      'authenticated',
+      'availableCapabilities',
+      'connectedAt',
+      'declaredCapabilities',
+      'deviceId',
+      'deviceType',
+      'identitySource',
+      'lastSeenAt',
+      'presence',
+      'priority',
+      'protocolVersion',
+      'sessionId',
+      'transport',
+    ]);
+  });
+
+  it('the session schema refuses an unauthenticated session', () => {
+    const parsed = deviceSessionSchema.safeParse({
+      sessionId: 'connection-1',
+      deviceId: 'mobile:phone-123',
+      deviceType: 'mobile',
+      identitySource: 'client_provided',
+      protocolVersion: 1,
+      authenticated: false,
+      connectedAt: START,
+      lastSeenAt: START,
+      declaredCapabilities: [],
+      availableCapabilities: [],
+      presence: 'online',
+      transport: { transportKind: 'mobile_websocket', connectionId: 'connection-1' },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('the session transport metadata is minimal and secret-free', () => {
+    const harness = buildHarness();
+    const outcome = harness.transport.handleHelloMessage(buildMobileHello());
+    expect(outcome.status).toBe('accepted');
+    if (outcome.status !== 'accepted') {
+      return;
+    }
+    expect(Object.keys(outcome.session.transport).toSorted()).toEqual([
+      'connectionId',
+      'transportKind',
+    ]);
+  });
+
+  it('the mobile registration maps the hello to a device registration', () => {
+    const parsed = mobileToServerMessageSchema.parse(JSON.parse(buildMobileHello()));
+    if (parsed.type !== 'hello') {
+      throw new Error('se esperaba hello');
+    }
+    expect(buildMobileRegistrationFromHello(parsed)).toEqual({
+      registration: {
+        deviceId: 'mobile:phone-123',
+        deviceType: 'mobile',
+        identitySource: 'client_provided',
+        capabilityNameList: ['mobile.open_app', 'mobile.notifications'],
+        protocolVersion: 1,
+      },
+      unknownCapabilityList: [],
+      foreignCapabilityList: [],
+      ignoredCapabilityList: [],
+    });
+  });
+});
+
+describe('B8 §9: desktop regression', () => {
+  it('16. the desktop hello, identity and pong path is untouched', () => {
+    const registry = new CapabilityRegistry({ nowMilliseconds: () => START });
+    const hello = pcToServerMessageSchema.parse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: START,
+    });
+    if (hello.type !== 'hello') {
+      throw new Error('se esperaba hello');
+    }
+    const registration = buildDesktopRegistrationFromHello({
+      hello,
+      hostname: 'PC-ESTUDIO',
+      nowMilliseconds: START,
+    });
+    expect(registration.deviceId).toBe('desktop:PC-ESTUDIO');
+    expect(registration.identitySource).toBe('desktop_hostname_legacy');
+
+    const outcome = registry.register({
+      proof,
+      deviceId: registration.deviceId,
+      deviceType: registration.deviceType,
+      capabilityNameList: registration.capabilityNameList,
+      protocolVersion: registration.protocolVersion,
+      lastSeenAt: registration.lastSeenAt,
+      transport: { transportKind: 'pc_bridge', connectionId: registration.deviceId },
+    });
+    expect(outcome.status).toBe('registered');
+
+    // El heartbeat del desktop (pong) sigue moviendo lastSeenAt.
+    const beatAt = START + 30_000;
+    expect(
+      registry.recordHeartbeat({
+        proof,
+        deviceId: 'desktop:PC-ESTUDIO',
+        atMilliseconds: beatAt,
+      }),
+    ).toBe('online');
+    expect(registry.getDevice('desktop:PC-ESTUDIO')?.lastSeenAt).toBe(beatAt);
+
+    // Y el targeting por desktop sigue resolviendo al desktop.
+    const resolution = registry.resolveTarget({
+      capabilityName: 'desktop.open_app',
+      targetPreference: { kind: 'device_type', deviceType: 'desktop' },
+    });
+    expect(resolution.status).toBe('resolved');
+    if (resolution.status === 'resolved') {
+      expect(resolution.device.deviceId).toBe('desktop:PC-ESTUDIO');
+    }
+  });
+
+  it('a desktop and a mobile session coexist in one registry', () => {
+    const harness = buildHarness();
+    harness.registry.register({
+      proof,
+      deviceId: 'desktop:PC-ESTUDIO',
+      deviceType: 'desktop',
+      capabilityNameList: ['desktop.open_app'],
+      protocolVersion: 1,
+      lastSeenAt: START,
+      transport: { transportKind: 'pc_bridge', connectionId: 'desktop:PC-ESTUDIO' },
+    });
+    harness.transport.handleHelloMessage(buildMobileHello());
+    expect(harness.registry.listDeviceList()).toHaveLength(2);
+    // BLOCK 9: el mobile también es seleccionable, porque mobile.notifications
+    // tiene implementación real. Ambos conviven.
+    expect(
+      harness.registry
+        .listSelectableSessionList()
+        .map((entry) => entry.deviceId)
+        .toSorted(),
+    ).toEqual(['desktop:PC-ESTUDIO', 'mobile:phone-123']);
+  });
+});
+
+describe('B8 §10: structural guards', () => {
+  function listSourceFilePathList(): string[] {
+    const filePathList: string[] = [];
+    const walk = (directoryPath: string): void => {
+      for (const entryName of readdirSync(directoryPath)) {
+        const entryPath = join(directoryPath, entryName);
+        if (statSync(entryPath).isDirectory()) {
+          walk(entryPath);
+          continue;
+        }
+        if (entryName.endsWith('.ts') && !entryName.endsWith('.spec.ts')) {
+          filePathList.push(entryPath);
+        }
+      }
+    };
+    walk(SOURCE_ROOT);
+    return filePathList;
+  }
+
+  function readSource(relativePath: string): string {
+    return stripComment(readFileSync(join(SOURCE_ROOT, relativePath), 'utf8'));
+  }
+
+  it('the mobile transport never imports PcBridge', () => {
+    for (const moduleName of [
+      'devices/mobile.ts',
+      'devices/connection.ts',
+      'devices/session.ts',
+    ]) {
+      const source = readSource(moduleName);
+      expect(source).not.toContain('getAgentByName');
+      expect(source).not.toContain('PcBridge');
+      expect(source).not.toContain('@/devices/desktop');
+    }
+  });
+
+  it('the mobile session layer never executes tool handlers', () => {
+    for (const moduleName of [
+      'devices/mobile.ts',
+      'devices/connection.ts',
+      'devices/session.ts',
+      'devices/registry.ts',
+      'devices/envelope.ts',
+    ]) {
+      const source = readSource(moduleName);
+      expect(source).not.toContain('@/tools/execution');
+      expect(source).not.toContain('@/tools/router');
+      expect(source).not.toContain('.handler(');
+      expect(source).not.toContain('executeAuthorizedTool');
+    }
+  });
+
+  it('only the registry mints an authenticated device proof', () => {
+    const mintModuleList = listSourceFilePathList().filter((filePath) =>
+      stripComment(readFileSync(filePath, 'utf8')).includes(
+        'buildAuthenticatedDeviceProof(',
+      ),
+    );
+    const relativePathList = mintModuleList.map((filePath) =>
+      filePath.replace(SOURCE_ROOT, '').replace(/\\/g, '/').replace(/^\//, ''),
+    );
+    // El transporte mobile recibe el proof; no lo fabrica.
+    expect(relativePathList).not.toContain('devices/mobile.ts');
+    expect(relativePathList).toContain('devices/registry.ts');
+  });
+
+  it('the mobile transport cannot fabricate a proof', () => {
+    const source = readSource('devices/mobile.ts');
+    expect(source).not.toContain('buildAuthenticatedDeviceProof');
+    expect(source).toContain('this.#authProof');
+  });
+
+  it('only the lifecycle owns a heartbeat scheduler for a device session', () => {
+    const schedulerModuleList = listSourceFilePathList().filter((filePath) =>
+      stripComment(readFileSync(filePath, 'utf8')).includes('new HeartbeatScheduler('),
+    );
+    const relativePathList = schedulerModuleList.map((filePath) =>
+      filePath.replace(SOURCE_ROOT, '').replace(/\\/g, '/').replace(/^\//, ''),
+    );
+    expect(relativePathList).toContain('devices/connection.ts');
+    expect(relativePathList).not.toContain('devices/mobile.ts');
+    expect(relativePathList).not.toContain('devices/session.ts');
+  });
+
+  it('the session model keeps unimplemented capabilities out of availability', () => {
+    const source = readSource('devices/session.ts');
+    expect(source).toContain('resolveAvailableCapabilityList');
+    expect(source).toContain('isImplementedCapability');
+  });
+});

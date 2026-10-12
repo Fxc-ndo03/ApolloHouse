@@ -1,0 +1,642 @@
+# BLOQUE: bloque4f-tests-capability
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\capability.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+
+import {
+  CAPABILITY_NAME_LIST,
+  describeCapability,
+  isImplementedCapability,
+  listCapabilityContractList,
+  listImplementedCapabilityNameList,
+  MOBILE_COMMAND_NAME_LIST,
+  PC_BRIDGE_COMMAND_NAME_LIST,
+  type CapabilityName,
+} from '@/devices/capability';
+import {
+  buildDesktopRegistrationFromHello,
+  buildDesktopDeviceIdFromHostname,
+  resolveDesktopCapabilityNameList,
+} from '@/devices/desktop';
+import { LEGACY_PROTOCOL_VERSION } from '@/devices/schema';
+import { GENERIC_SPOTIFY_INTENT, resolveCapabilityIntent } from '@/devices/intent';
+import { ANY_TARGET_PREFERENCE, desktopTargetPreference } from '@/devices/schema';
+import { pcToServerMessageSchema } from '@/protocol/schema';
+import { routeDeterministic } from '@/voice/router';
+
+const FIXED_NOW = new Date('2026-10-04T12:00:00-03:00');
+
+describe('capability catalog', () => {
+  it('has no duplicate capability names', () => {
+    expect(new Set(CAPABILITY_NAME_LIST).size).toBe(CAPABILITY_NAME_LIST.length);
+  });
+
+  it('maps every implemented capability to a real device command', () => {
+    const knownCommandSet = new Set<string>([
+      ...PC_BRIDGE_COMMAND_NAME_LIST,
+      ...MOBILE_COMMAND_NAME_LIST,
+    ]);
+    for (const contract of listCapabilityContractList()) {
+      if (contract.status !== 'implemented') {
+        expect(contract.commandList).toEqual([]);
+        continue;
+      }
+      expect(contract.commandList.length).toBeGreaterThan(0);
+      for (const commandName of contract.commandList) {
+        expect(knownCommandSet.has(commandName)).toBe(true);
+      }
+    }
+  });
+
+  it('marks contract-only capabilities as unimplemented', () => {
+    // Declaradas para que el modelo sea exhaustivo, sin comando que las satisfaga.
+    for (const capabilityName of [
+      'desktop.volume',
+      'desktop.brightness',
+      'desktop.notifications',
+      'desktop.files',
+      'desktop.system_status',
+    ] as const) {
+      expect(describeCapability(capabilityName).status).toBe('unimplemented');
+      expect(isImplementedCapability(capabilityName)).toBe(false);
+    }
+  });
+
+  it('BLOCK 11: every mobile capability has a real command, no contract-only', () => {
+    const mobileContractList = listCapabilityContractList().filter((contract) =>
+      contract.name.startsWith('mobile.'),
+    );
+    expect(mobileContractList).toHaveLength(6);
+    for (const contract of mobileContractList) {
+      expect(contract.status).toBe('implemented');
+      expect(contract.deviceType).toBe('mobile');
+      expect(contract.commandList.length).toBeGreaterThan(0);
+      for (const commandName of contract.commandList) {
+        expect(MOBILE_COMMAND_NAME_LIST).toContain(
+          commandName as (typeof MOBILE_COMMAND_NAME_LIST)[number],
+        );
+      }
+    }
+  });
+
+  it('BLOCK 11: no mobile capability is satisfied by a PcBridge command', () => {
+    for (const contract of listCapabilityContractList()) {
+      if (contract.deviceType !== 'mobile') {
+        continue;
+      }
+      for (const commandName of contract.commandList) {
+        expect(PC_BRIDGE_COMMAND_NAME_LIST).not.toContain(
+          commandName as (typeof PC_BRIDGE_COMMAND_NAME_LIST)[number],
+        );
+      }
+    }
+  });
+
+  it('BLOCK 11: the implemented mobile set is exactly the six mobile names', () => {
+    const implementedMobileList = listImplementedCapabilityNameList().filter(
+      (capabilityName) => capabilityName.startsWith('mobile.'),
+    );
+    expect(implementedMobileList).toEqual([
+      'mobile.open_app',
+      'mobile.notifications',
+      'mobile.alarm',
+      'mobile.calendar',
+      'mobile.media',
+      'mobile.volume',
+    ]);
+  });
+
+  it('BLOCK 11: every mobile command maps to exactly one capability', () => {
+    const ownerMap = new Map<string, string>();
+    for (const contract of listCapabilityContractList()) {
+      if (contract.deviceType !== 'mobile') {
+        continue;
+      }
+      for (const commandName of contract.commandList) {
+        expect(ownerMap.has(commandName)).toBe(false);
+        ownerMap.set(commandName, contract.name);
+      }
+    }
+    // Todo comando mobile declarado tiene dueÃ±o, y no sobra ninguno.
+    expect([...ownerMap.keys()].toSorted()).toEqual(
+      [...MOBILE_COMMAND_NAME_LIST].toSorted(),
+    );
+  });
+
+  it('only claims the desktop capabilities that a real command satisfies', () => {
+    // Siete: las seis de Block 5 mÃ¡s brave_search, que abre una URL con el
+    // mismo comando apps_open (BLOCK 6.2).
+    const implementedList = listImplementedCapabilityNameList();
+    expect(implementedList).toEqual([
+      'desktop.open_app',
+      'desktop.focus_app',
+      'desktop.close_app',
+      'desktop.list_apps',
+      'desktop.lock',
+      'desktop.spotify',
+      'desktop.brave_search',
+      // BLOCK 11: las seis mobile, todas con comando real.
+      'mobile.open_app',
+      'mobile.notifications',
+      'mobile.alarm',
+      'mobile.calendar',
+      'mobile.media',
+      'mobile.volume',
+    ]);
+  });
+
+  it('throws for a capability outside the catalog', () => {
+    expect(() => describeCapability('desktop.teleport' as CapabilityName)).toThrow(
+      /fuera de cat/,
+    );
+  });
+});
+
+describe('protocol handshake', () => {
+  it('accepts the legacy hello without identity fields', () => {
+    const parsed = pcToServerMessageSchema.parse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: 1_700_000_000_000,
+    });
+    expect(parsed.type).toBe('hello');
+    if (parsed.type !== 'hello') {
+      throw new Error('expected hello');
+    }
+    expect(parsed.protocolVersion).toBeUndefined();
+    expect(parsed.capabilities).toBeUndefined();
+  });
+
+  it('accepts a hello that declares protocolVersion and capabilities', () => {
+    const parsed = pcToServerMessageSchema.parse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: 1_700_000_000_000,
+      protocolVersion: 1,
+      capabilities: ['desktop.open_app', 'desktop.spotify'],
+    });
+    if (parsed.type !== 'hello') {
+      throw new Error('expected hello');
+    }
+    expect(parsed.protocolVersion).toBe(1);
+    expect(parsed.capabilities).toEqual(['desktop.open_app', 'desktop.spotify']);
+  });
+
+  it('rejects a hello with an unknown capability', () => {
+    const parseResult = pcToServerMessageSchema.safeParse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: 1_700_000_000_000,
+      capabilities: ['desktop.teleport'],
+    });
+    expect(parseResult.success).toBe(false);
+  });
+});
+
+describe('desktop registration adapter', () => {
+  it('derives a stable deviceId from the hostname', () => {
+    expect(buildDesktopDeviceIdFromHostname('PC-ESTUDIO')).toBe('desktop:PC-ESTUDIO');
+  });
+
+  it('maps a legacy hello to the implemented desktop capabilities', () => {
+    const hello = pcToServerMessageSchema.parse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: 1_700_000_000_000,
+    });
+    if (hello.type !== 'hello') {
+      throw new Error('expected hello');
+    }
+    const registration = buildDesktopRegistrationFromHello({
+      hello,
+      hostname: 'PC-ESTUDIO',
+      nowMilliseconds: 1_700_000_000_000,
+    });
+    expect(registration.deviceId).toBe('desktop:PC-ESTUDIO');
+    expect(registration.deviceType).toBe('desktop');
+    expect(registration.protocolVersion).toBe(LEGACY_PROTOCOL_VERSION);
+    expect(registration.capabilityNameList).toEqual([
+      'desktop.open_app',
+      'desktop.focus_app',
+      'desktop.close_app',
+      'desktop.list_apps',
+      'desktop.lock',
+      'desktop.spotify',
+      'desktop.brave_search',
+    ]);
+  });
+
+  it('honours capabilities declared by the client', () => {
+    const hello = pcToServerMessageSchema.parse({
+      type: 'hello',
+      hostname: 'PC-ESTUDIO',
+      ts: 1,
+      protocolVersion: 1,
+      capabilities: ['desktop.open_app'],
+    });
+    if (hello.type !== 'hello') {
+      throw new Error('expected hello');
+    }
+    const registration = buildDesktopRegistrationFromHello({
+      hello,
+      hostname: 'PC-ESTUDIO',
+      nowMilliseconds: 1_700_000_000_000,
+    });
+    expect(registration.capabilityNameList).toEqual(['desktop.open_app']);
+    expect(registration.protocolVersion).toBe(1);
+  });
+
+  it('falls back to the implemented desktop set for a legacy client', () => {
+    expect(resolveDesktopCapabilityNameList(undefined)).toEqual(
+      listImplementedCapabilityNameList().filter((name) => name.startsWith('desktop.')),
+    );
+  });
+});
+
+describe('router integration (mapping only)', () => {
+  it('maps a deterministic pc command to a capability intent', () => {
+    const outcome = routeDeterministic('abrÃ­ chrome', FIXED_NOW);
+    expect(outcome.kind).toBe('pc_command');
+    if (outcome.kind !== 'pc_command') {
+      throw new Error('expected pc_command');
+    }
+    expect(resolveCapabilityIntent(outcome)).toEqual({
+      domain: 'pc',
+      capabilityName: 'desktop.open_app',
+      targetPreference: desktopTargetPreference,
+    });
+  });
+
+  it('maps lock to desktop.lock', () => {
+    const outcome = routeDeterministic('bloqueÃ¡ la pantalla', FIXED_NOW);
+    if (outcome.kind !== 'pc_command') {
+      throw new Error('expected pc_command');
+    }
+    expect(resolveCapabilityIntent(outcome)?.capabilityName).toBe('desktop.lock');
+  });
+
+  it('models spotify as a desktop-scoped intent', () => {
+    const outcome = routeDeterministic('siguiente canciÃ³n', FIXED_NOW);
+    if (outcome.kind !== 'pc_command') {
+      throw new Error('expected pc_command');
+    }
+    const intent = resolveCapabilityIntent(outcome);
+    expect(intent?.capabilityName).toBe('desktop.spotify');
+    expect(intent?.targetPreference).toEqual(desktopTargetPreference);
+  });
+
+  it('offers a generic any-target intent for untargeted media', () => {
+    expect(GENERIC_SPOTIFY_INTENT).toEqual({
+      domain: 'media',
+      capabilityName: 'desktop.spotify',
+      targetPreference: ANY_TARGET_PREFERENCE,
+    });
+  });
+
+  it('returns null for outcomes that are not pc commands', () => {
+    expect(
+      resolveCapabilityIntent(routeDeterministic('quÃ© hora es', FIXED_NOW)),
+    ).toBeNull();
+    expect(
+      resolveCapabilityIntent(routeDeterministic('contame un chiste', FIXED_NOW)),
+    ).toBeNull();
+  });
+});
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\07-tests\enrollment-binding.spec.ts =====
+
+import { describe, expect, it } from 'bun:test';
+
+import {
+  claimEnrollmentChallenge,
+  hashSecret,
+  issueEnrollmentChallenge,
+  revokeDeviceCredential,
+  verifyDeviceCredential,
+  type ChallengeConsumeOutcome,
+  type EnrollmentStore,
+} from '@/devices/enrollment';
+import { createInMemoryEnrollmentStore } from '@/devices/credential-store';
+import { isEnrollableMobileDeviceId } from '@/devices/route';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// BLOCK 12.1: el desafÃ­o atado a un dispositivo, y el consumo atÃ³mico.
+//
+// Los dos riesgos que este bloque cierra:
+//
+// 1. El desafÃ­o no decÃ­a QUÃ‰ telÃ©fono estaba autorizando, asÃ­ que quien lo
+//    obtuviera podÃ­a reclamar cualquier identidad.
+// 2. Consumir el desafÃ­o era `readChallenge` + `deleteChallenge`, con un `await`
+//    en el medio: dos claims concurrentes leÃ­an el mismo desafÃ­o vÃ¡lido y los dos
+//    pasaban los chequeos antes de que uno lo borrara.
+//
+// Reloj inyectado a mano en todos lados: la expiraciÃ³n es una regla de seguridad
+// y no puede depender de un `Date.now()` real.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const PHONE_A = 'mobile:phone-a';
+const PHONE_B = 'mobile:phone-b';
+const NOW = 1_700_000_000_000;
+
+const VALID_DEVICE_ID = (deviceId: string): boolean =>
+  isEnrollableMobileDeviceId(deviceId);
+
+async function issueChallengeFor(
+  store: EnrollmentStore,
+  boundDeviceId: string,
+  offsetMilliseconds = 0,
+): Promise<string> {
+  const issued = await issueEnrollmentChallenge({
+    store,
+    nowMilliseconds: NOW + offsetMilliseconds,
+    boundDeviceId,
+  });
+  return issued.challenge;
+}
+
+async function claim(
+  store: EnrollmentStore,
+  challenge: string,
+  deviceId: string,
+  offsetMilliseconds = 0,
+): ReturnType<typeof claimEnrollmentChallenge> {
+  return claimEnrollmentChallenge({
+    store,
+    nowMilliseconds: NOW + offsetMilliseconds,
+    challenge,
+    deviceId,
+    isDeviceIdValid: VALID_DEVICE_ID,
+  });
+}
+
+// â”€â”€ 12.1 Â§2: el vÃ­nculo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+describe('B12.1 Â§2: el desafÃ­o queda atado a un dispositivo', () => {
+  it('1. el desafÃ­o se guarda con el deviceId que el dueÃ±o autorizÃ³', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+    const record = await store.readChallenge(await hashOf(challenge));
+
+    expect(record?.boundDeviceId).toBe(PHONE_A);
+  });
+
+  it('2. A puede canjear su propio desafÃ­o', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+
+    const result = await claim(store, challenge, PHONE_A, 1);
+
+    expect(result.status).toBe('enrolled');
+    if (result.status === 'enrolled') {
+      expect(result.deviceId).toBe(PHONE_A);
+      expect(
+        await verifyDeviceCredential({ store, credential: result.credential }),
+      ).toEqual({ status: 'valid', deviceId: PHONE_A });
+    }
+  });
+
+  it('3. B NO puede canjear el desafÃ­o de A', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+
+    const result = await claim(store, challenge, PHONE_B, 1);
+
+    expect(result).toEqual({ status: 'rejected', reason: 'device_id_mismatch' });
+    // Y no se creÃ³ ninguna credencial para B: el intento no deja rastro.
+    expect(await store.readCredential(PHONE_B)).toBeNull();
+  });
+
+  it('4. el intento fallido de B NO consume el desafÃ­o de A', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+
+    await claim(store, challenge, PHONE_B, 1);
+
+    // El desafÃ­o sigue vivo: A todavÃ­a puede canjearlo.
+    const result = await claim(store, challenge, PHONE_A, 2);
+    expect(result.status).toBe('enrolled');
+  });
+
+  it('5. el vÃ­nculo sobrevive al re-enrollment con otro dueÃ±o de desafÃ­o', async () => {
+    // Dos desafÃ­os para el mismo telÃ©fono, ambos consumibles por ese telÃ©fono.
+    const store = createInMemoryEnrollmentStore();
+    const firstChallenge = await issueChallengeFor(store, PHONE_A, 0);
+    const secondChallenge = await issueChallengeFor(store, PHONE_A, 1_000);
+
+    expect((await claim(store, firstChallenge, PHONE_A, 2)).status).toBe('enrolled');
+    expect((await claim(store, secondChallenge, PHONE_A, 3)).status).toBe('enrolled');
+  });
+
+  it('6. un desafÃ­o expirado no se puede canjear ni despuÃ©s de arreglar el deviceId', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const issued = await issueEnrollmentChallenge({
+      store,
+      nowMilliseconds: NOW,
+      boundDeviceId: PHONE_A,
+    });
+
+    const result = await claim(
+      store,
+      issued.challenge,
+      PHONE_A,
+      issued.expiresAtMilliseconds,
+    );
+
+    expect(result).toEqual({ status: 'rejected', reason: 'challenge_expired' });
+  });
+
+  it('7. un desafÃ­o revocado no se reutiliza', async () => {
+    // El telÃ©fono se enrola, se revoca, y su desafÃ­o viejo no vuelve a servir.
+    const store = createInMemoryEnrollmentStore();
+    const credentialChallenge = await issueChallengeFor(store, PHONE_A);
+    const enrolled = await claim(store, credentialChallenge, PHONE_A, 1);
+    if (enrolled.status !== 'enrolled') {
+      throw new Error('el enrollment deberia haber funcionado');
+    }
+    await revokeDeviceCredential({ store, deviceId: PHONE_A, nowMilliseconds: NOW + 2 });
+
+    const leftoverChallenge = await issueChallengeFor(store, PHONE_A, 3);
+    const reEnrolled = await claim(store, leftoverChallenge, PHONE_A, 4);
+
+    // Re-enrolar con un desafÃ­o nuevo y del dueÃ±o sÃ­ funciona, y rota la
+    // credencial revocada.
+    expect(reEnrolled.status).toBe('enrolled');
+    if (reEnrolled.status === 'enrolled') {
+      expect(
+        (await verifyDeviceCredential({ store, credential: enrolled.credential })).status,
+      ).toBe('rejected');
+    }
+  });
+
+  it('8. dos telÃ©fonos con desafÃ­os distintos no se mezclan', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challengeA = await issueChallengeFor(store, PHONE_A, 0);
+    const challengeB = await issueChallengeFor(store, PHONE_B, 1);
+
+    const resultA = await claim(store, challengeA, PHONE_A, 2);
+    const resultB = await claim(store, challengeB, PHONE_B, 3);
+
+    expect(resultA.status).toBe('enrolled');
+    expect(resultB.status).toBe('enrolled');
+    if (resultA.status !== 'enrolled' || resultB.status !== 'enrolled') {
+      throw new Error('los dos enrolamientos deberian haber funcionado');
+    }
+    expect(resultA.credential).not.toBe(resultB.credential);
+    // Cada credencial resuelve a su propio telÃ©fono.
+    expect(
+      await verifyDeviceCredential({ store, credential: resultA.credential }),
+    ).toEqual({ status: 'valid', deviceId: PHONE_A });
+    expect(
+      await verifyDeviceCredential({ store, credential: resultB.credential }),
+    ).toEqual({ status: 'valid', deviceId: PHONE_B });
+  });
+});
+
+// â”€â”€ 12.1 Â§5: el consumo es atÃ³mico â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+describe('B12.1 Â§5: dos claims simultÃ¡neos producen como mÃ¡ximo una credencial', () => {
+  it('el CAS deja ganar a uno solo', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+
+    // Sin await entre medio: los dos claims quedanPending al mismo tiempo y el
+    // store decide.
+    const [first, second] = await Promise.all([
+      claim(store, challenge, PHONE_A, 1),
+      claim(store, challenge, PHONE_A, 1),
+    ]);
+
+    const resultList = [first, second];
+    const enrolledCount = resultList.filter(
+      (entry) => entry.status === 'enrolled',
+    ).length;
+    const rejectedCount = resultList.filter(
+      (entry) => entry.status === 'rejected',
+    ).length;
+
+    expect(enrolledCount).toBe(1);
+    expect(rejectedCount).toBe(1);
+  });
+
+  it('concurrentes con deviceIds distintos sÃ³lo gana el atado', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+
+    const [forA, forB] = await Promise.all([
+      claim(store, challenge, PHONE_A, 1),
+      claim(store, challenge, PHONE_B, 1),
+    ]);
+
+    expect(forA.status).toBe('enrolled');
+    // B nunca gana. El motivo exacto depende del entrelazado -- si A consumiÃ³
+    // primero, B ve `challenge_consumed`; si B llegÃ³ primero, ve
+    // `device_id_mismatch` -- asÃ­ que se afirma el rechazo, no el orden.
+    expect(forB.status).toBe('rejected');
+    if (forB.status === 'rejected') {
+      expect(['device_id_mismatch', 'challenge_consumed']).toContain(forB.reason);
+    }
+    expect(await store.readCredential(PHONE_B)).toBeNull();
+  });
+
+  it('muchos claims a la vez: exactamente una credencial', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+
+    const resultList = await Promise.all(
+      Array.from({ length: 12 }, () => claim(store, challenge, PHONE_A, 1)),
+    );
+
+    const credentialList = resultList
+      .filter((entry) => entry.status === 'enrolled')
+      .map((entry) => (entry as { credential: string }).credential);
+    expect(credentialList).toHaveLength(1);
+
+    // Y esa Ãºnica credencial es la Ãºnica que verifica.
+    for (const credential of credentialList) {
+      expect(await verifyDeviceCredential({ store, credential })).toEqual({
+        status: 'valid',
+        deviceId: PHONE_A,
+      });
+    }
+    expect(await store.listCredentialRecordList()).toHaveLength(1);
+  });
+
+  it('el perdedor recibe un motivo, no una excepciÃ³n', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+    await claim(store, challenge, PHONE_A, 1);
+
+    const latecomer = await claim(store, challenge, PHONE_A, 2);
+    expect(latecomer).toEqual({ status: 'rejected', reason: 'challenge_consumed' });
+  });
+});
+
+// â”€â”€ 12.1 Â§5: el store tiene que upholdar el CAS, no el llamador â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+describe('B12.1 Â§5: el contrato de consumeChallenge', () => {
+  it('consumeChallenge devuelve el deviceId atado sÃ³lo cuando consumiÃ³', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+    const challengeHash = await hashOf(challenge);
+
+    const won: ChallengeConsumeOutcome = await store.consumeChallenge({
+      challengeHash,
+      deviceId: PHONE_A,
+      consumedToken: 'token-a',
+      nowMilliseconds: NOW,
+    });
+    expect(won).toEqual({ wasConsumed: true, boundDeviceId: PHONE_A });
+
+    const second: ChallengeConsumeOutcome = await store.consumeChallenge({
+      challengeHash,
+      deviceId: PHONE_A,
+      consumedToken: 'token-b',
+      nowMilliseconds: NOW,
+    });
+    expect(second).toEqual({ wasConsumed: false, reason: 'challenge_consumed' });
+  });
+
+  it('un deviceId distinto no consume', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const challenge = await issueChallengeFor(store, PHONE_A);
+    const challengeHash = await hashOf(challenge);
+
+    const outcome = await store.consumeChallenge({
+      challengeHash,
+      deviceId: PHONE_B,
+      consumedToken: 'token-b',
+      nowMilliseconds: NOW,
+    });
+
+    expect(outcome).toEqual({ wasConsumed: false, reason: 'device_id_mismatch' });
+    // Sigue sin consumirse, asÃ­ que el atado todavÃ­a puede pasar.
+    expect(
+      await store.consumeChallenge({
+        challengeHash,
+        deviceId: PHONE_A,
+        consumedToken: 'token-a',
+        nowMilliseconds: NOW,
+      }),
+    ).toEqual({ wasConsumed: true, boundDeviceId: PHONE_A });
+  });
+
+  it('un desafÃ­o desconocido se clasifica sin tocar nada', async () => {
+    const store = createInMemoryEnrollmentStore();
+    const outcome = await store.consumeChallenge({
+      challengeHash: await hashOf('apollo_enr_nunca-emitido'),
+      deviceId: PHONE_A,
+      consumedToken: 'token',
+      nowMilliseconds: NOW,
+    });
+    expect(outcome).toEqual({ wasConsumed: false, reason: 'challenge_unknown' });
+  });
+});
+
+// â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+async function hashOf(challenge: string): Promise<string> {
+  return hashSecret(challenge);
+}
+

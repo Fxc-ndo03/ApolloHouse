@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pantalla de conversación.
+
+  Es un LinearLayout y no algo más rico a propósito: no depende de librerías
+  externas, se infla sin inflater, y las partes que sí dependen del estado
+  (estado de conexión, lista de turnos, campo de texto) son las que hay que
+  poder observar desde Kotlin.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true">
+
+    <TextView
+        android:id="@+id/conversation_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="12dp"
+        android:text="Sin conexion"
+        android:textSize="13sp" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:id="@+id/conversation_turn_list"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <EditText
+            android:id="@+id/conversation_input"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="Escribile a Apollo"
+            android:importantForAutofill="no"
+            android:inputType="textMultiLine|textCapSentences"
+            android:maxLines="4" />
+
+        <Button
+            android:id="@+id/conversation_send"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:enabled="false"
+            android:text="Enviar" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/conversation_abort"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Cancelar respuesta" />
+</LinearLayout>

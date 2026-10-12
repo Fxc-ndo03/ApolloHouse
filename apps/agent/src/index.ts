@@ -2,20 +2,31 @@ import { routeAgentRequest } from 'agents';
 import { Sandbox } from '@cloudflare/sandbox';
 
 import { authorizeApolloConnection, Apollo, PcBridge } from '@/agents/apollo';
+import { MobileBridge } from '@/agents/mobile-bridge';
 import { authorizeApolloHttpRequest } from '@/auth/http';
 import { CODING_PROXY_PATH_PREFIX, handleCodingLlmProxyRequest } from '@/coding/proxy';
 import { handleOtaRequest } from '@/ota/routes';
 import { consumeApolloQueueBatch } from '@/queues/consume';
 import { ApolloBackground } from '@/workflows/background';
 import { ApolloCoding } from '@/workflows/coding';
-import { isDeviceSharedSecretValid, readDeviceTokenFromRequestUrl } from '@/auth/token';
+import {
+  authorizeMobileDeviceRequest,
+  isMobileBridgeRequestPath,
+  resolveEnrollmentRouteKind,
+  resolveMobileBridgeStub,
+} from '@/devices/route';
+import {
+  isDeviceSharedSecretValid,
+  isInternalCoreTokenValid,
+  readDeviceTokenFromRequestUrl,
+} from '@/auth/token';
 import { listPcToolDefinitionList } from '@/tools/pc';
 import { buildToolDefinitionMap } from '@/tools/router';
 import type { ToolDefinition } from '@/tools/types';
 import { chatWithGemini } from '@/voice/llm';
 import { chatWithFallbackLlm } from '@/voice/provider';
 
-export { Apollo, ApolloBackground, ApolloCoding, Sandbox, PcBridge };
+export { Apollo, ApolloBackground, ApolloCoding, Sandbox, PcBridge, MobileBridge };
 
 // The hosted management console probes /health cross-origin before opening
 // the agent WebSocket; auth is the query token, never a cookie, so a wildcard
@@ -27,9 +38,11 @@ const CONSOLE_CORS_HEADER_MAP = {
   'Access-Control-Max-Age': '86400',
 } as const;
 
-async function requireInternalToken(request: Request, env: Env): Promise<boolean> {
-  const token = request.headers.get('X-Internal-Token');
-  return token === env.INTERNAL_CORE_TOKEN;
+function requireInternalToken(request: Request, env: Env): boolean {
+  return isInternalCoreTokenValid(
+    request.headers.get('X-Internal-Token'),
+    env.INTERNAL_CORE_TOKEN,
+  );
 }
 
 export default {
@@ -132,8 +145,13 @@ export default {
         return new Response('Method Not Allowed', { status: 405 });
       }
       try {
-        const body = (await request.json()) as { command: string; args: Record<string, unknown> };
-        const pcBridge = environment.PcBridge.get(environment.PcBridge.idFromName('pc-bridge'));
+        const body = (await request.json()) as {
+          command: string;
+          args: Record<string, unknown>;
+        };
+        const pcBridge = environment.PcBridge.get(
+          environment.PcBridge.idFromName('pc-bridge'),
+        );
         const result = await pcBridge.sendCommand(body.command as any, body.args);
         return Response.json({ ok: true, result });
       } catch (error) {
@@ -157,18 +175,29 @@ export default {
           messages: Array<{ role: string; content: string | null }>;
           tools?: Array<{ name: string; description: string; parameters: unknown }>;
         };
-        
+
         // Build tool definition map from available PC tools
         const toolDefs = listPcToolDefinitionList();
         const toolMap = buildToolDefinitionMap(toolDefs);
-        const toolDefList = (body.tools?.length ? body.tools : Array.from(toolMap.values()).map(t => ({
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters as ToolDefinition['parameters'],
-        }))) as Array<{ name: string; description: string; parameters: ToolDefinition['parameters'] }>;
-        
+        const toolDefList = (
+          body.tools?.length
+            ? body.tools
+            : Array.from(toolMap.values()).map((t) => ({
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters as ToolDefinition['parameters'],
+              }))
+        ) as Array<{
+          name: string;
+          description: string;
+          parameters: ToolDefinition['parameters'];
+        }>;
+
         // Try Gemini first, fallback if configured
-        let result: { text: string; toolCallList: Array<{ name: string; args: unknown }> };
+        let result: {
+          text: string;
+          toolCallList: Array<{ name: string; args: unknown }>;
+        };
         try {
           const geminiResult = await chatWithGemini({
             geminiApiKey: environment.GEMINI_API_KEY ?? '',
@@ -178,10 +207,17 @@ export default {
           });
           result = {
             text: geminiResult.text,
-            toolCallList: geminiResult.toolCallList.map(tc => ({ name: tc.name, args: tc.args })),
+            toolCallList: geminiResult.toolCallList.map((tc) => ({
+              name: tc.name,
+              args: tc.args,
+            })),
           };
         } catch (e) {
-          if (environment.LLM_FALLBACK_API_KEY && environment.LLM_FALLBACK_BASE_URL && environment.LLM_FALLBACK_MODEL) {
+          if (
+            environment.LLM_FALLBACK_API_KEY &&
+            environment.LLM_FALLBACK_BASE_URL &&
+            environment.LLM_FALLBACK_MODEL
+          ) {
             const fallbackResult = await chatWithFallbackLlm({
               environment,
               messageList: body.messages as any,
@@ -189,16 +225,19 @@ export default {
             });
             result = {
               text: fallbackResult.text,
-              toolCallList: fallbackResult.toolCallList.map(tc => ({ name: tc.name, args: tc.args })),
+              toolCallList: fallbackResult.toolCallList.map((tc) => ({
+                name: tc.name,
+                args: tc.args,
+              })),
             };
           } else {
             throw e;
           }
         }
-        
+
         return Response.json({
           text: result.text,
-          toolCalls: result.toolCallList.map(tc => ({ name: tc.name, args: tc.args })),
+          toolCalls: result.toolCallList.map((tc) => ({ name: tc.name, args: tc.args })),
         });
       } catch (error) {
         return Response.json(
@@ -206,6 +245,30 @@ export default {
           { status: 500 },
         );
       }
+    }
+
+    // Mobile devices only: explicit route + 'device' role, then the bridge.
+    // PcBridge and Apollo keep going through routeAgentRequest untouched.
+    if (isMobileBridgeRequestPath(requestUrl.pathname)) {
+      const mobileBridge = resolveMobileBridgeStub(environment);
+      if (mobileBridge === undefined) {
+        return new Response('Not found', { status: 404 });
+      }
+      // BLOCK 12: enrollment y revocación son HTTP y las atiende el propio DO,
+      // que es dueño del store y de los sockets. El borde no las autoriza: el
+      // challenge lo pide el dueño (rol dashboard) y el claim lo autoriza el
+      // desafío mismo, que el teléfono todavía no tiene con qué autenticar.
+      if (resolveEnrollmentRouteKind(requestUrl.pathname) !== null) {
+        return mobileBridge.fetch(request);
+      }
+      const mobileAuthorization = await authorizeMobileDeviceRequest({
+        request,
+        environment,
+      });
+      if (!mobileAuthorization.isAuthorized) {
+        return mobileAuthorization.response;
+      }
+      return mobileBridge.fetch(request);
     }
 
     const agentResponse = await routeAgentRequest(request, environment, {

@@ -1,8 +1,14 @@
 //! Sidecar manager for Python juana-client
+//!
+//! Python handles: wake word, STT, TTS playback.
+//! Python does NOT connect to the Worker directly.
+//! Text goes through stdout → Rust → CloudCoreManager.
+//! Worker responses come through CloudCoreManager → Rust → Python stdin.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -11,10 +17,29 @@ use tokio::sync::Mutex;
 
 use crate::state::{AppState, ConnectionStatus};
 
+/// Parametros del ultimo arranque (para restart automatico tras crash).
+#[derive(Clone, Debug)]
+struct SidecarStartParams {
+    wake_words: Vec<String>,
+    use_vosk: bool,
+    model_dir: Option<String>,
+    input_device: Option<String>,
+    output_device: Option<String>,
+}
+
+/// Backoff del restart automatico tras crash (2s, 5s, 10s; max 3 intentos).
+/// Acotado para no revivir en loop infinito si el entorno esta roto.
+const SIDECAR_RESTART_BACKOFFS: [u64; 3] = [2, 5, 10];
+
 #[derive(Clone)]
 pub struct SidecarManager {
     child: Arc<Mutex<Option<Child>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// true cuando la salida fue ordenada (stop()); si no, fue crash.
+    expect_exit: Arc<AtomicBool>,
+    /// Guarda contra dos loops de restart concurrentes.
+    restarting: Arc<AtomicBool>,
+    last_params: Arc<Mutex<Option<SidecarStartParams>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,19 +99,27 @@ impl SidecarManager {
         Self {
             child: Arc::new(Mutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
+            expect_exit: Arc::new(AtomicBool::new(false)),
+            restarting: Arc::new(AtomicBool::new(false)),
+            last_params: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Elimina sidecars python huérfanos: procesos `-m juana_client.client`
-    /// cuyo apollo-desktop.exe padre ya no esté corriendo. Quedan huérfanos
-    /// cuando una instancia anterior terminó sin cerrarlos (kill, crash, cierre
-    /// por bandeja) y compiten por el micro y la sesión del Core.
+    /// cuyo proceso padre (Apollo Desktop.exe o apollo-desktop.exe) ya no esté
+    /// corriendo. Quedan huérfanos cuando una instancia anterior terminó sin
+    /// cerrarlos (kill, crash, cierre por bandeja) y compiten por el micro y
+    /// la sesión del Core. Solo coincide el command line del sidecar de Apollo,
+    /// nunca un Python ajeno.
     fn kill_orphan_sidecars() {
         #[cfg(target_os = "windows")]
         {
             use std::process::Command;
             let script = r#"
 $apollo = @{}
+Get-CimInstance Win32_Process -Filter "Name='Apollo Desktop.exe'" | ForEach-Object {
+    $apollo[$_.ProcessId] = $true
+}
 Get-CimInstance Win32_Process -Filter "Name='apollo-desktop.exe'" | ForEach-Object {
     $apollo[$_.ProcessId] = $true
 }
@@ -113,21 +146,26 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
 
     pub async fn start(
         &self,
-        worker_url: String,
-        device_secret: String,
         wake_words: Vec<String>,
         use_vosk: bool,
         model_dir: Option<String>,
         app_handle: AppHandle,
-        use_local_core: bool,
-        core_lan_url: String,
-        response_output_target: String,
+        input_device: Option<String>,
+        output_device: Option<String>,
     ) -> Result<()> {
         // Check if already running
         let mut child_lock = self.child.lock().await;
         if child_lock.is_some() {
             return Ok(());
         }
+        self.expect_exit.store(false, Ordering::SeqCst);
+        *self.last_params.lock().await = Some(SidecarStartParams {
+            wake_words: wake_words.clone(),
+            use_vosk,
+            model_dir: model_dir.clone(),
+            input_device: input_device.clone(),
+            output_device: output_device.clone(),
+        });
 
         // Limpiar restos de instancias previas antes de lanzar la nuestra.
         Self::kill_orphan_sidecars();
@@ -150,18 +188,34 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
             base.to_string_lossy().to_string()
         });
 
+        let (input_device_name, output_device_name) = if let Some(input) = input_device {
+            (input, output_device.unwrap_or_else(|| crate::state::default_output_device_name()))
+        } else if let Some(settings_state) = app_handle.try_state::<std::sync::Mutex<crate::state::AppSettings>>() {
+            let s = settings_state.lock().unwrap();
+            (s.input_device_name.clone(), s.output_device_name.clone())
+        } else {
+            (crate::state::default_input_device_name(), crate::state::default_output_device_name())
+        };
+
+        // Directorio de config (settings.json): el sidecar guarda ahi
+        // device_preferences.json para que sobreviva a reinstalaciones
+        // (resources/ se reemplaza en cada update del instalador).
+        let apollo_config_dir = app_handle
+            .path()
+            .app_config_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         let mut cmd = TokioCommand::new(&python_exe);
         cmd.current_dir(&client_root)
             .arg("-m")
             .arg("juana_client.client")
-            .env("APOLLO_WORKER_URL", &worker_url)
-            .env("DEVICE_SHARED_SECRET", &device_secret)
-            .env("USE_LOCAL_CORE", if use_local_core { "true" } else { "false" })
-            .env("CORE_LAN_URL", &core_lan_url)
             .env("WAKE_WORDS", &wake_words_str)
             .env("USE_VOSK_WAKE", if use_vosk { "true" } else { "false" })
-            .env("RESPONSE_OUTPUT_TARGET", &response_output_target)
             .env("WAKE_MODEL_DIR", &model_dir)
+            .env("INPUT_DEVICE_NAME", &input_device_name)
+            .env("OUTPUT_DEVICE_NAME", &output_device_name)
+            .env("APOLLO_CONFIG_DIR", &apollo_config_dir)
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
@@ -177,8 +231,6 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
             .stderr(Stdio::piped())
             .stdin(Stdio::piped());
 
-        // Diagnostic log: secret is set (never print the value)
-        eprintln!("[diag-connect] DEVICE_SHARED_SECRET=(set)");
         // The embeddable runtime is relocatable but must not resolve its
         // stdlib against a foreign installation: pin its home explicitly.
         // (Never set for the dev venv: it would break venv resolution.)
@@ -207,10 +259,13 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
             client_root.display()
         );
         log::info!(
-            "Env: APOLLO_WORKER_URL={}, WAKE_WORDS={}, USE_VOSK_WAKE={}",
-            worker_url,
+            "Env: WAKE_WORDS={}, USE_VOSK_WAKE={}",
             wake_words_str,
             use_vosk
+        );
+        eprintln!(
+            "[voice-debug] configured-wake-words={}",
+            serde_json::to_string(&wake_words).unwrap_or_default()
         );
 
         let mut child = cmd.spawn().context("Failed to spawn Python sidecar")?;
@@ -223,23 +278,116 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
         let app_handle_stdout = app_handle.clone();
 
         // Spawn stdout reader
+        // Handles:
+        //   - voice_transcript: forward to CloudCoreManager.send_text()
+        //   - connection_state: sync with AppState
+        //   - other JSON: emit as protocol-message
+        //   - plain text: surface as sidecar chatter
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
                         if line.starts_with("{") {
-                            // Try to parse as JSON protocol message
                             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                                if msg.get("type").and_then(|v| v.as_str()).is_some() {
+                                let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                                // Barge-in del sidecar: el usuario hablo durante TTS.
+                                // Se aborta la generacion en el Worker; NO se reemite
+                                // a la UI (sin cambio visual; solo metricas).
+                                if msg_type == "barge_in" {
+                                    let tts_elapsed = msg.get("tts_elapsed_ms").and_then(|v| v.as_i64()).unwrap_or(-1);
+                                    let rms = msg.get("rms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    eprintln!("[voice-debug] barge_in_received tts_elapsed_ms={} rms={:.4}", tts_elapsed, rms);
+                                    if let Some(cloudcore) = app_handle_stdout.try_state::<crate::cloudcore::CloudCoreManager>() {
+                                        let cc = cloudcore.inner().clone();
+                                        tokio::spawn(async move {
+                                            match cc.send_abort().await {
+                                                Ok(()) => eprintln!("[voice-debug] barge-abort-sent"),
+                                                Err(e) => eprintln!("[sidecar] barge abort failed: {e}"),
+                                            }
+                                        });
+                                    }
+                                    continue;
+                                }
+                                // Voice transcript from Python STT → forward to CloudCoreManager + emit to frontend
+                                if msg_type == "voice_transcript" {
+                                    if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
+                                        eprintln!("[sidecar] voice_transcript: {}", text);
+                                        // FASE 26: reemitir la identidad del turno (turn_id/generation/ts)
+                                        // para correlacion end-to-end. La UI ignora campos extra.
+                                        let turn_id_json = msg.get("turn_id").cloned().unwrap_or(serde_json::Value::Null);
+                                        let generation_json = msg.get("generation").cloned().unwrap_or(serde_json::Value::Null);
+                                        let ts_json = msg.get("ts").cloned().unwrap_or(serde_json::Value::Null);
+                                        // Emit to frontend so chat can display the transcript
+                                        app_handle_stdout.emit("protocol-message", serde_json::json!({
+                                            "type": "voice_transcript",
+                                            "text": text,
+                                            "turn_id": turn_id_json,
+                                            "generation": generation_json,
+                                            "ts": ts_json,
+                                        })).ok();
+                                        // FASE 4: anclas STT para el voice-latency-summary.
+                                        if let Some(cloudcore_state) = app_handle_stdout.try_state::<crate::cloudcore::CloudCoreManager>() {
+                                            let turn_owned = msg.get("turn_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                            let generation_owned = msg.get("generation").and_then(|v| v.as_i64());
+                                            let speech_start_owned = msg.get("speech_start_ms").and_then(|v| v.as_i64());
+                                            let speech_end_owned = msg.get("speech_end_ms").and_then(|v| v.as_i64());
+                                            cloudcore_state.inner().clone().note_stt_dispatch(
+                                                turn_owned,
+                                                generation_owned,
+                                                speech_start_owned,
+                                                speech_end_owned,
+                                            );
+                                        }
+                                        if let Some(cloudcore) = app_handle_stdout.try_state::<crate::cloudcore::CloudCoreManager>() {
+                                            let cc = cloudcore.inner().clone();
+                                            let text_owned = text.to_string();
+                                            let turn_owned = msg.get("turn_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                            let generation_for_text = msg.get("generation").and_then(|v| v.as_i64());
+                                            tokio::spawn(async move {
+                                                match cc.send_text(&text_owned, None, turn_owned, generation_for_text).await {
+                                                    Ok(request_id) => {
+                                                        eprintln!("[tts-debug] dispatch=text_input request_id={}", request_id);
+                                                        eprintln!("[tts-debug] transport=cloudcore text=\"{}\"", text_owned);
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("[sidecar] cloudcore send_text failed: {e}");
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                // Connection state sync
+                                if msg_type == "connection_state" {
                                     sync_connection_state(&app_handle_stdout, &msg).await;
                                     app_handle_stdout.emit("protocol-message", msg).ok();
                                     continue;
                                 }
+
+                                // UI state from Python → forward to frontend for orb changes
+                                if msg_type == "ui_state" {
+                                    app_handle_stdout.emit("protocol-message", msg).ok();
+                                    continue;
+                                }
+
+                                // TTS audio from Python (base64) — forward to CloudCoreManager not needed here
+                                // TTS audio flows: Worker → CloudCoreManager → Rust → Python stdin
+
+                                // Other protocol messages
+                                if msg_type.is_empty() {
+                                    // No type field, treat as sidecar chatter
+                                    eprintln!("[sidecar] {}", line);
+                                } else {
+                                    sync_connection_state(&app_handle_stdout, &msg).await;
+                                    app_handle_stdout.emit("protocol-message", msg).ok();
+                                }
+                                continue;
                             }
                         } else if let Some(state) = parse_state_line(&line) {
-                            // Legacy plain-text state from the client: forward it
-                            // as a protocol message so the UI always stays in sync.
                             let msg = serde_json::json!({
                                 "type": "connection_state",
                                 "state": state
@@ -249,7 +397,11 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
                             continue;
                         }
                         // Non-protocol stdout is sidecar chatter: surface it.
-                        eprintln!("[sidecar] {line}");
+                        if line.contains("[voice-debug]") || line.contains("[WAKE]") || line.contains("[sidecar]") {
+                            eprintln!("{}", line);
+                        } else {
+                            eprintln!("[sidecar] {line}");
+                        }
                     }
                     Ok(None) => {
                         eprintln!("[apollo] sidecar stdout cerrado (EOF)");
@@ -286,6 +438,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
         // Monitor child exit without taking ownership (stop() may take it first)
         let child_arc = self.child.clone();
         let app_handle_exit = app_handle.clone();
+        let manager_clone = self.clone();
         tokio::spawn(async move {
             loop {
                 let exited = {
@@ -314,6 +467,88 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
                         state.set_connection_status(ConnectionStatus::Disconnected).await;
                     }
                     app_handle_exit.emit("sidecar-exited", status.code()).ok();
+                    // Salida ordenada (stop()) vs crash: solo el crash dispara
+                    // el loop de restart (max 3 intentos, backoff). Sin esto,
+                    // un sidecar muerto dejaba a Apollo sin voz hasta
+                    // reinicio manual.
+                    let ordered = manager_clone.expect_exit.swap(false, Ordering::SeqCst);
+                        if !ordered {
+                            let code = status.code();
+                            app_handle_exit
+                                .emit("sidecar-crash", serde_json::json!({ "code": code }))
+                                .ok();
+                        eprintln!("[apollo] sidecar-crash code={:?} (restart automatico)", code);
+                        if manager_clone
+                            .restarting
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            let manager_restart = manager_clone.clone();
+                            let app_handle_restart = app_handle_exit.clone();
+                            // NOTE: start() no es Send (future con estado !Send
+                            // heredado), asi que el restart corre en un thread
+                            // bloqueante con block_on en vez de tokio::spawn.
+                            // Es camino raro (solo tras crash), un thread
+                            // transitorio es aceptable.
+                            tokio::task::spawn_blocking(move || {
+                                let runtime_handle = tauri::async_runtime::handle();
+                                let mut ok = false;
+                                let mut aborted = false;
+                                for (i, wait_secs) in SIDECAR_RESTART_BACKOFFS.iter().enumerate() {
+                                    let attempt = i + 1;
+                                    // Stop manual mientras tanto: no revivir.
+                                    if manager_restart.expect_exit.load(Ordering::SeqCst) {
+                                        eprintln!("[apollo] sidecar-restart-aborted reason=stop-requested");
+                                        aborted = true;
+                                        break;
+                                    }
+                                    app_handle_restart
+                                        .emit(
+                                            "sidecar-restart-start",
+                                            serde_json::json!({ "attempt": attempt }),
+                                        )
+                                        .ok();
+                                    eprintln!("[apollo] sidecar-restart-start attempt={}", attempt);
+                                    std::thread::sleep(std::time::Duration::from_secs(*wait_secs));
+                                    let params = runtime_handle.block_on(manager_restart.last_params.lock(),);
+                                    let params = params.clone();
+                                    let result = match params {
+                                        Some(p) => runtime_handle.block_on(
+                                            manager_restart.start(
+                                                p.wake_words,
+                                                p.use_vosk,
+                                                p.model_dir,
+                                                app_handle_restart.clone(),
+                                                p.input_device,
+                                                p.output_device,
+                                            ),
+                                        ),
+                                        None => Err(anyhow!("sin parametros de arranque")),
+                                    };
+                                    match result {
+                                        Ok(()) => {
+                                            ok = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[apollo] sidecar-restart attempt={} failed: {e:#}",
+                                                attempt
+                                            );
+                                        }
+                                    }
+                                }
+                                manager_restart.restarting.store(false, Ordering::SeqCst);
+                                if ok {
+                                    app_handle_restart.emit("sidecar-restart-ok", ()).ok();
+                                    eprintln!("[apollo] sidecar-restart-ok");
+                                } else if !aborted {
+                                    app_handle_restart.emit("sidecar-restart-failed", ()).ok();
+                                    eprintln!("[apollo] sidecar-restart-failed (3 intentos)");
+                                }
+                            });
+                        }
+                    }
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -324,6 +559,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        self.expect_exit.store(true, Ordering::SeqCst);
         *self.stdin.lock().await = None;
         let mut child_lock = self.child.lock().await;
         if let Some(mut child) = child_lock.take() {
@@ -447,5 +683,20 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
             "juana-client not found. Expected at one of: {:?}",
             candidates
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_backoff_is_bounded() {
+        // Politica de restart tras crash: 3 intentos con backoff creciente,
+        // nunca loop infinito.
+        assert_eq!(SIDECAR_RESTART_BACKOFFS.len(), 3);
+        assert_eq!(SIDECAR_RESTART_BACKOFFS, [2, 5, 10]);
+        let total: u64 = SIDECAR_RESTART_BACKOFFS.iter().sum();
+        assert!(total <= 30, "restart total espera acotada");
     }
 }

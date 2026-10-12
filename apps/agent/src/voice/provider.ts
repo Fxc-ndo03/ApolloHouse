@@ -122,9 +122,7 @@ export function isLlmQuotaCooldownActive(
   if (failedAt === undefined) {
     return false;
   }
-  return (
-    nowMilliseconds - failedAt < resolveLlmQuotaCooldownMilliseconds(environment)
-  );
+  return nowMilliseconds - failedAt < resolveLlmQuotaCooldownMilliseconds(environment);
 }
 
 const fallbackChatCompletionResponseSchema = z.object({
@@ -202,13 +200,25 @@ export async function chatWithFallbackLlm(input: {
   readonly onTextDelta?: (deltaText: string) => void;
   readonly fetchImplementation?: typeof fetch;
   readonly fetchTimeoutMilliseconds?: number;
+  readonly request_id?: string;
 }): Promise<GeminiChatResult> {
+  const requestId = input.request_id ?? 'unknown';
+  const geminiStartMs = Date.now();
   const baseUrl = (input.environment.LLM_FALLBACK_BASE_URL ?? '').replace(/\/$/, '');
   const apiKey = input.environment.LLM_FALLBACK_API_KEY ?? '';
   const modelId = input.environment.LLM_FALLBACK_MODEL ?? '';
   if (baseUrl.length === 0 || apiKey.length === 0 || modelId.length === 0) {
     throw new Error('LLM_FALLBACK no configurado');
   }
+
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] fallback_llm_start',
+      request_id: requestId,
+      modelId,
+    }),
+  );
 
   const toolPayload =
     input.toolDefinitionList !== undefined && input.toolDefinitionList.length > 0
@@ -280,6 +290,17 @@ export async function chatWithFallbackLlm(input: {
   );
 
   if (text.length > 0) input.onTextDelta?.(text);
+  const fallbackElapsedMs = Date.now() - geminiStartMs;
+  console.log(
+    JSON.stringify({
+      level: 'debug',
+      message: '[worker-debug] fallback_llm_end',
+      request_id: requestId,
+      elapsedMs: fallbackElapsedMs,
+      textLength: text.length,
+      toolCallCount: toolCallList.length,
+    }),
+  );
   return { text, toolCallList };
 }
 
@@ -291,9 +312,7 @@ function readRequiredList(parameters: unknown): readonly string[] {
   if (!Array.isArray(required)) {
     return [];
   }
-  return required.filter(
-    (entry: unknown): entry is string => typeof entry === 'string',
-  );
+  return required.filter((entry: unknown): entry is string => typeof entry === 'string');
 }
 
 function stripDisallowedNullArgs(
@@ -336,10 +355,7 @@ export async function transcribeWithFallbackStt(input: {
 
   const wavBuffer = wrapPcmAsWavBuffer({ pcmBuffer: input.audioBuffer });
   const requestForm = new FormData();
-  requestForm.append(
-    'file',
-    new File([wavBuffer], 'audio.wav', { type: 'audio/wav' }),
-  );
+  requestForm.append('file', new File([wavBuffer], 'audio.wav', { type: 'audio/wav' }));
   requestForm.append('model', FALLBACK_STT_MODEL_ID);
   requestForm.append('language', 'es');
 

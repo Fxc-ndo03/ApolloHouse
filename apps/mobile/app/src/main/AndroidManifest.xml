@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Sin atributo `package`: desde AGP 8 el namespace se declara en
+     app/build.gradle y el atributo del manifiesto es un error. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- POST_NOTIFICATIONS solo se pide en API 33+; en API 25 el permiso no
+         existe y el manifiesto lo ignora. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- BLOCK 12.5.2: el par que exige Android para el foreground service. Son
+         permisos normales (se conceden en la instalacion, nadie los revoca) y
+         no habilitan nada por si solos: FOREGROUND_SERVICE permite el estado,
+         FOREGROUND_SERVICE_SPECIAL_USE permite ese TIPO en API 34+. Sin el
+         segundo, startForeground lanza SecurityException en el Moto G35. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <application
+        android:name=".ApolloApplication"
+        android:allowBackup="false"
+        android:label="Apollo"
+        android:supportsRtl="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!--
+          Conversacion con Apollo. `exported=false`: nadie fuera de la app puede
+          abrirla ni inyectarle un intent. El launcher sigue siendo MainActivity,
+          que es la pantalla de conexion y enrollment.
+        -->
+        <activity
+            android:name=".conversation.ConversationActivity"
+            android:exported="false"
+            android:label="Apollo"
+            android:windowSoftInputMode="adjustResize" />
+        <service
+            android:name=".MobileService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <!-- La declaracion de subtipo que API 34+ exige para specialUse.
+                 "persistent_agent_session" describe el uso real: sostener el
+                 socket con el Worker mientras la app no esta visible. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="persistent_agent_session" />
+        </service>
+        <!-- BLOCK 12.4: el receptor de la alarma NO estaba declarado. El Intent
+             del PendingIntent apuntaba a una clase que el sistema no conocia, asi
+             que la alarma se programaba, `setAlarm` devolvia true y no pasaba
+             nada. Declararlo es lo que hace que el timer funcione; `exported`
+             es obligatorio desde targetSdk 31 y va en false porque solo lo
+             dispara el AlarmManager de esta misma app. -->
+        <receiver
+            android:name=".notification.AlarmBroadcast"
+            android:exported="false" />
+    </application>
+
+</manifest>

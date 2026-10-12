@@ -1,0 +1,92 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    // AGP 8 toma el namespace de acá, no del atributo `package` del manifiesto:
+    // con el AGP viejo el `package` del manifiesto era obligatorio y ahora es un
+    // error. Mismo valor, otra casa.
+    namespace = 'com.apollo.mobile'
+    // compileSdk elige qué APIs existen AL COMPILAR. No cambia qué corre en el
+    // teléfono: de eso decidiran minSdk y targetSdk, que acá no se tocan.
+    compileSdk 36
+
+    // BLOCK 12.5.2: hace falta `BuildConfig.DEBUG` para que la exception de
+    // transporte local quede atada a la variante de build y no a un flag que
+    // alguien pueda olvidar en release. AGP 8 dejo de generar `BuildConfig` por
+    // omision, asi que hay que pedirlo explicitamente.
+    buildFeatures {
+        buildConfig = true
+    }
+
+    defaultConfig {
+        applicationId 'com.apollo.mobile'
+        // Sin cambio: Android 7.1 sigue siendo el piso, y el Moto G35 5G entra
+        // por acá sin problema porque 25 <= cualquier API actual.
+        minSdkVersion 25
+        // BLOCK 12.4: 25 -> 36. Lo que desbloquea y lo que costó:
+        //
+        //   31  PendingIntent debe declarar mutabilidad. Crash sin el flag.
+        //        Resuelto con FLAG_IMMUTABLE (inmutable: el Intent lo arma la
+        //        propia app, no hay actor externo que lo complete).
+        //   33  POST_NOTIFICATIONS pasa a permiso de runtime. Antes el permiso
+        //        nunca se pedia y `post` devolvia true sin mostrar nada.
+        //        Resuelto: se pide desde MainActivity y `post` consulta
+        //        areNotificationsEnabled() antes de reportar exito.
+        //   35  Edge-to-edge obligatorio: el contenido se dibuja debajo de las
+        //        barras. Resuelto aplicando los insets al layout raiz.
+        //   36  Sin cambios adicionales que apliquen a esta app.
+        //
+        // Lo que NO se subio y sigue igual, a proposito:
+        //   - No hay foreground service, asi que no aplican los tipos de API 34
+        //     ni el timeout de `dataSync` de API 35. Ver MobileService.
+        //   - `android:exported` ya estaba en todos los componentes, y el
+        //     receptor de la alarma que se agrega lo declara en false.
+        targetSdkVersion 36
+        versionCode 1
+        versionName '0.1.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+// Kotlin 2.x deprecó el bloque `kotlinOptions` a favor de `compilerOptions`, así
+// que el jvmTarget se declara en el DSL nuevo. Sigue siendo 1.8 para no cambiar
+// el bytecode que produce la app.
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
+    }
+}
+
+dependencies {
+    // `kotlin-stdlib-jdk7` dejó de publicarse después de Kotlin 1.8: el JDK 7 ya
+    // está dentro del stdlib. Con KGP 2.2 el stdlib lo agrega el plugin solo.
+    implementation 'androidx.core:core:1.13.1'
+    // minSdk 25 no tiene canales de notificacion (nacieron en API 26) y
+    // POST_NOTIFICATIONS no existe hasta API 33: NotificationCompat es la unica
+    // forma de cubrir 25..actual con un solo camino de codigo.
+    // La app no usa nada de appcompat hoy (MainActivity extiende de
+    // android.app.Activity y no hay res/ ni temas), pero se conserva la
+    // dependencia en vez de borrarla: quitarla es limpieza y no toolchain.
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // OkHttp 3.14 es la primera linea con soporte WSS en Android 5+; Android 7.1
+    // no trae cliente WebSocket en el framework. Se deja en 3.14.9 a proposito:
+    // tocarlo seria cambiar el transporte, no el build.
+    implementation 'com.squareup.okhttp3:okhttp:3.14.9'
+    testImplementation 'junit:junit:4.13.2'
+    // org.json viene stubbeado en el android.jar de unit tests; el artefacto real
+    // hace que el parser del cliente se pruebe de verdad y no contra nulls.
+    testImplementation 'org.json:json:20231013'
+}

@@ -1,0 +1,34 @@
+// Gradle 8.13 + AGP 8.13 + Kotlin 2.2: toolchain mantenido, que corre sobre el
+// JDK 17+ instalado sin flags manuales `--add-opens` ni forks de JVM con opciones.
+//
+// Sigue sin subirse a Jetpack Compose: eso sí decide qué se puede escribir, y
+// sublo sería un rediseño, no una actualización de toolchain.
+//
+// El comentario anterior de este archivo decía que no se subía el AGP "porque el
+// dispositivo objetivo no lo soporta". Eso era falso y salía caro: el AGP es una
+// herramienta de COMPILACIÓN, no algo que corra en el teléfono. Lo que decide qué
+// dispositivos corren la app es `minSdk`, no el AGP. Con el AGP viejo el build no
+// levantaba sobre el JDK del proyecto y los tests había que correrlos a mano con
+// flags de JVM.
+buildscript {
+    ext.kotlin_version = '2.2.20'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

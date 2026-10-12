@@ -5,6 +5,11 @@ interface Env {
   Sandbox?: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
   Apollo: DurableObjectNamespace<import('@/agents/apollo').Apollo>;
   PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
+  MobileBridge: DurableObjectNamespace<import('@/agents/mobile-bridge').MobileBridge>;
+  // Ausente en toda deployment real: sólo lo prende el harness de tests.
+  MOBILE_SESSION_INSPECTOR?: string;
+  // Ausente en toda deployment real: sólo lo prende el harness de tests.
+  APOLLO_TOOL_HARNESS?: string;
   DEVICE_SHARED_SECRET: string;
   DASHBOARD_SHARED_SECRET: string;
   GEMINI_API_KEY: string;
@@ -44,6 +49,11 @@ declare namespace Cloudflare {
     Sandbox?: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
     Apollo: DurableObjectNamespace<import('@/agents/apollo').Apollo>;
     PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
+    MobileBridge: DurableObjectNamespace<import('@/agents/mobile-bridge').MobileBridge>;
+    // Ausente en toda deployment real: sólo lo prende el harness de tests.
+    MOBILE_SESSION_INSPECTOR?: string;
+    // Ausente en toda deployment real: sólo lo prende el harness de tests.
+    APOLLO_TOOL_HARNESS?: string;
     DEVICE_SHARED_SECRET: string;
     DASHBOARD_SHARED_SECRET: string;
     GEMINI_API_KEY: string;

@@ -43,12 +43,15 @@ import {
   type BroadcastUploadSession,
 } from '@/broadcast/logic';
 import {
-  DEVICE_CONNECTION_TAG,
-  PC_VISUAL_CONNECTION_TAG,
-  hasDeviceConnectionTag,
-  resolveApolloConnectionRole,
-} from '@/auth/role';
-import { isDeviceSharedSecretValid } from '@/auth/token';
+    DEVICE_CONNECTION_TAG,
+    PC_VISUAL_CONNECTION_TAG,
+    ENROLLED_DEVICE_CONNECTION_TAG,
+    hasDeviceConnectionTag,
+    hasEnrolledDeviceConnectionTag,
+    resolveApolloConnectionRole,
+  } from '@/auth/role';
+import { isDeviceSharedSecretValid, readBearerCredentialFromRequest } from '@/auth/token';
+import { isDeviceCredentialShaped } from '@/devices/enrollment';
 import {
   mapSessionMessagesToConsoleHistory,
   mapThreadCatalogToConsoleThreadList,
@@ -121,6 +124,20 @@ import {
 } from '@/mcp/bridge';
 import { buildMcpOauthLandingResponse } from '@/mcp/landing';
 import { buildNamespacedMcpToolName } from '@/mcp/naming';
+import { resolveCapabilityForToolName } from '@/tools/capability-index';
+import { buildCapabilityTimingLogLine } from '@/devices/events';
+import { buildCapabilityTargetResolver } from '@/devices/resolve';
+import { loadReachableCapabilitySnapshotFromBridge } from '@/devices/exposure';
+import {
+  APOLLO_TOOL_HARNESS_PATH,
+  buildApolloToolHarnessDisabledResponse,
+  isApolloToolHarnessRequest,
+  readApolloToolHarnessRequest,
+  type ApolloToolHarnessRequest,
+} from '@/devices/harness';
+import { executeToolWithTargetResolution } from '@/tools/target';
+import { buildToolDefinitionMap } from '@/tools/router';
+import { listBuiltinToolDefinitionList } from '@/tools/catalog';
 import {
   buildInstalledMcpServerSummaryList,
   buildTurnToolDefinitionMap,
@@ -227,6 +244,7 @@ import {
 } from '@/tools/pending';
 import type {
   DeskToolEffects,
+  JsonSerializableValue,
   PendingToolConfirmation,
   ToolDefinition,
   ToolExecutionResult,
@@ -255,6 +273,9 @@ const MINIMUM_TURN_AUDIO_BYTE_LENGTH = 8000;
 const LOW_BATTERY_ANNOUNCE_PREFERENCE_KEY = 'lowBatteryLastAnnounceAt';
 const TELEMETRY_SNAPSHOT_PREFERENCE_KEY = 'lastTelemetrySnapshot';
 const INITIATIVE_STATE_PREFERENCE_KEY = 'initiativeState';
+
+/** El `MobileBridge` es un DO compartido: todas las sesiones Moviles van al mismo. */
+const MOBILE_BRIDGE_INSTANCE_NAME = 'mobile';
 
 type McpSecretInput = z.infer<typeof mcpSecretInputSchema>;
 type RemoveMcpServerInput = z.infer<typeof removeMcpServerInputSchema>;
@@ -451,9 +472,24 @@ export class Apollo extends Agent<Env, ApolloState> {
         tool_name TEXT NOT NULL,
         args_json TEXT NOT NULL,
         summary TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        target_device_id TEXT,
+        target_device_type TEXT
       )
     `;
+    // BLOCK 6: la confirmación recuerda el device elegido. Las instalaciones
+    // existentes ya tienen la tabla sin estas columnas; add es idempotente por
+    // error de columna duplicada.
+    for (const addTargetColumnStatement of [
+      'ALTER TABLE pending_confirmations ADD COLUMN target_device_id TEXT',
+      'ALTER TABLE pending_confirmations ADD COLUMN target_device_type TEXT',
+    ]) {
+      try {
+        this.#sqlExecutor().execute(addTargetColumnStatement);
+      } catch {
+        // La columna ya existe: la migración es idempotente.
+      }
+    }
     // The SDK owns the server rows in cf_agents_mcp_servers; which of their
     // tools Apollo may actually call is ours.
     void this.sql`
@@ -783,11 +819,73 @@ export class Apollo extends Agent<Env, ApolloState> {
     _connection: Connection,
     connectionContext: ConnectionContext,
   ): Promise<string[]> {
+    // Un nodo enrolado lleva su credencial en `Authorization: Bearer`, nunca en
+    // `?token=`. Se verifica contra la tabla que vive en el MobileBridge y se
+    // exige que la identidad resuelta sea la duena de esta instancia.
+    const enrolledResolution = await this.#readEnrolledDeviceResolution(
+      connectionContext.request,
+    );
+    if (enrolledResolution !== null) {
+      const ownsThisInstance =
+        enrolledResolution.deviceId !== null &&
+        this.#isOwnDeviceInstance(enrolledResolution.deviceId);
+      const hasLegacyRole = enrolledResolution.status === 'valid' && ownsThisInstance;
+      return hasLegacyRole
+        ? [ENROLLED_DEVICE_CONNECTION_TAG, DEVICE_CONNECTION_TAG]
+        : [ENROLLED_DEVICE_CONNECTION_TAG];
+    }
+    // Legacy: Desktop y telefonos sin enrolar viajan con el secreto global en
+    // `?token=`. No se coarta: la ruta `/agents/apollo/default` ni la config del
+    // PC se cambian.
     const connectionRole = await resolveApolloConnectionRole(
       new URL(connectionContext.request.url),
       this.env,
     );
     return connectionRole === null ? [] : [connectionRole];
+  }
+
+  /**
+   * Si el `Apollo` actual es el DO de esa identidad.
+   *
+   * Compara IDs, no strings: `idFromName` es la única forma de saber qué
+   * instancia representa un nombre, y comparar los nombres sería tautológico
+   * (el nombre viene de la URL, que es lo que hay que verificar).
+   */
+  #isOwnDeviceInstance(deviceId: string): boolean {
+    const expectedInstanceId = this.env.Apollo.idFromName(deviceId);
+    return expectedInstanceId.equals(this.ctx.id);
+  }
+
+  /**
+   * Identidad y estado de un nodo enrolado, deducidos sólo de su credencial.
+   *
+   * Devuelve `null` cuando no hay credencial individual: eso es el camino del
+   * escritorio y lo resuelve `resolveApolloConnectionRole`.
+   */
+  async #readEnrolledDeviceResolution(request: Request): Promise<{
+    readonly status: 'valid' | 'rejected' | 'unavailable';
+    readonly deviceId: string | null;
+    readonly reason: string | null;
+  } | null> {
+    const credential = readBearerCredentialFromRequest(request);
+    if (credential === null) {
+      return null;
+    }
+    const verification = await this.#verifyCredentialThroughBridge(credential);
+    return verification;
+  }
+
+  /**
+   * La credencial se verifica contra el `MobileBridge`, que es donde está la
+   * tabla. Es una llamada por stub del runtime, sin HTTP y sin ruta pública.
+   */
+  async #verifyCredentialThroughBridge(credential: string): Promise<{
+    readonly deviceId: string | null;
+    readonly status: 'valid' | 'rejected' | 'unavailable';
+    readonly reason: string | null;
+  }> {
+    const bridgeStub = this.env.MobileBridge.getByName(MOBILE_BRIDGE_INSTANCE_NAME);
+    return bridgeStub.verifyEnrolledDeviceIdentity({ credential });
   }
 
   // The SDK's own frames are not part of the Apollo protocol, and the firmware
@@ -803,6 +901,23 @@ export class Apollo extends Agent<Env, ApolloState> {
     connection: Connection,
     connectionContext: ConnectionContext,
   ): Promise<void> {
+    // El nodo enrolado abre la ruta con su credencial individual, que el borde
+    // ya dejó pasar por tener la forma. La verificación estricta es acá: si no
+    // es válida, fue revocada o no resuelve una identidad, no entra.
+    const enrolledResolution = await this.#readEnrolledDeviceResolution(connectionContext.request);
+    if (enrolledResolution !== null) {
+      if (enrolledResolution.status !== 'valid' || enrolledResolution.deviceId === null) {
+        connection.close(1008, 'credential_rejected');
+        return;
+      }
+      // Y debe ser la dueña de ESTA instancia: sin ese chequeo un movil con
+      // credencial valida entraria al Apollo de otro escribiendo su deviceId en
+      // la URL. Es lo que impide el acceso cruzado entre dispositivos.
+      if (!this.#isOwnDeviceInstance(enrolledResolution.deviceId)) {
+        connection.close(1008, 'device_identity_mismatch');
+        return;
+      }
+    }
     await this.#ensurePreferencesLoaded();
     // Everything below replays desk session state to the arriving client, and
     // the pending-message flush *consumes* what it sends. A dashboard taking
@@ -844,7 +959,11 @@ export class Apollo extends Agent<Env, ApolloState> {
     // own screen. None of it means anything from a browser, and honoring it
     // would let one desynchronize the desk. The SDK dispatches @callable RPC
     // and state sync before this runs, so the dashboard keeps both.
-    if (!hasDeviceConnectionTag(connection.tags)) {
+    //
+    // `enrolled_device` entra acá SOLO si su identidad es la duena de este
+    // `Apollo`: `onConnect` ya cerro con 1008 a los que no lo eran, asi que
+    // llegar con ese tag implica haber pasado el chequeo.
+    if (!hasDeviceConnectionTag(connection.tags) && !hasEnrolledDeviceConnectionTag(connection.tags)) {
       return;
     }
 
@@ -912,7 +1031,14 @@ export class Apollo extends Agent<Env, ApolloState> {
         break;
       }
       case 'text_input': {
-        await this.#runTurnFromText(connection, deviceMessage.text);
+        await this.#runTurnFromText(
+          connection,
+          deviceMessage.text,
+          deviceMessage.tts,
+          deviceMessage.request_id,
+          deviceMessage.client_turn_id,
+          deviceMessage.generation,
+        );
         break;
       }
       case 'abort': {
@@ -961,6 +1087,119 @@ export class Apollo extends Agent<Env, ApolloState> {
         break;
       }
     }
+  }
+
+  // BLOCK 9.1/9.2: corre el camino de PRODUCCIÓN de una tool —mismo pipeline,
+  // mismo resolver, mismo catálogo— para poder verificarlo contra workerd real
+  // sin el LLM.
+  //
+  // NO es un @callable: no está en el RPC del WebSocket, así que ningún cliente
+  // de device puede invocarlo aunque tenga la conexión abierta. Se atiende acá,
+  // en el fetch del DO, y sólo si el servidor tiene la condición test-only
+  // prendida. En una deployment real la superficie no existe.
+  override async fetch(request: Request): Promise<Response> {
+    const requestUrl = new URL(request.url);
+    if (requestUrl.pathname.endsWith(`/${APOLLO_TOOL_HARNESS_PATH}`)) {
+      // Sin la condicion test-only la superficie NO existe: 404, no 403. Y
+      // nunca se atiende por WebSocket, asi que ningun device conectado puede
+      // alcanzarlo aunque tenga la sesion abierta.
+      const isHarnessRequest = isApolloToolHarnessRequest({
+        pathname: requestUrl.pathname,
+        upgradeHeader: request.headers.get('Upgrade'),
+        environment: this.env,
+      });
+      if (!isHarnessRequest) {
+        return buildApolloToolHarnessDisabledResponse();
+      }
+      const harnessRequest = readApolloToolHarnessRequest(await request.text());
+      if (harnessRequest.status !== 'parsed' || harnessRequest.request === undefined) {
+        return Response.json({ status: 'invalid_request' }, { status: 400 });
+      }
+      return Response.json(await this.#runToolForHarness(harnessRequest.request), {
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+    return super.fetch(request);
+  }
+
+  // El harness NO puede tocar la resolución ni la autorización: llama al mismo
+  // pipeline que un turno. Por eso no expone capability, ni deviceId, ni una
+  // forma de saltear pasos.
+  async #runToolForHarness(request: ApolloToolHarnessRequest): Promise<{
+    readonly status: 'ran';
+    readonly outcome: string;
+    readonly ok?: boolean;
+    readonly summary?: string;
+    readonly capabilityName?: string | null;
+    readonly targetDeviceId?: string | null;
+    readonly targetDeviceType?: string | null;
+  }> {
+    const toolDefinitionMap = buildToolDefinitionMap(listBuiltinToolDefinitionList());
+    const correlation = {
+      requestId: request.correlation?.requestId ?? crypto.randomUUID(),
+      clientTurnId: request.correlation?.clientTurnId ?? null,
+      generation: request.correlation?.generation ?? null,
+    };
+    // BLOCK 11 §21: el harness es el único camino que corre el pipeline real
+    // fuera de un turno de voz, así que es donde se pueden medir las etapas
+    // (resolución de capability, autorización, ejecución) sin inventar números.
+    const pipelineStartMs = Date.now();
+    // La capability se resuelve ANTES de la llamada: dentro de onTiming no se
+    // puede leer `pipelineOutcome` porque todavía no está inicializado.
+    const harnessCapabilityName = resolveCapabilityForToolName(
+      toolDefinitionMap,
+      request.toolName,
+    );
+    const pipelineOutcome = await executeToolWithTargetResolution({
+      toolName: request.toolName,
+      args: (request.args ?? {}) as JsonSerializableValue,
+      origin: 'llm',
+      toolDefinitionMap,
+      context: { environment: this.env, nowMilliseconds: Date.now() },
+      resolver: buildCapabilityTargetResolver(this.env),
+      correlation,
+      onTiming: (timing) => {
+        console.log(
+          buildCapabilityTimingLogLine({
+            requestId: correlation.requestId,
+            clientTurnId: correlation.clientTurnId,
+            generation: correlation.generation,
+            toolName: request.toolName,
+            capabilityName: harnessCapabilityName ?? null,
+            timing,
+            routingMs: 0,
+            totalActionMs: Date.now() - pipelineStartMs,
+          }),
+        );
+      },
+    });
+    if (pipelineOutcome.status === 'skipped') {
+      return {
+        status: 'ran',
+        outcome: 'skipped',
+        ok: false,
+        summary: pipelineOutcome.cancellation.message,
+        capabilityName: pipelineOutcome.capabilityName ?? null,
+      };
+    }
+    if (pipelineOutcome.status === 'needs_confirm') {
+      return {
+        status: 'ran',
+        outcome: 'needs_confirm',
+        capabilityName: pipelineOutcome.capabilityName ?? null,
+        targetDeviceId: pipelineOutcome.target?.deviceId ?? null,
+        targetDeviceType: pipelineOutcome.target?.deviceType ?? null,
+      };
+    }
+    return {
+      status: 'ran',
+      outcome: 'done',
+      ok: pipelineOutcome.result.ok,
+      summary: pipelineOutcome.result.summary,
+      capabilityName: pipelineOutcome.capabilityName ?? null,
+      targetDeviceId: pipelineOutcome.target?.deviceId ?? null,
+      targetDeviceType: pipelineOutcome.target?.deviceType ?? null,
+    };
   }
 
   @callable()
@@ -2484,9 +2723,28 @@ export class Apollo extends Agent<Env, ApolloState> {
     });
   }
 
-  async #runTurnFromText(connection: Connection, text: string): Promise<void> {
+  async #runTurnFromText(
+    connection: Connection,
+    text: string,
+    ttsConfig?: {
+      provider?: string;
+      voice?: string;
+      language?: string;
+      engine?: string;
+      speed?: number;
+    },
+    requestId?: string,
+    clientTurnId?: string,
+    generation?: number,
+  ): Promise<void> {
     this.#applyUiEvent('START_LISTEN');
-    await this.#executeTurn(connection, { text });
+    await this.#executeTurn(connection, {
+      text,
+      ttsConfig,
+      requestId,
+      clientTurnId,
+      generation,
+    });
   }
 
   async #runTurnFromAudio(connection: Connection): Promise<void> {
@@ -2545,6 +2803,16 @@ export class Apollo extends Agent<Env, ApolloState> {
       readonly audioBuffer?: ArrayBuffer;
       readonly confirmOk?: boolean;
       readonly pendingConfirmation?: PendingToolConfirmation;
+      readonly ttsConfig?: {
+        provider?: string;
+        voice?: string;
+        language?: string;
+        engine?: string;
+        speed?: number;
+      };
+      readonly requestId?: string;
+      readonly clientTurnId?: string;
+      readonly generation?: number;
     },
   ): Promise<void> {
     const deviceId = this.name ?? 'default';
@@ -2635,8 +2903,6 @@ export class Apollo extends Agent<Env, ApolloState> {
       },
     });
 
-    const toolDefinitionMap = await this.#buildTurnToolDefinitionMap(deskToolEffects);
-
     try {
       await executeApolloTurn(
         connection,
@@ -2660,7 +2926,15 @@ export class Apollo extends Agent<Env, ApolloState> {
           session: this.session,
           deviceId,
           effects: deskToolEffects,
-          toolDefinitionMap,
+          loadToolDefinitionMap: () => this.#buildTurnToolDefinitionMap(deskToolEffects),
+          // BLOCK 6: el runtime no habla con PcBridge para elegir device;
+          // pregunta al registry que vive ahí y recibe sólo un target.
+          resolveCapabilityTarget: buildCapabilityTargetResolver(this.env),
+          // BLOCK 11 §11/§13: una sola llamada al MobileBridge por turno LLM
+          // para saber qué devices hay. El runtime decide si filtra el catálogo
+          // y si agrega el contexto cross-device.
+          loadReachableCapabilitySnapshot: () =>
+            loadReachableCapabilitySnapshotFromBridge(this.env),
           isSpeechAborted: () => this.#isSpeechAborted,
           allocateTtsSequence: () => {
             this.#ttsSequence += 1;
@@ -2777,8 +3051,16 @@ export async function authorizeApolloConnection(
     new URL(request.url),
     environment,
   );
-  if (connectionRole === null) {
-    return new Response('Unauthorized', { status: 401 });
+  if (connectionRole !== null) {
+    return undefined;
   }
-  return undefined;
+  // Un nodo enrolado no lleva `?token=`: lleva su credencial individual en
+  // `Authorization: Bearer`. El borde sólo comprueba que la forma sea válida;
+  // la verificación real (¿es válida? ¿es de ESTA instancia?) no puede hacerse
+  // acá porque el destino DO aún no está resuelto en este punto.
+  const credential = readBearerCredentialFromRequest(request);
+  if (credential !== null && isDeviceCredentialShaped(credential)) {
+    return undefined;
+  }
+  return new Response('Unauthorized', { status: 401 });
 }

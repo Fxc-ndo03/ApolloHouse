@@ -15,8 +15,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: path.resolve(__dirname, 'index.html'),
-        chat: path.resolve(__dirname, 'chat.html'),
-        settings: path.resolve(__dirname, 'settings.html'),
       },
     },
   },

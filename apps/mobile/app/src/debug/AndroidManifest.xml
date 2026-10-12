@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BLOCK 12.5.2: cleartext SOLO en la variante debug.
+
+  Va en `src/debug/`, no en el principal, y esa ubicacion es la garantia: AGP
+  fusiona `src/debug` unicamente al compilar `debug`, asi que la variante
+  release nunca lo ve. No hace falta `tools:replace` porque el manifiesto
+  principal nunca declara `usesCleartextTraffic` ni `networkSecurityConfig`:
+  no hay conflicto que resolver.
+
+  Con `targetSdk 36` Android veta el trafico en claro por omision. El Worker
+  local de Wrangler habla HTTP plano en el 8799, y el tunel USB
+  (`adb reverse tcp:8799 tcp:8799`) hace que ese 127.0.0.1 sea el del telefono.
+  Sin esta excepcion el enrollment local falla con
+  `CLEARTEXT communication not permitted`.
+
+  Y no se abre en general: `base-config` deja el cleartext en `false` para todo,
+  y el `domain-config` lo habilita solo para loopback. Cualquier otro host,
+  incluso en esta build de debug, sigue exigiendo TLS.
+
+  Este archivo es la segunda mitad de la garantia; la primera es
+  `resolveIsSecureTransport`, que en codigo solo baja a `http` si la build es
+  debug Y el host es loopback. Las dos deben coincidir para que funcione.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+
+</manifest>

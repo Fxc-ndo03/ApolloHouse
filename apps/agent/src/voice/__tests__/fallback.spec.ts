@@ -25,9 +25,7 @@ function buildStreamFromChunkList(chunkList: readonly Uint8Array[]) {
   });
 }
 
-function createModelBinding(
-  handleCall: (call: RecordedModelCall) => Promise<unknown>,
-) {
+function createModelBinding(handleCall: (call: RecordedModelCall) => Promise<unknown>) {
   const callList: RecordedModelCall[] = [];
   return {
     callList,
@@ -116,19 +114,15 @@ describe('synthesizeWithWorkersAi', () => {
   });
 
   it('throws on empty text', async () => {
-    const { binding } = createModelBinding(async () =>
-      buildStreamFromChunkList([]),
-    );
+    const { binding } = createModelBinding(async () => buildStreamFromChunkList([]));
     const environment = createFakeApolloEnvironment({ AI: binding });
-    await expect(
-      synthesizeWithWorkersAi({ text: '   ', environment }),
-    ).rejects.toThrow('texto vacío');
+    await expect(synthesizeWithWorkersAi({ text: '   ', environment })).rejects.toThrow(
+      'texto vacío',
+    );
   });
 
   it('throws on empty audio from MeloTTS', async () => {
-    const { binding } = createModelBinding(async () =>
-      buildStreamFromChunkList([]),
-    );
+    const { binding } = createModelBinding(async () => buildStreamFromChunkList([]));
     const environment = createFakeApolloEnvironment({ AI: binding });
     await expect(
       synthesizeWithWorkersAi({

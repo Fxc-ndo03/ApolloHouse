@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { buildCapabilityExecutionTarget } from '@/tools/execution-target';
 import type {
   JsonSerializableValue,
   ToolDefinition,
@@ -74,6 +75,7 @@ async function callPcBridge(
 }
 
 export const openPcAppTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.open_app'),
   name: 'open_pc_app',
   safety: 'safe',
   description:
@@ -83,11 +85,13 @@ export const openPcAppTool: ToolDefinition = {
     properties: {
       appName: {
         type: 'string',
-        description: 'Nombre de la aplicación, en español o inglés (ej: "bloc de notas", "navegador", "notepad", "spotify")',
+        description:
+          'Nombre de la aplicación, en español o inglés (ej: "bloc de notas", "navegador", "notepad", "spotify")',
       },
       args: {
         type: 'string',
-        description: 'Argumentos opcionales para la aplicación (ej: una URL para el navegador)',
+        description:
+          'Argumentos opcionales para la aplicación (ej: una URL para el navegador)',
       },
     },
     required: ['appName'],
@@ -104,6 +108,7 @@ export const openPcAppTool: ToolDefinition = {
 };
 
 export const focusPcAppTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.focus_app'),
   name: 'focus_pc_app',
   safety: 'safe',
   description: 'Enfoca (trae al frente) una aplicación ya abierta en la PC principal.',
@@ -126,6 +131,7 @@ export const focusPcAppTool: ToolDefinition = {
 };
 
 export const closePcAppTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.close_app'),
   name: 'close_pc_app',
   safety: 'unsafe',
   description: 'Cierra una aplicación en la PC principal.',
@@ -152,6 +158,7 @@ export const closePcAppTool: ToolDefinition = {
 };
 
 export const lockPcScreenTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.lock'),
   name: 'lock_pc_screen',
   safety: 'unsafe',
   description: 'Bloquea la pantalla de la PC principal (Win+L).',
@@ -167,6 +174,7 @@ export const lockPcScreenTool: ToolDefinition = {
 };
 
 export const listPcAppsTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.list_apps'),
   name: 'list_pc_apps',
   safety: 'safe',
   description: 'Lista las aplicaciones en ejecución en la PC principal.',
@@ -181,6 +189,7 @@ export const listPcAppsTool: ToolDefinition = {
 };
 
 export const spotifyPlayTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.spotify'),
   name: 'spotify_play',
   safety: 'safe',
   description: 'Reproduce/pausa Spotify en la PC principal.',
@@ -195,6 +204,7 @@ export const spotifyPlayTool: ToolDefinition = {
 };
 
 export const spotifyPauseTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.spotify'),
   name: 'spotify_pause',
   safety: 'safe',
   description: 'Pausa Spotify en la PC principal.',
@@ -209,6 +219,7 @@ export const spotifyPauseTool: ToolDefinition = {
 };
 
 export const spotifyNextTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.spotify'),
   name: 'spotify_next',
   safety: 'safe',
   description: 'Pista siguiente en Spotify.',
@@ -223,6 +234,7 @@ export const spotifyNextTool: ToolDefinition = {
 };
 
 export const spotifyPreviousTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.spotify'),
   name: 'spotify_previous',
   safety: 'safe',
   description: 'Pista anterior en Spotify.',
@@ -237,6 +249,7 @@ export const spotifyPreviousTool: ToolDefinition = {
 };
 
 export const spotifyGetStateTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.spotify'),
   name: 'spotify_get_state',
   safety: 'safe',
   description: 'Obtiene el estado actual de Spotify (pista, artista, reproduciendo).',
@@ -251,6 +264,7 @@ export const spotifyGetStateTool: ToolDefinition = {
 };
 
 export const braveSearchTool: ToolDefinition = {
+  executionTarget: buildCapabilityExecutionTarget('desktop.brave_search'),
   name: 'brave_search',
   safety: 'safe',
   description:
@@ -258,7 +272,10 @@ export const braveSearchTool: ToolDefinition = {
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Texto a buscar (lo que sigue a "buscar" o "navegador")' },
+      query: {
+        type: 'string',
+        description: 'Texto a buscar (lo que sigue a "buscar" o "navegador")',
+      },
     },
     required: ['query'],
   },

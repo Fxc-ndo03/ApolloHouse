@@ -87,7 +87,7 @@ describe('runDeskTurn', () => {
 
     expect(output.spokenText).toContain('mate');
     expect(output.uiEventList).toContain('START_SPEAK');
-    expect(output.ttsAudio).toBeDefined();
+    expect(await output.ttsAudioPromise).toBeDefined();
     // The model always knows what time it is: the wall clock rides the prompt.
     expect(capturedSystemPrompt).toContain('Fecha y hora actual:');
   });
@@ -291,6 +291,52 @@ describe('runDeskTurn', () => {
     expect(output.uiEventList).toContain('NEED_CONFIRM');
   });
 
+  it('exposes only domain tools to the model but keeps execution complete', async () => {
+    const weatherTool: ToolDefinition = {
+      name: 'weather_now',
+      safety: 'safe',
+      description: 'clima',
+      parameters: { type: 'object', properties: {} },
+      async handler() {
+        return { ok: true, summary: 'soleado' };
+      },
+    };
+    const codingTool: ToolDefinition = {
+      name: 'start_coding_task',
+      safety: 'safe',
+      description: 'codigo',
+      parameters: { type: 'object', properties: {} },
+      async handler() {
+        return { ok: true, summary: 'codificando' };
+      },
+    };
+    let capturedToolNames: readonly string[] = [];
+    const output = await runDeskTurn({
+      text: 'va a llover?',
+      speechMode: 'default',
+      focusState: createInactiveDeskFocusState(),
+      sqlExecutor: createInMemorySqlExecutor(),
+      environment: fakeEnvironment,
+      toolDefinitionMap: buildToolDefinitionMap([weatherTool, codingTool]),
+      exposedToolNames: ['weather_now'],
+      nowMilliseconds: 10,
+      adapters: {
+        stt: async () => '',
+        llm: async ({ toolDefinitionList }) => {
+          capturedToolNames = toolDefinitionList.map((tool) => tool.name);
+          return {
+            text: 'sale el sol',
+            toolCallList: [],
+          };
+        },
+        tts: async () => new ArrayBuffer(0),
+      },
+    });
+    // El modelo ve solo el dominio; la ejecucion usaria el mapa completo.
+    expect(capturedToolNames).toEqual(['weather_now']);
+    expect(output.spokenText).toContain('sol');
+  });
+
   it('replays an approved confirmation into the model conversation', async () => {
     const unsafeTool: ToolDefinition = {
       name: 'coding_task_test',
@@ -464,7 +510,7 @@ describe('runDeskTurn', () => {
 
     expect(synthesizedTextList).toHaveLength(1);
     expect(longReply.startsWith(synthesizedTextList[0])).toBe(true);
-    expect(output.ttsAudio).toBeDefined();
+    expect(await output.ttsAudioPromise).toBeDefined();
     expect(output.ttsFollowUpSegmentTextList?.length).toBeGreaterThan(0);
   });
 

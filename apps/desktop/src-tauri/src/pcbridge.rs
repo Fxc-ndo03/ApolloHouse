@@ -16,6 +16,10 @@ use futures_util::{SinkExt, StreamExt};
 use tauri::AppHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+/// Versión del contrato device->Worker que anuncia este cliente. El Worker la
+/// usa sólo para compatibilidad; no habilita capabilities por sí sola.
+const PCBRIDGE_PROTOCOL_VERSION: i64 = 1;
+
 #[derive(Clone)]
 pub struct PcBridgeManager {
     task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
@@ -126,6 +130,10 @@ async fn serve_once(
     let hello = serde_json::json!({
         "type": "hello",
         "hostname": local_hostname(),
+        // BLOCK 5: el Worker usa esto para decidir si el contrato de
+        // capabilities del cliente es compatible. Si el cliente no lo manda,
+        // el worker aplica la politica legacy.
+        "protocolVersion": PCBRIDGE_PROTOCOL_VERSION,
         "ts": chrono::Utc::now().timestamp_millis(),
     });
     writer

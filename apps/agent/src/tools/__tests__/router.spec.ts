@@ -130,7 +130,7 @@ describe('tool router', () => {
       false,
       { environment: fakeEnvironment, nowMilliseconds: 2000 },
     );
-    expect(resolved).toEqual({ cancelled: true });
+    expect(resolved).toEqual({ cancelled: true, reason: 'rejected' });
   });
 
   it('executes after confirm ok', async () => {
@@ -151,5 +151,24 @@ describe('tool router', () => {
       { environment: fakeEnvironment, nowMilliseconds: 2000 },
     );
     expect(resolved).toMatchObject({ ok: true, summary: 'ejecutado' });
+  });
+
+  it('domain filtering never bypasses confirmation for unsafe tools', async () => {
+    // El routing decide que herramienta podria aplicar; la autorizacion vive
+    // en executeToolByName. Un mapa ya filtrado por dominio debe exigir
+    // confirmacion igual que el mapa completo.
+    const filteredMap = buildToolDefinitionMap([unsafeTool]);
+    const outcome = await executeToolByName(
+      filteredMap,
+      'shell_exec_test',
+      { command: 'rm -rf /' },
+      { environment: fakeEnvironment, nowMilliseconds: 1000 },
+      () => 'confirm-domain',
+    );
+    expect(outcome.status).toBe('needs_confirm');
+    if (outcome.status === 'needs_confirm') {
+      expect(outcome.pending.id).toBe('confirm-domain');
+      expect(outcome.pending.expiresAt).toBe(31_000);
+    }
   });
 });

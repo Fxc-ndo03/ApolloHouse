@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import type { ToolExecutionTarget } from '@/tools/execution-target';
 import type { ListItemRecord } from '@/lists/store';
 import type { ScheduledReminderRow } from '@/reminders/logic';
 
@@ -40,6 +41,11 @@ export type PendingToolConfirmation = {
   readonly args: JsonSerializableValue | undefined;
   readonly summary: string;
   readonly expiresAt: number;
+  // BLOCK 6: el device que el registry eligió para esta acción. Opcionales
+  // para que las confirmaciones ya guardadas (y las del camino LLM, que no
+  // pasan por el registry) sigan siendo válidas.
+  readonly targetDeviceId?: string;
+  readonly targetDeviceType?: string;
 };
 
 export type DeskToolEffects = {
@@ -125,11 +131,26 @@ export type DeskToolEffects = {
   }) => Promise<ToolExecutionResult>;
 };
 
+// BLOCK 9: la correlación del turno viaja hasta el handler, para que un comando
+// a un device pueda llevar requestId, clientTurnId y generation sin estado
+// global. Antes vivía sólo en los eventos del pipeline.
+export type ToolCorrelation = {
+  readonly requestId?: string | null;
+  readonly clientTurnId?: string | null;
+  readonly generation?: number | null;
+};
+
 export type ToolExecutionContext = {
   readonly environment: Env;
   readonly nowMilliseconds: number;
   readonly deviceId?: string;
   readonly effects?: DeskToolEffects;
+  readonly correlation?: ToolCorrelation;
+  // BLOCK 9.1: el device que el pipeline resolvió para ESTA ejecución. Sin
+  // esto el handler no sabe a quién enviar y tendría que resolver otra vez (o
+  // adivinar), que es justo lo que el bloque de target resolution evita.
+  readonly targetDeviceId?: string;
+  readonly targetDeviceType?: string;
 };
 
 export type ToolHandler = (
@@ -144,6 +165,9 @@ export type ToolDefinition = {
   readonly parameters: ToolArgumentRecord;
   readonly handler: ToolHandler;
   readonly buildConfirmSummary?: (args: JsonSerializableValue | undefined) => string;
+  // BLOCK 6.2: clasificación declarativa. Ausente = cloud-only (no necesita
+  // device). Las tools de @/tools/pc la declaran y el guard lo exige.
+  readonly executionTarget?: ToolExecutionTarget;
 };
 
 export const CONFIRM_TIMEOUT_MILLISECONDS = 30_000;

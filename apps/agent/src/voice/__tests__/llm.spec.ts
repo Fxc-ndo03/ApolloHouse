@@ -161,7 +161,8 @@ describe('chatWithGemini', () => {
     expect(requestBody.tools?.[0]?.functionDeclarations?.[0]?.name).toBe('weather_now');
   });
 
-  it('maps Gemini functionCall into toolCallList with parsed args', async () => {    const { fetchImplementation } = createCapturingFetchMock({
+  it('maps Gemini functionCall into toolCallList with parsed args', async () => {
+    const { fetchImplementation } = createCapturingFetchMock({
       candidates: [
         {
           content: {
@@ -285,7 +286,10 @@ describe('chatWithGemini', () => {
     });
 
     const secondBody = JSON.parse(String(secondCallList[0].init.body)) as {
-      contents: { role: string; parts: { functionCall?: { thoughtSignature?: string } }[] }[];
+      contents: {
+        role: string;
+        parts: { functionCall?: { thoughtSignature?: string } }[];
+      }[];
     };
     const rebuiltCall = secondBody.contents[1].parts[0].functionCall;
     expect(rebuiltCall?.thoughtSignature).toBe('firma-pensada');

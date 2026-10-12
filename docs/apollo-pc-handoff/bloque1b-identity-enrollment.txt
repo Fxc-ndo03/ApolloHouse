@@ -1,0 +1,971 @@
+# BLOQUE: bloque1b-identity-enrollment
+# Apollo PC / Apollo Node - material de referencia para Android
+# Generado desde el repo, sin secretos.
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\identity.ts =====
+
+import { z } from 'zod';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Identidad de dispositivo (Block 7).
+//
+// Un deviceId es estable y especÃ­fico del dispositivo. El hostname es una
+// identidad de transporte heredada del desktop, NO una identidad global: mobile
+// no puede registrarse con hostname porque un telÃ©fono no lo expone y porque
+// cambiarÃ­a al roamear.
+//
+// Formato: `<deviceType>:<value>`, igual que el que ya usa el desktop
+// (`desktop:PC-ESTUDIO`) para no romper los registros existentes.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export const DEVICE_TYPE_LIST = ['desktop', 'mobile'] as const;
+export const deviceTypeSchema = z.enum(DEVICE_TYPE_LIST);
+export type DeviceType = z.infer<typeof deviceTypeSchema>;
+
+export const DEVICE_ID_SEPARATOR = ':';
+
+// Un deviceId es `<deviceType>:<value>` con un value no vacÃ­o.
+export const deviceIdSchema = z
+  .string()
+  .min(3)
+  .max(128)
+  .refine(
+    (candidateDeviceId) => {
+      const separatorIndex = candidateDeviceId.indexOf(DEVICE_ID_SEPARATOR);
+      if (separatorIndex <= 0) {
+        return false;
+      }
+      const prefix = candidateDeviceId.slice(0, separatorIndex);
+      const value = candidateDeviceId.slice(separatorIndex + 1);
+      return (
+        (DEVICE_TYPE_LIST as readonly string[]).includes(prefix) &&
+        value.trim().length > 0
+      );
+    },
+    {
+      message: 'deviceId invÃ¡lido: se espera "<desktop|mobile>:<valor>"',
+    },
+  );
+
+// De dÃ³nde saliÃ³ la identidad. El desktop legacy deriva del hostname; cualquier
+// device nuevo (mobile incluido) la declara el cliente y es estable.
+export const DEVICE_IDENTITY_SOURCE_LIST = [
+  'client_provided',
+  'desktop_hostname_legacy',
+] as const;
+export const deviceIdentitySourceSchema = z.enum(DEVICE_IDENTITY_SOURCE_LIST);
+export type DeviceIdentitySource = z.infer<typeof deviceIdentitySourceSchema>;
+
+export type DeviceIdentity = {
+  readonly deviceId: string;
+  readonly deviceType: DeviceType;
+  readonly identitySource: DeviceIdentitySource;
+};
+
+export type DeviceIdentityRejection = {
+  readonly reason:
+    | 'malformed_device_id'
+    | 'device_id_type_mismatch'
+    | 'mobile_requires_client_provided_identity';
+  readonly detail: string;
+};
+
+// El prefijo del deviceId tiene que concordar con el deviceType declarado: si no,
+// un cliente podrÃ­a pedir targeting por tipo y recibir el device equivocado.
+export function parseDeviceIdentity(input: {
+  readonly deviceId: string;
+  readonly deviceType: DeviceType;
+  readonly identitySource: DeviceIdentitySource;
+}): DeviceIdentity | DeviceIdentityRejection {
+  const parsedDeviceId = deviceIdSchema.safeParse(input.deviceId);
+  if (!parsedDeviceId.success) {
+    return { reason: 'malformed_device_id', detail: input.deviceId };
+  }
+  const separatorIndex = input.deviceId.indexOf(DEVICE_ID_SEPARATOR);
+  const idDeviceType = input.deviceId.slice(0, separatorIndex);
+  if (idDeviceType !== input.deviceType) {
+    return {
+      reason: 'device_id_type_mismatch',
+      detail: `deviceId dice ${idDeviceType} pero se declarÃ³ ${input.deviceType}`,
+    };
+  }
+  // Un mobile con identidad heredada del hostname serÃ­a frÃ¡gil: el telÃ©fono
+  // cambia de hostname y romperÃ­a el registro.
+  if (input.deviceType === 'mobile' && input.identitySource !== 'client_provided') {
+    return {
+      reason: 'mobile_requires_client_provided_identity',
+      detail: 'mobile no puede registrarse con identidad derivada de hostname',
+    };
+  }
+  return {
+    deviceId: input.deviceId,
+    deviceType: input.deviceType,
+    identitySource: input.identitySource,
+  };
+}
+
+export function isDeviceIdentityRejection(
+  value: DeviceIdentity | DeviceIdentityRejection,
+): value is DeviceIdentityRejection {
+  return 'reason' in value;
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\enrollment.ts =====
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// BLOCK 12 Â§2, Â§3: el nÃºcleo de enrollment, sin Cloudflare.
+//
+// AcÃ¡ vive la decisiÃ³n criptogrÃ¡fica y el estado de un desafÃ­o, sin Durable
+// Object ni WebSocket: son funciones puras sobre un puerto de almacenamiento, asÃ­
+// que se prueban enteras en la JVM/node sin workerd.
+//
+// Decisiones que importan y por quÃ©:
+//
+// 1. Se guarda el HASH, nunca el secreto. Un dump del DO no sirve para conectar.
+// 2. El desafÃ­o tambiÃ©n se guarda hasheado, y se BORRA al consumirse. Es de un
+//    solo uso por construcciÃ³n, no por una bandera que alguien pueda forgetting.
+// 3. SHA-256 con WebCrypto (`crypto.subtle`), que es la primitiva de la
+//    plataforma. No hay criptografÃ­a propia acÃ¡: ni KDF homemade, ni compare
+//    homemade, ni RNG homemade.
+// 4. El secreto tiene prefijo. Sirve para dos cosas: que una credencial
+//    individual nunca pueda confundirse con DEVICE_SHARED_SECRET, y para que los
+//    logs puedan RECHAZAR el patrÃ³n en vez de tener que confiar en la disciplina.
+// 5. La entropÃ­a viene de `crypto.getRandomValues` (CSPRNG del runtime), que es
+//    lo que un attacker no puede predecir. 32 bytes = 256 bits.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/**
+ * Prefijo de las credenciales individuales. El de los desafÃ­os es distinto para que
+ * un valor de uno nunca pueda intentar autenticarse como el otro.
+ */
+export const DEVICE_CREDENTIAL_PREFIX = 'apollo_dev_';
+export const ENROLLMENT_CHALLENGE_PREFIX = 'apollo_enr_';
+
+/** 32 bytes de entropÃ­a del CSPRNG del runtime: 256 bits. */
+const CREDENTIAL_ENTROPY_BYTE_COUNT = 32;
+/** 24 bytes para el desafÃ­o: suficiente y mantiene el valor corto de tipear. */
+const CHALLENGE_ENTROPY_BYTE_COUNT = 24;
+
+/** Â§2: "expiraciÃ³n corta". Cinco minutos alcanzan para tocar el telÃ©fono y no deja una ventana Ãºtil. */
+export const ENROLLMENT_CHALLENGE_TTL_MILLISECONDS = 5 * 60 * 1000;
+
+/**
+ * CuÃ¡ntos desafÃ­os borrados por limpieza. Es un techo de trabajo por llamada, no un
+ * presupuesto: si quedan mÃ¡s, se borran en las siguientes emisiones.
+ */
+const PRUNE_LIMIT = 50;
+
+function encodeBase64Url(byteList: Uint8Array): string {
+  let binary = '';
+  for (const byte of byteList) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+}
+
+function readRandomBase64Url(byteCount: number): string {
+  const randomByteList = new Uint8Array(byteCount);
+  crypto.getRandomValues(randomByteList);
+  return encodeBase64Url(randomByteList);
+}
+
+/**
+ * SHA-256 en hex. WebCrypto es asÃ­ncrono y no tiene streaming, pero un secreto
+ * de 43 caracteres entra de sobra: no hace falta HKDF ni nada derivado.
+ */
+export async function hashSecret(plainSecret: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(plainSecret),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export function isDeviceCredentialShaped(value: string | null): boolean {
+  return (
+    value !== null &&
+    value.startsWith(DEVICE_CREDENTIAL_PREFIX) &&
+    value.length > DEVICE_CREDENTIAL_PREFIX.length
+  );
+}
+
+export function isEnrollmentChallengeShaped(value: string | null): boolean {
+  return (
+    value !== null &&
+    value.startsWith(ENROLLMENT_CHALLENGE_PREFIX) &&
+    value.length > ENROLLMENT_CHALLENGE_PREFIX.length
+  );
+}
+
+export function mintDeviceCredential(): string {
+  return `${DEVICE_CREDENTIAL_PREFIX}${readRandomBase64Url(CREDENTIAL_ENTROPY_BYTE_COUNT)}`;
+}
+
+export function mintEnrollmentChallenge(): string {
+  return `${ENROLLMENT_CHALLENGE_PREFIX}${readRandomBase64Url(
+    CHALLENGE_ENTROPY_BYTE_COUNT,
+  )}`;
+}
+
+/**
+ * El puerto de almacenamiento. El DO lo implementa sobre SQLite; los tests usan
+ * un Map. Lo que importa es que acÃ¡ no se sabe si sobrevive a un reinicio: eso
+ * lo tiene que garantizar la implementaciÃ³n, no el contrato.
+ */
+export type EnrollmentStore = {
+  saveChallenge(input: {
+    readonly challengeHash: string;
+    /** BLOCK 12.1 Â§2: el desafÃ­o queda atado a la identidad que el dueÃ±o autorizÃ³. */
+    readonly boundDeviceId: string;
+    readonly issuedAtMilliseconds: number;
+    readonly expiresAtMilliseconds: number;
+  }): Promise<void>;
+  readChallenge(challengeHash: string): Promise<EnrollmentChallengeRecord | null>;
+  /**
+   * BLOCK 12.1 Â§5: consumir el desafÃ­o y comprobar el vÃ­nculo, en UNA operaciÃ³n
+   * atÃ³mica.
+   *
+   * Esto reemplaza el `readChallenge` + `deleteChallenge` de BLOCK 12, que tenÃ­a
+   * una carrera real: dos claims concurrentes podÃ­an leer el desafÃ­o los dos,
+   * y los dos pasar el chequeo de "existe y no expirÃ³", antes de que uno lo
+   * borrara. El que perdÃ­a la carrera se enteraba tarde, cuando ya podÃ­a haber
+   * emitido su credencial. Con un CAS el perdedor no emite nada.
+   *
+   * Contrato: devuelve `wasConsumed: true` como mÃ¡ximo una vez por desafÃ­o. Un
+   * `deviceId` distinto del atado NO consume el desafÃ­o (Â§2.7).
+   */
+  consumeChallenge(input: {
+    readonly challengeHash: string;
+    readonly deviceId: string;
+    /** Valor Ãºnico de esta llamada: permite distinguir "lo consumÃ­ yo" de "otro". */
+    readonly consumedToken: string;
+    readonly nowMilliseconds: number;
+  }): Promise<ChallengeConsumeOutcome>;
+  /** Limpieza de desafÃ­os vencidos. NO es parte del camino del claim. */
+  deleteChallenge(challengeHash: string): Promise<boolean>;
+  /**
+   * BLOCK 12.2 Â§2: borra los desafÃ­os que NO pueden autorizar a nadie.
+   *
+   * Se borran sÃ³lo dos clases:
+   *   - vencidos (`expires_at <= now`, contra el reloj del servidor);
+   *   - filas heredadas sin vÃ­nculo (`device_id = ''`), que son de BLOCK 12 y
+   *     que `consumeChallenge` ya rechaza como `challenge_unknown`.
+   *
+   * Lo que NO se borra nunca: un desafÃ­o vigente de un telÃ©fono autorizado, y
+   * CUALQUIER fila de `mobile_device_credential`, incluidas las revocadas. Las
+   * revocadas son las que le cierran `?token=` a un telÃ©fono dado: borrarlas
+   * serÃ­a desrevocarlo sin querer.
+   *
+   * Por quÃ© no puede debilitar el claim: las dos clases que borra son justamente
+   * las que el claim ya rechaza, asÃ­ que una carrera limpieza/claim no puede
+   * convertir un rechazo en un acierto. El `limit` acota el trabajo por llamada
+   * para no bloquear el DO con un DELETE masivo.
+   */
+  pruneChallenge(input: {
+    readonly nowMilliseconds: number;
+    readonly limit: number;
+  }): Promise<number>;
+  saveCredential(input: {
+    readonly deviceId: string;
+    readonly credentialHash: string;
+    readonly status: 'active' | 'revoked';
+    readonly updatedAtMilliseconds: number;
+  }): Promise<void>;
+  readCredential(deviceId: string): Promise<DeviceCredentialRecord | null>;
+  deleteCredential(deviceId: string): Promise<boolean>;
+  listCredentialRecordList(): Promise<DeviceCredentialRecord[]>;
+};
+
+export type EnrollmentChallengeRecord = {
+  readonly challengeHash: string;
+  readonly boundDeviceId: string;
+  readonly issuedAtMilliseconds: number;
+  readonly expiresAtMilliseconds: number;
+  readonly consumedAtMilliseconds: number | null;
+  /** El token con el que lo consumiÃ³ quien ganÃ³ el CAS, si alguien lo consumiÃ³. */
+  readonly consumedToken: string | null;
+};
+
+export type ChallengeConsumeOutcome =
+  | { readonly wasConsumed: true; readonly boundDeviceId: string }
+  | {
+      readonly wasConsumed: false;
+      readonly reason:
+        | 'challenge_unknown'
+        | 'challenge_consumed'
+        | 'challenge_expired'
+        | 'device_id_mismatch';
+    };
+
+export type DeviceCredentialRecord = {
+  readonly deviceId: string;
+  readonly credentialHash: string;
+  readonly status: 'active' | 'revoked';
+  readonly updatedAtMilliseconds: number;
+};
+
+export type EnrollmentIssueResult = {
+  readonly status: 'issued';
+  readonly challenge: string;
+  readonly expiresAtMilliseconds: number;
+};
+
+/**
+ * BLOCK 12.1 Â§2.3: el dueÃ±o dice QUÃ‰ telÃ©fono estÃ¡ autorizando, y ese vÃ­nculo
+ * queda guardado con el desafÃ­o. Antes el desafÃ­o era un pase sin dueÃ±o, asÃ­ que
+ * quien lo obtuviera podÃ­a reclamar cualquier identidad.
+ */
+export async function issueEnrollmentChallenge(input: {
+  readonly store: EnrollmentStore;
+  readonly nowMilliseconds: number;
+  readonly boundDeviceId: string;
+  readonly ttlMilliseconds?: number;
+}): Promise<EnrollmentIssueResult> {
+  const challenge = mintEnrollmentChallenge();
+  const ttlMilliseconds = input.ttlMilliseconds ?? ENROLLMENT_CHALLENGE_TTL_MILLISECONDS;
+  const expiresAtMilliseconds = input.nowMilliseconds + ttlMilliseconds;
+  await input.store.saveChallenge({
+    challengeHash: await hashSecret(challenge),
+    boundDeviceId: input.boundDeviceId,
+    issuedAtMilliseconds: input.nowMilliseconds,
+    expiresAtMilliseconds,
+  });
+  // BLOCK 12.2 Â§2: se limpia acÃ¡ y no en el claim a propÃ³sito. Esta ruta pide el
+  // rol del dueÃ±o, asÃ­ que el trabajo extra no lo puede disparar un anÃ³nimo que
+  // estÃ© haciendo flood al claim; y emitir es raro, asÃ­ que la tabla queda
+  // acotada sin necesidad de un alarm.
+  await input.store.pruneChallenge({
+    nowMilliseconds: input.nowMilliseconds,
+    limit: PRUNE_LIMIT,
+  });
+  return { status: 'issued', challenge, expiresAtMilliseconds };
+}
+
+export type EnrollmentClaimRejectionReason =
+  | 'challenge_malformed'
+  | 'challenge_unknown'
+  | 'challenge_consumed'
+  | 'challenge_expired'
+  | 'device_id_invalid'
+  /** BLOCK 12.1 Â§2.5: el desafÃ­o es de otro telÃ©fono. */
+  | 'device_id_mismatch';
+
+export type EnrollmentClaimResult =
+  | {
+      readonly status: 'enrolled';
+      readonly deviceId: string;
+      readonly credential: string;
+      readonly rotated: boolean;
+    }
+  | { readonly status: 'rejected'; readonly reason: EnrollmentClaimRejectionReason };
+
+/**
+ * Â§2 pasos 3 a 5: el telÃ©fono presenta el desafÃ­o, el servidor lo valida, lo
+ * CONSUME y reciÃ©n entonces registra el dispositivo y le devuelve su credencial.
+ *
+ * BLOCK 12.1 cambiÃ³ el orden de las comprobaciones por dos razones:
+ *
+ * 1. **El vÃ­nculo va dentro del consumo.** `consumeChallenge` recibe el deviceId
+ *    y sÃ³lo marca el desafÃ­o consumido si coincide con el atado. AsÃ­ el intento de
+ *    B con el desafÃ­o de A no consume nada y no crea credenciales (Â§2.7).
+ * 2. **El consumo es un CAS.** `readChallenge` + `deleteChallenge` tenÃ­an una
+ *    carrera: dos claims concurrentes leÃ­an el mismo desafÃ­o vÃ¡lido y los dos
+ *    pasaban los chequeos antes de que uno lo borrara (Â§5).
+ *
+ * Si la escritura de la credencial fallara despuÃ©s del consumo, el desafÃ­o queda
+ * quemado: se pierde un enrollment, no se duplica una identidad. Es el lado
+ * correcto de fallar para seguridad.
+ */
+export async function claimEnrollmentChallenge(input: {
+  readonly store: EnrollmentStore;
+  readonly nowMilliseconds: number;
+  readonly challenge: string;
+  readonly deviceId: string;
+  readonly isDeviceIdValid: (deviceId: string) => boolean;
+}): Promise<EnrollmentClaimResult> {
+  if (!isEnrollmentChallengeShaped(input.challenge)) {
+    return { status: 'rejected', reason: 'challenge_malformed' };
+  }
+  if (!input.isDeviceIdValid(input.deviceId)) {
+    return { status: 'rejected', reason: 'device_id_invalid' };
+  }
+  const challengeHash = await hashSecret(input.challenge);
+  // Una sola operaciÃ³n decide si este claim gana. Todo lo demÃ¡s es clasificar un
+  // "no" para poder darle un motivo Ãºtil al telÃ©fono.
+  const consumeOutcome = await input.store.consumeChallenge({
+    challengeHash,
+    deviceId: input.deviceId,
+    consumedToken: crypto.randomUUID(),
+    nowMilliseconds: input.nowMilliseconds,
+  });
+  if (!consumeOutcome.wasConsumed) {
+    return { status: 'rejected', reason: consumeOutcome.reason };
+  }
+  // A partir de acÃ¡ el desafÃ­o es de este telÃ©fono y de nadie mÃ¡s.
+  if (consumeOutcome.boundDeviceId !== input.deviceId) {
+    return { status: 'rejected', reason: 'device_id_mismatch' };
+  }
+  const existingRecord = await input.store.readCredential(input.deviceId);
+  const credential = mintDeviceCredential();
+  await input.store.saveCredential({
+    deviceId: input.deviceId,
+    credentialHash: await hashSecret(credential),
+    status: 'active',
+    updatedAtMilliseconds: input.nowMilliseconds,
+  });
+  return {
+    status: 'enrolled',
+    deviceId: input.deviceId,
+    credential,
+    // Reinscribir una credencial existente la rota: sirve para un telÃ©fono
+    // reinstalado, y el desafÃ­o lo autorizÃ³ el dueÃ±o.
+    rotated: existingRecord !== null,
+  };
+}
+
+export type CredentialVerification =
+  | { readonly status: 'valid'; readonly deviceId: string }
+  | {
+      readonly status: 'rejected';
+      readonly reason:
+        | 'credential_malformed'
+        | 'credential_unknown'
+        | 'credential_revoked';
+    };
+
+/**
+ * Â§3: verificar la credencial contra el hash guardado, con comparaciÃ³n
+ * timing-safe. El hash es de largo fijo, asÃ­ que comparar el hex completo es
+ * suficiente.
+ */
+export async function verifyDeviceCredential(input: {
+  readonly store: EnrollmentStore;
+  readonly credential: string | null;
+}): Promise<CredentialVerification> {
+  if (!isDeviceCredentialShaped(input.credential)) {
+    return { status: 'rejected', reason: 'credential_malformed' };
+  }
+  const presentedHash = await hashSecret(input.credential as string);
+  for (const record of await input.store.listCredentialRecordList()) {
+    if (!areHashesEqualTimingSafe(presentedHash, record.credentialHash)) {
+      continue;
+    }
+    if (record.status === 'revoked') {
+      // Se lo dice al cliente a propÃ³sito: un telÃ©fono que fue revocado debe
+      // dejar de reintentar, no quedarse reconectando en loop.
+      return { status: 'rejected', reason: 'credential_revoked' };
+    }
+    return { status: 'valid', deviceId: record.deviceId };
+  }
+  return { status: 'rejected', reason: 'credential_unknown' };
+}
+
+function areHashesEqualTimingSafe(leftHash: string, rightHash: string): boolean {
+  if (leftHash.length !== rightHash.length) {
+    return false;
+  }
+  let difference = 0;
+  for (let index = 0; index < leftHash.length; index += 1) {
+    difference |= leftHash.charCodeAt(index) ^ rightHash.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+export type RevocationResult =
+  | {
+      readonly status: 'revoked';
+      readonly deviceId: string;
+      readonly hadCredential: boolean;
+    }
+  | { readonly status: 'unknown_device'; readonly deviceId: string };
+
+/**
+ * Â§5: revocar marca la fila como `revoked` conservando su hash, para que el
+ * cliente reciba un motivo accionable. El acceso queda cortado igual: una fila
+ * revocada nunca autentica, y su presencia es lo que le cierra `?token=`.
+ */
+export async function revokeDeviceCredential(input: {
+  readonly store: EnrollmentStore;
+  readonly deviceId: string;
+  readonly nowMilliseconds: number;
+}): Promise<RevocationResult> {
+  const existingRecord = await input.store.readCredential(input.deviceId);
+  if (existingRecord === null) {
+    return { status: 'unknown_device', deviceId: input.deviceId };
+  }
+  // La fila NO se borra: se marca revoked conservando su hash.
+  //
+  // Borrarla parecerÃ­a mÃ¡s limpio, pero rompe una cosa que el cliente necesita:
+  // si el hash desaparece, `verifyDeviceCredential` no puede distinguir "revocada"
+  // de "nunca existiÃ³" y devuelve `credential_unknown`. El telÃ©fono entonces
+  // reconecta en loop para siempre contra una credencial que ya no va a funcionar
+  // nunca. Con el hash conservado el rechazo es `credential_revoked`, que es lo
+  // que le permite al cliente parar de reintentar (Â§6).
+  //
+  // Guardar el hash no da acceso: un hash no es una credencial, y esta fila
+  // rejects. Lo que ademÃ¡s cierra el bypass es que la fila SIGUE EXISTIENDO, que
+  // es lo que `decideLegacyAdmission` lee para negarle `?token=`.
+  await input.store.saveCredential({
+    deviceId: input.deviceId,
+    credentialHash: existingRecord.credentialHash,
+    status: 'revoked',
+    updatedAtMilliseconds: input.nowMilliseconds,
+  });
+  return { status: 'revoked', deviceId: input.deviceId, hadCredential: true };
+}
+
+export type LegacyAdmissionDecision =
+  | { readonly isAllowed: true }
+  | { readonly isAllowed: false; readonly reason: 'device_is_enrolled_or_revoked' };
+
+/**
+ * Â§1: el mecanismo legacy no puede ser un bypass de la individual.
+ *
+ * Un telÃ©fono revocado que vuelve a presentar DEVICE_SHARED_SECRET por
+ * `?token=` serÃ­a un "legacy desconocido" y entrarÃ­a. Por eso el camino legacy
+ * se consulta contra el store: si el deviceId aparece ahÃ­ â€”activo O revocadoâ€”
+ * se rechaza. La decisiÃ³n sale de la identidad persistida, nunca de lo que diga
+ * la peticiÃ³n.
+ */
+export async function decideLegacyAdmission(input: {
+  readonly store: EnrollmentStore;
+  readonly deviceId: string;
+}): Promise<LegacyAdmissionDecision> {
+  const record = await input.store.readCredential(input.deviceId);
+  if (record === null) {
+    return { isAllowed: true };
+  }
+  return { isAllowed: false, reason: 'device_is_enrolled_or_revoked' };
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\credential-store.ts =====
+
+import type {
+  ChallengeConsumeOutcome,
+  DeviceCredentialRecord,
+  EnrollmentChallengeRecord,
+  EnrollmentStore,
+} from '@/devices/enrollment';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// BLOCK 12 Â§5: el registro de credenciales del MobileBridge, sobre SQLite.
+//
+// La tabla vive en el DO, asÃ­ que sobrevive a que el DO se descargue, se reinicie
+// o se despliegue cÃ³digo nuevo. Esa es la razÃ³n de que la revocaciÃ³n sea real:
+// si el estado fuera sÃ³lo memoria, revocar serÃ­a barra un socket y la prÃ³xima
+// conexiÃ³n volverÃ­a a pasar.
+//
+// Se guardan HASHES. `credential_hash` nunca es una credencial utilizable, y la
+// fila revocada usa un hash que ningÃºn secreto emitido puede producir, asÃ­ que
+// ni siquiera un dump del DO permite reconectar.
+//
+// NOTA de migraciones: el DO MobileBridge ya estÃ¡ declarado como
+// `new_sqlite_classes` en `wrangler.jsonc` (tag v4), asÃ­ que `ctx.storage.sql`
+// existe sin tocar la config. Las tablas se crean con IF NOT EXISTS en el
+// primer uso: es idempotente y no necesita un tag de migraciÃ³n nuevo.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/**
+ * La superficie mÃ­nima de `SqlStorage` que usa este store. Declararla propia
+ * (en vez de importar el tipo global) es lo que permite ejercitar el store con
+ * un doble en los tests sin workerd.
+ */
+export type EnrollmentSqlStorage = {
+  exec(
+    query: string,
+    ...bindValues: unknown[]
+  ): {
+    toArray(): readonly Record<string, unknown>[];
+  };
+};
+
+const CREDENTIAL_TABLE = 'mobile_device_credential';
+const CHALLENGE_TABLE = 'mobile_enrollment_challenge';
+
+// `pruneChallenge` sÃ³lo toca CHALLENGE_TABLE. Nunca toca CREDENTIAL_TABLE: una
+// fila revocada es la que le cierra `?token=` a ese deviceId, asÃ­ que borrarla en
+// una limpieza serÃ­a desrevocar un telÃ©fono sin que nadie lo pidiera.
+
+export function createSqliteEnrollmentStore(
+  sqlStorage: EnrollmentSqlStorage,
+): EnrollmentStore {
+  // La migraciÃ³n corre UNA vez por instancia del store, y el memo es la PROMESA,
+  // no un booleano.
+  //
+  // `ensureSchema` se llama en cada operaciÃ³n. Con un `boolean hasMigrated` corrida
+  // con dos requests concurrentes, las dos veÃ­an `false`, las dos entraban a la
+  // migraciÃ³n y la segunda morÃ­a con "duplicate column name" -- un 500 que se
+  // veÃ­a en un 1 de cada N intentos del smoke. Memoizar la promesa hace que la
+  // segunda espere la migraciÃ³n en curso en vez de arrancar otra.
+  let migrationPromise: Promise<void> | null = null;
+
+  async function ensureSchema(): Promise<void> {
+    if (migrationPromise === null) {
+      migrationPromise = addMissingChallengeColumn(sqlStorage);
+    }
+    await migrationPromise;
+    sqlStorage.exec(
+      `CREATE TABLE IF NOT EXISTS ${CREDENTIAL_TABLE} (
+        device_id TEXT PRIMARY KEY,
+        credential_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+    );
+    sqlStorage.exec(
+      `CREATE TABLE IF NOT EXISTS ${CHALLENGE_TABLE} (
+        challenge_hash TEXT PRIMARY KEY,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )`,
+    );
+  }
+
+  /**
+   * BLOCK 12.1: migraciÃ³n aditiva, y no es opcional.
+   *
+   * `CREATE TABLE IF NOT EXISTS` NO agrega columnas a una tabla que ya existe.
+   * Una deployment de BLOCK 12 ya tiene `mobile_enrollment_challenge` con el
+   * schema viejo, asÃ­ que sin esto el primer `saveChallenge` revienta con
+   * "table mobile_enrollment_challenge has no column named device_id" -- que es
+   * exactamente lo que pasÃ³ al correr el primer smoke de este bloque.
+   *
+   * Por eso se consulta el schema real y se agrega lo que falte. Es idempotente:
+   * en una base nueva no hay nada que hacer, y en una vieja agrega tres columnas
+   * una sola vez.
+   *
+   * `device_id` va con DEFAULT '' porque SQLite no permite ADD COLUMN NOT NULL sin
+   * default. Las filas viejas quedan con deviceId vacÃ­o, y `consumeChallenge` las
+   * rechaza: un desafÃ­o de BLOCK 12 no tiene vÃ­nculo, asÃ­ que no puede autorizar
+   * a nadie. Es lo seguro para un dato que en su momento no ligaba nada.
+   */
+  async function addMissingChallengeColumn(
+    targetSqlStorage: EnrollmentSqlStorage,
+  ): Promise<void> {
+    const existingColumnNameSet = new Set(
+      targetSqlStorage
+        .exec(`PRAGMA table_info(${CHALLENGE_TABLE})`)
+        .toArray()
+        .map((row) => String(row['name'])),
+    );
+    if (existingColumnNameSet.size === 0) {
+      return;
+    }
+    const migrationList: readonly (readonly [string, string])[] = [
+      [
+        'device_id',
+        `ALTER TABLE ${CHALLENGE_TABLE} ADD COLUMN device_id TEXT NOT NULL DEFAULT ''`,
+      ],
+      ['consumed_at', `ALTER TABLE ${CHALLENGE_TABLE} ADD COLUMN consumed_at INTEGER`],
+      ['consumed_token', `ALTER TABLE ${CHALLENGE_TABLE} ADD COLUMN consumed_token TEXT`],
+    ];
+    for (const [columnName, alterStatement] of migrationList) {
+      if (existingColumnNameSet.has(columnName)) {
+        continue;
+      }
+      targetSqlStorage.exec(alterStatement);
+    }
+  }
+
+  return {
+    async saveChallenge(input): Promise<void> {
+      await ensureSchema();
+      sqlStorage.exec(
+        `INSERT OR REPLACE INTO ${CHALLENGE_TABLE}
+          (challenge_hash, device_id, issued_at, expires_at, consumed_at, consumed_token)
+          VALUES (?, ?, ?, ?, NULL, NULL)`,
+        input.challengeHash,
+        input.boundDeviceId,
+        input.issuedAtMilliseconds,
+        input.expiresAtMilliseconds,
+      );
+    },
+
+    async readChallenge(
+      challengeHash: string,
+    ): Promise<EnrollmentChallengeRecord | null> {
+      await ensureSchema();
+      const rowList = sqlStorage
+        .exec(
+          `SELECT challenge_hash, device_id, issued_at, expires_at, consumed_at, consumed_token
+           FROM ${CHALLENGE_TABLE} WHERE challenge_hash = ?`,
+          challengeHash,
+        )
+        .toArray();
+      const row = rowList[0];
+      if (row === undefined) {
+        return null;
+      }
+      return readChallengeRow(row);
+    },
+
+    /**
+     * BLOCK 12.1 Â§5: el consumo es un compare-and-swap de UNA sola sentencia.
+     *
+     * El `UPDATE` sÃ³lo matchea si el desafÃ­o no fue consumido Y el deviceId
+     * coincide con el atado. Dos claims concurrentes no pueden ganar los dos: el
+     * segundo no matchea porque `consumed_at` ya no es NULL. En BLOCK 12 esto era
+     * un `readChallenge` + `deleteChallenge`, con carrera entre los dos awaits:
+     * los dos claims leÃ­an el mismo desafÃ­o vÃ¡lido y los dos pasaban los chequeos
+     * antes de que uno lo borrara.
+     *
+     * La expiraciÃ³n NO va en el WHERE a propÃ³sito: si un claim perdedor borrara
+     * la fila, el siguiente verÃ­a `challenge_unknown` en vez de
+     * `challenge_expired`, que es un motivo peor para el telÃ©fono. Se clasifica
+     * con una lectura posterior, que es consultiva: el CAS ya decidiÃ³.
+     */
+    async consumeChallenge(input): Promise<ChallengeConsumeOutcome> {
+      await ensureSchema();
+      sqlStorage.exec(
+        `UPDATE ${CHALLENGE_TABLE} SET consumed_at = ?, consumed_token = ?
+         WHERE challenge_hash = ? AND consumed_at IS NULL AND device_id = ?`,
+        input.nowMilliseconds,
+        input.consumedToken,
+        input.challengeHash,
+        input.deviceId,
+      );
+      const record = await this.readChallenge(input.challengeHash);
+      if (record === null) {
+        return { wasConsumed: false, reason: 'challenge_unknown' };
+      }
+      // Una fila migrada desde BLOCK 12 no tiene deviceId atado: no puede
+      // autorizar a nadie, ni siquiera al que la reportes como suyo.
+      if (record.boundDeviceId.length === 0) {
+        return { wasConsumed: false, reason: 'challenge_unknown' };
+      }
+      if (record.consumedToken === input.consumedToken) {
+        return { wasConsumed: true, boundDeviceId: record.boundDeviceId };
+      }
+      if (record.consumedAtMilliseconds !== null) {
+        return { wasConsumed: false, reason: 'challenge_consumed' };
+      }
+      if (input.nowMilliseconds >= record.expiresAtMilliseconds) {
+        return { wasConsumed: false, reason: 'challenge_expired' };
+      }
+      // No consumido, vigente, y el UPDATE no matcheÃ³: sÃ³lo puede ser que el
+      // deviceId no sea el atado.
+      return { wasConsumed: false, reason: 'device_id_mismatch' };
+    },
+
+    /**
+     * BLOCK 12.2 Â§2: borra sÃ³lo lo que ya no puede autorizar a nadie.
+     *
+     * El `LIMIT` acota el trabajo por llamada: una tabla grande no puede bloquear
+     * el DO con un barrido masivo. Se ordenan por deadline para no hacer
+     * round-robin: si no, la primera mitad de la tabla se limpia siempre y la
+     * segunda nunca.
+     */
+    async pruneChallenge(input: {
+      readonly nowMilliseconds: number;
+      readonly limit: number;
+    }): Promise<number> {
+      await ensureSchema();
+      const doomedRowList = sqlStorage
+        .exec(
+          `SELECT challenge_hash FROM ${CHALLENGE_TABLE}
+            WHERE expires_at <= ? OR device_id = ''
+            ORDER BY expires_at ASC
+            LIMIT ?`,
+          input.nowMilliseconds,
+          input.limit,
+        )
+        .toArray();
+      for (const row of doomedRowList) {
+        sqlStorage.exec(
+          `DELETE FROM ${CHALLENGE_TABLE} WHERE challenge_hash = ?`,
+          String(row['challenge_hash']),
+        );
+      }
+      return doomedRowList.length;
+    },
+
+    async deleteChallenge(challengeHash: string): Promise<boolean> {
+      await ensureSchema();
+      const existing = await this.readChallenge(challengeHash);
+      if (existing === null) {
+        return false;
+      }
+      sqlStorage.exec(
+        `DELETE FROM ${CHALLENGE_TABLE} WHERE challenge_hash = ?`,
+        challengeHash,
+      );
+      return true;
+    },
+
+    async saveCredential(input): Promise<void> {
+      await ensureSchema();
+      sqlStorage.exec(
+        `INSERT OR REPLACE INTO ${CREDENTIAL_TABLE}
+          (device_id, credential_hash, status, updated_at) VALUES (?, ?, ?, ?)`,
+        input.deviceId,
+        input.credentialHash,
+        input.status,
+        input.updatedAtMilliseconds,
+      );
+    },
+
+    async readCredential(deviceId: string): Promise<DeviceCredentialRecord | null> {
+      await ensureSchema();
+      const rowList = sqlStorage
+        .exec(
+          `SELECT device_id, credential_hash, status, updated_at FROM ${CREDENTIAL_TABLE} WHERE device_id = ?`,
+          deviceId,
+        )
+        .toArray();
+      return readCredentialRowList(rowList);
+    },
+
+    async deleteCredential(deviceId: string): Promise<boolean> {
+      await ensureSchema();
+      const existing = await this.readCredential(deviceId);
+      if (existing === null) {
+        return false;
+      }
+      sqlStorage.exec(`DELETE FROM ${CREDENTIAL_TABLE} WHERE device_id = ?`, deviceId);
+      return true;
+    },
+
+    async listCredentialRecordList(): Promise<DeviceCredentialRecord[]> {
+      await ensureSchema();
+      const rowList = sqlStorage
+        .exec(
+          `SELECT device_id, credential_hash, status, updated_at FROM ${CREDENTIAL_TABLE}`,
+        )
+        .toArray();
+      const recordList: DeviceCredentialRecord[] = [];
+      for (const row of rowList) {
+        const record = readCredentialRowList([row]);
+        if (record !== null) {
+          recordList.push(record);
+        }
+      }
+      return recordList;
+    },
+  };
+}
+
+function readChallengeRow(row: Record<string, unknown>): EnrollmentChallengeRecord {
+  const rawConsumedAt = row['consumed_at'];
+  const rawConsumedToken = row['consumed_token'];
+  return {
+    challengeHash: String(row['challenge_hash']),
+    boundDeviceId: String(row['device_id']),
+    issuedAtMilliseconds: Number(row['issued_at']),
+    expiresAtMilliseconds: Number(row['expires_at']),
+    consumedAtMilliseconds: rawConsumedAt === null ? null : Number(rawConsumedAt),
+    consumedToken: rawConsumedToken === null ? null : String(rawConsumedToken),
+  };
+}
+
+function readCredentialRowList(
+  rowList: readonly Record<string, unknown>[],
+): DeviceCredentialRecord | null {
+  const row = rowList[0];
+  if (row === undefined) {
+    return null;
+  }
+  return {
+    deviceId: String(row['device_id']),
+    credentialHash: String(row['credential_hash']),
+    status: row['status'] === 'revoked' ? 'revoked' : 'active',
+    updatedAtMilliseconds: Number(row['updated_at']),
+  };
+}
+
+/**
+ * Store de memoria, para tests y para ejercitar el nÃºcleo sin Cloudflare. NO se
+ * usa en producciÃ³n: perder el proceso serÃ­a perder todas las revocaciones, que
+ * es exactamente el bug que Â§5 prohÃ­be. El guard de Â§7 falla si algo de `src/`
+ * lo referencia fuera de un `__tests__`.
+ */
+export function createInMemoryEnrollmentStore(): EnrollmentStore {
+  const challengeMap = new Map<string, EnrollmentChallengeRecord>();
+  const credentialMap = new Map<string, DeviceCredentialRecord>();
+  return {
+    async saveChallenge(input): Promise<void> {
+      challengeMap.set(input.challengeHash, {
+        ...input,
+        consumedAtMilliseconds: null,
+        consumedToken: null,
+      });
+    },
+    async readChallenge(
+      challengeHash: string,
+    ): Promise<EnrollmentChallengeRecord | null> {
+      return challengeMap.get(challengeHash) ?? null;
+    },
+    /**
+     * El store de memoria comparte el contrato del CAS, porque los tests tienen
+     * que ejercitar la misma carrera que el SQLite. Si acÃ¡ no fuera atÃ³mico, un
+     * test de concurrencia pasarÃ­a en verde y el bug seguirÃ­a en producciÃ³n.
+     */
+    async consumeChallenge(
+      input: Parameters<EnrollmentStore['consumeChallenge']>[0],
+    ): Promise<ChallengeConsumeOutcome> {
+      const record = challengeMap.get(input.challengeHash);
+      if (record === undefined) {
+        return { wasConsumed: false, reason: 'challenge_unknown' };
+      }
+      if (record.consumedAtMilliseconds !== null) {
+        return { wasConsumed: false, reason: 'challenge_consumed' };
+      }
+      if (input.nowMilliseconds >= record.expiresAtMilliseconds) {
+        return { wasConsumed: false, reason: 'challenge_expired' };
+      }
+      if (record.boundDeviceId !== input.deviceId) {
+        return { wasConsumed: false, reason: 'device_id_mismatch' };
+      }
+      challengeMap.set(input.challengeHash, {
+        ...record,
+        consumedAtMilliseconds: input.nowMilliseconds,
+        consumedToken: input.consumedToken,
+      });
+      return { wasConsumed: true, boundDeviceId: record.boundDeviceId };
+    },
+    /**
+     * Mismo contrato que el store de SQLite, para que un test de limpieza no
+     * estÃ© probando una lÃ³gica distinta de la de producciÃ³n.
+     */
+    async pruneChallenge(input: {
+      readonly nowMilliseconds: number;
+      readonly limit: number;
+    }): Promise<number> {
+      const doomedHashList: string[] = [];
+      for (const [challengeHash, record] of challengeMap) {
+        if (
+          record.expiresAtMilliseconds <= input.nowMilliseconds ||
+          record.boundDeviceId.length === 0
+        ) {
+          doomedHashList.push(challengeHash);
+        }
+        if (doomedHashList.length >= input.limit) {
+          break;
+        }
+      }
+      for (const challengeHash of doomedHashList) {
+        challengeMap.delete(challengeHash);
+      }
+      return doomedHashList.length;
+    },
+    async deleteChallenge(challengeHash: string): Promise<boolean> {
+      return challengeMap.delete(challengeHash);
+    },
+    async saveCredential(input): Promise<void> {
+      credentialMap.set(input.deviceId, { ...input });
+    },
+    async readCredential(deviceId: string): Promise<DeviceCredentialRecord | null> {
+      return credentialMap.get(deviceId) ?? null;
+    },
+    async deleteCredential(deviceId: string): Promise<boolean> {
+      return credentialMap.delete(deviceId);
+    },
+    async listCredentialRecordList(): Promise<DeviceCredentialRecord[]> {
+      return [...credentialMap.values()].map((record) => ({ ...record }));
+    },
+  };
+}
+

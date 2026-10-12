@@ -1,18 +1,19 @@
+import { executeAuthorizedTool, resolveToolExecution } from '@/tools/execution';
 import {
-  CONFIRM_TIMEOUT_MILLISECONDS,
-  type JsonSerializableValue,
-  type PendingToolConfirmation,
-  type ToolDefinition,
-  type ToolExecutionContext,
-  type ToolExecutionResult,
+  getCapabilityForToolName,
+  type CapabilityTargetResolver,
+} from '@/devices/target';
+import { verifyExecutionTarget } from '@/tools/target';
+import type {
+  JsonSerializableValue,
+  PendingToolConfirmation,
+  ToolDefinition,
+  ToolExecutionContext,
+  ToolExecutionResult,
 } from '@/tools/types';
+import type { ToolExecutionOrigin, ToolExecutionOutcome } from '@/tools/execution';
 
-export type ToolRouterOutcome =
-  | { readonly status: 'done'; readonly result: ToolExecutionResult }
-  | {
-      readonly status: 'needs_confirm';
-      readonly pending: PendingToolConfirmation;
-    };
+export type ToolRouterOutcome = ToolExecutionOutcome;
 
 export function isPendingConfirmationExpired(
   pendingConfirmation: PendingToolConfirmation,
@@ -27,72 +28,82 @@ export async function executeToolByName(
   toolArgs: JsonSerializableValue | undefined,
   context: ToolExecutionContext,
   createConfirmationId: () => string = () => crypto.randomUUID(),
+  origin: ToolExecutionOrigin = 'llm',
 ): Promise<ToolRouterOutcome> {
-  const toolDefinition = toolDefinitionMap.get(toolName);
-  if (toolDefinition === undefined) {
-    return {
-      status: 'done',
-      result: {
-        ok: false,
-        summary: `Herramienta desconocida: ${toolName}`,
-      },
-    };
-  }
-
-  if (toolDefinition.safety === 'unsafe') {
-    // Building the summary is also the gate on the arguments: it parses them
-    // with the tool's own schema, so no confirmation is ever created — or
-    // persisted, or shown to the user — for a call that could not run. Letting
-    // the parse failure escape would fail the whole turn; the model sending
-    // arguments a tool cannot accept is an ordinary tool error it can retry.
-    let summary: string;
-    try {
-      summary = toolDefinition.buildConfirmSummary?.(toolArgs) ?? `Confirmar ${toolName}`;
-    } catch {
-      return {
-        status: 'done',
-        result: {
-          ok: false,
-          summary: `No pude preparar la confirmación de ${toolName}: argumentos inválidos`,
-        },
-      };
-    }
-    return {
-      status: 'needs_confirm',
-      pending: {
-        id: createConfirmationId(),
-        toolName,
-        args: toolArgs,
-        summary,
-        expiresAt: context.nowMilliseconds + CONFIRM_TIMEOUT_MILLISECONDS,
-      },
-    };
-  }
-
-  const result = await toolDefinition.handler(toolArgs, context);
-  return { status: 'done', result };
+  return await resolveToolExecution({
+    toolName,
+    args: toolArgs,
+    origin,
+    toolDefinitionMap,
+    context,
+    createConfirmationId,
+  });
 }
 
+export type ConfirmationCancelReason =
+  | 'expired'
+  | 'rejected'
+  | 'unknown_tool'
+  // El target se fue, ya no está, o perdió la capability: se distinguen para
+  // poder hablar el motivo correcto y para los logs.
+  | 'target_offline'
+  | 'target_unavailable'
+  | 'capability_absent'
+  | 'no_device';
+
+// Orden de la resolución (Block 6.1 §8): expiración → aprobación → target →
+// autorización → ejecución. La verificación de target vive AQUÍ, junto al motor
+// de confirmación, y no en el runtime del turno.
 export async function resolvePendingToolConfirmation(
   toolDefinitionMap: ReadonlyMap<string, ToolDefinition>,
   pendingConfirmation: PendingToolConfirmation,
   isApproved: boolean,
   context: ToolExecutionContext,
-): Promise<ToolExecutionResult | { readonly cancelled: true }> {
+  resolveCapabilityTarget?: CapabilityTargetResolver,
+): Promise<
+  | ToolExecutionResult
+  | { readonly cancelled: true; readonly reason: ConfirmationCancelReason }
+> {
   if (isPendingConfirmationExpired(pendingConfirmation, context.nowMilliseconds)) {
-    return { cancelled: true };
+    return { cancelled: true, reason: 'expired' };
   }
   if (!isApproved) {
-    return { cancelled: true };
+    return { cancelled: true, reason: 'rejected' };
   }
-  const toolDefinition = toolDefinitionMap.get(pendingConfirmation.toolName);
-  if (toolDefinition === undefined) {
-    return {
-      ok: false,
-      summary: `Herramienta desconocida: ${pendingConfirmation.toolName}`,
-    };
+  if (toolDefinitionMap.get(pendingConfirmation.toolName) === undefined) {
+    return { cancelled: true, reason: 'unknown_tool' };
   }
-  return toolDefinition.handler(pendingConfirmation.args, context);
+
+  // El target se resolvió antes de pedir la confirmación: no puede ejecutarse
+  // sin comprobar que sigue disponible. Una confirmación unsafe nunca se
+  // reroutea a otro device.
+  if (pendingConfirmation.targetDeviceId !== undefined) {
+    const verification = await verifyExecutionTarget({
+      toolName: pendingConfirmation.toolName,
+      capabilityName: getCapabilityForToolName(pendingConfirmation.toolName),
+      targetDeviceId: pendingConfirmation.targetDeviceId,
+      targetDeviceType: pendingConfirmation.targetDeviceType ?? 'unknown',
+      resolver: resolveCapabilityTarget,
+    });
+    if (verification.status === 'unavailable') {
+      return {
+        cancelled: true,
+        reason:
+          verification.reason === 'target_unavailable' ||
+          verification.reason === 'capability_absent' ||
+          verification.reason === 'no_device'
+            ? verification.reason
+            : 'target_offline',
+      };
+    }
+  }
+
+  return await executeAuthorizedTool({
+    toolName: pendingConfirmation.toolName,
+    args: pendingConfirmation.args,
+    toolDefinitionMap,
+    context,
+  });
 }
 
 export function buildToolDefinitionMap(

@@ -175,16 +175,24 @@ def resolve_tool_for_intent(intent: str, user_text: str) -> str | None:
 
 def extract_app_name(user_text: str) -> str:
     """Extract app name from user text for open/focus/close."""
-    # Normalize Spanish names (reuse logic from commands.rs)
     text = user_text.lower().strip()
-    # Remove common verbs (including accented forms)
-    for verb in ["abre", "abrí", "abrir", "abre el", "abre la", "ejecuta", "inicia", "lanza",
-                 "enfoca", "enfocar", "trae", "traer", "cierra", "cerrar", "matar"]:
-        text = text.replace(verb, "").strip()
-    # Remove articles
-    text = text.replace("el ", "").replace("la ", "").strip()
-    text = text.strip(" ,.¿?")
-    # Map to executable
+    for suffix in ["en mi pc", "en la pc", "en pc"]:
+        if text.endswith(suffix):
+            text = text[:-len(suffix)].strip()
+    verbs_long = ["abre el", "abre la", "ejecuta el", "ejecuta la",
+                  "inicia el", "inicia la", "lanza el", "lanza la",
+                  "cierra el", "cierra la"]
+    verbs_short = ["abri", "abre", "abrir", "abro", "ejecuta", "inicia", "lanza",
+                   "enfoca", "enfocar", "trae", "traer",
+                   "cierra", "cerrar", "matar"]
+    for verb in verbs_long + verbs_short:
+        if text.startswith(verb + " "):
+            text = text[len(verb):].strip()
+            break
+    for art in ["el ", "la ", "los ", "las "]:
+        if text.startswith(art):
+            text = text[len(art):].strip()
+    text = text.strip(" ,.¿?¡!")
     app_map = {
         "bloc de notas": "notepad",
         "bloc": "notepad",
@@ -211,7 +219,12 @@ def extract_app_name(user_text: str) -> str:
         "configuración": "ms-settings:",
         "ajustes": "ms-settings:",
     }
-    return app_map.get(text, text)
+    if text in app_map:
+        return app_map[text]
+    for key, val in app_map.items():
+        if key in text:
+            return val
+    return text
 
 
 async def handle_intent_A(user_text: str) -> tuple[str, dict]:

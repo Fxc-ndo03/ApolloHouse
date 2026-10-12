@@ -155,7 +155,7 @@ describe('sandbox end-to-end wiring', () => {
       { environment: fakeEnvironment, nowMilliseconds: 1000, deviceId: 'desk-01' },
     );
 
-    expect(result).toEqual({ cancelled: true });
+    expect(result).toEqual({ cancelled: true, reason: 'rejected' });
     expect(capturedSandboxCallList).toHaveLength(0);
   });
 
@@ -183,7 +183,7 @@ describe('sandbox end-to-end wiring', () => {
       },
     );
 
-    expect(result).toEqual({ cancelled: true });
+    expect(result).toEqual({ cancelled: true, reason: 'expired' });
     expect(capturedSandboxCallList).toHaveLength(0);
   });
 });

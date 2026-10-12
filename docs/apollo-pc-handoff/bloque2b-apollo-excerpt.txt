@@ -1,0 +1,529 @@
+# BLOQUE 2b: apps/agent/src/agents/apollo.ts (EXTRACTO)
+# El archivo completo son 106 KB y mezcla runtime de voz, memoria, MCP y dashboard.
+# Solo se incluyen las secciones que definen el COMPORTAMIENTO DEL NODO:
+#   - Durable Object y ciclo de vida
+#   - conexion de nodos (onConnect / onMessage)
+#   - routing HTTP (fetch)
+#   - autorizacion del socket (authorizeApolloConnection)
+
+
+===== lineas 1-60 : imports y dependencias =====
+
+    1: import {
+    2:   Agent,
+    3:   callable,
+    4:   type Connection,
+    5:   type ConnectionContext,
+    6:   type WSMessage,
+    7: } from 'agents';
+    8: import type { Session, SessionManager } from 'agents/experimental/memory/session';
+    9: import { z } from 'zod';
+   10: 
+   11: import { PcBridge } from './pc-bridge';
+   12: import {
+   13:   buildDeskDashboardPayload,
+   14:   DESK_DASHBOARD_REFRESH_INTERVAL_SECONDS,
+   15:   resolveDeskDashboardWeatherSnapshot,
+   16:   shouldPushDashboardOnWeatherRefresh,
+   17:   UNAVAILABLE_WEATHER_CONDITION_LABEL,
+   18: } from '@/agents/dashboard';
+   19: import { createDeskToolEffects } from '@/agents/effects';
+   20: import {
+   21:   deliverDeskDeviceNotification,
+   22:   parsePendingDeviceMessageAsNotification,
+   23: } from '@/agents/notify';
+   24: import {
+   25:   deliverReminderPayloadSchema,
+   26:   expireConfirmPayloadSchema,
+   27:   notifyBackgroundResultInputSchema,
+   28:   retryInitiativeUtterancePayloadSchema,
+   29: } from '@/agents/rpc';
+   30: import { concatenateArrayBufferList, executeApolloTurn } from '@/agents/runtime';
+   31: import {
+   32:   deliverBroadcastAudio,
+   33:   deliverBroadcastText,
+   34:   replayPendingBroadcast,
+   35:   sweepExpiredBroadcasts,
+   36: } from '@/broadcast/deliver';
+   37: import {
+   38:   appendBroadcastUploadChunk,
+   39:   assembleBroadcastUploadAudio,
+   40:   createBroadcastUploadSession,
+   41:   isBroadcastUploadSessionExpired,
+   42:   type BroadcastDeliveryOutcome,
+   43:   type BroadcastUploadSession,
+   44: } from '@/broadcast/logic';
+   45: import {
+   46:   DEVICE_CONNECTION_TAG,
+   47:   PC_VISUAL_CONNECTION_TAG,
+   48:   hasDeviceConnectionTag,
+   49:   resolveApolloConnectionRole,
+   50: } from '@/auth/role';
+   51: import { isDeviceSharedSecretValid } from '@/auth/token';
+   52: import {
+   53:   mapSessionMessagesToConsoleHistory,
+   54:   mapThreadCatalogToConsoleThreadList,
+   55:   type ConsoleHistoryTurn,
+   56:   type ConsoleThreadSummary,
+   57: } from '@/console/history';
+   58: import {
+   59:   listConsoleJobDocuments,
+   60:   readConsoleJobDocument,
+
+
+===== lineas 340-430 : declaracion del Durable Object Apollo y onStart =====
+
+  340:   readonly focusEndsAt: number | null;
+  341:   readonly focusStartedAt: number | null;
+  342:   readonly caption: string | null;
+  343:   readonly pendingConfirmId: string | null;
+  344:   readonly pendingConfirmSummary: string | null;
+  345:   readonly responseOutputTarget: 'pc' | 'server';
+  346: };
+  347: 
+  348: export class Apollo extends Agent<Env, ApolloState> {
+  349:   initialState: ApolloState = {
+  350:     uiState: 'idle',
+  351:     speechMode: 'default',
+  352:     focusEndsAt: null,
+  353:     focusStartedAt: null,
+  354:     caption: null,
+  355:     pendingConfirmId: null,
+  356:     pendingConfirmSummary: null,
+  357:     responseOutputTarget: 'server',
+  358:   };
+  359: 
+  360:   #uiMachine: DeskUiMachine = createDeskUiMachine('idle');
+  361:   #audioChunkList: ArrayBuffer[] = [];
+  362:   #pendingConfirmation: PendingToolConfirmation | undefined;
+  363:   #didLoadPreferences = false;
+  364:   #isSpeechAborted = false;
+  365:   #sessionManager: SessionManager | undefined;
+  366:   #activeThreadSessionId: string | undefined;
+  367:   #idleThreadCheckScheduleId: string | undefined;
+  368:   #lastKnownWeatherSnapshot: DeskWeatherSnapshot | undefined;
+  369:   #lastTelemetrySnapshot: DeskTelemetrySnapshot | undefined;
+  370:   #isAnnouncingLowBattery = false;
+  371:   #isDeliveringInitiative = false;
+  372:   #isConsolidatingMemory = false;
+  373:   #deviceMcpRequestRegistry = createDeviceMcpRequestRegistry();
+  374:   #broadcastUploadSessionMap = new Map<string, BroadcastUploadSession>();
+  375:   #ttsSequence = 0;
+  376:   #lastPlaybackAck: {
+  377:     readonly sequence: number;
+  378:     readonly playedMilliseconds: number;
+  379:     readonly receivedAtMilliseconds: number;
+  380:   } | null = null;
+  381: 
+  382:   // Rate limiter for Gemini calls (la API observada permite 20 RPM por
+  383:   // modelo; se usa la mitad como margen porque STT/TTS/embeddings comparten
+  384:   // este balde). Solo protege llamadas a Gemini: los fallbacks (Groq,
+  385:   // Workers AI) no consumen token porque no tocan esa cuota.
+  386:   #geminiRateLimiter = {
+  387:     tokens: 10,
+  388:     lastRefill: Date.now(),
+  389:     maxTokens: 10,
+  390:     refillIntervalMs: 6000, // 6 seconds = 10 RPM
+  391:     queue: [] as Array<() => void>,
+  392:     processing: false,
+  393:   };
+  394: 
+  395:   // Alarm state
+  396:   #activeAlarmId: string | null = null;
+  397:   #alarmStopSignal = false;
+  398:   #alarmRetryCount = 0;
+  399: 
+  400:   get sessionManager(): SessionManager {
+  401:     if (this.#sessionManager === undefined) {
+  402:       this.#sessionManager = createApolloSessionManager(this, this.env);
+  403:     }
+  404:     return this.#sessionManager;
+  405:   }
+  406: 
+  407:   // The active thread session; before the first post-migration turn it falls
+  408:   // back to the legacy fixed session, whose shared memory block is the same.
+  409:   get session(): Session {
+  410:     return this.sessionManager.getSession(
+  411:       this.#activeThreadSessionId ?? LEGACY_THREAD_SESSION_ID,
+  412:     );
+  413:   }
+  414: 
+  415:   #storageBucket: StorageBucket | null = null;
+  416: 
+  417:   get storageBucket(): StorageBucket {
+  418:     if (this.#storageBucket === null) {
+  419:       this.#storageBucket = createStorageBucket(
+  420:         this.ctx.storage.sql as unknown as SqlStorage,
+  421:       );
+  422:     }
+  423:     return this.#storageBucket;
+  424:   }
+  425: 
+  426:   async onStart(): Promise<void> {
+  427:     // Held in memory only, so every DO start must re-register it; without it a
+  428:     // successful OAuth callback strands the owner's browser on a bare 404.
+  429:     this.mcp.configureOAuthCallback({
+  430:       customHandler: (callbackResult) => buildMcpOauthLandingResponse(callbackResult),
+
+
+===== lineas 800-1010 : conexion de nodos: getConnectionTags, shouldSendProtocolMessages, onConnect, onMessage =====
+
+  800:       timezone: location.timezone,
+  801:       weather: weatherSnapshot,
+  802:     });
+  803:     const encodedDashboardPayload = encodeServerToDeviceMessage(dashboardPayload);
+  804:     for (const connection of connectionList) {
+  805:       connection.send(encodedDashboardPayload);
+  806:     }
+  807:   }
+  808: 
+  809:   // Device and dashboard share one instance so they share state, but almost
+  810:   // everything the server sends is device-shaped. Tagging is what lets a
+  811:   // broadcast address the device alone.
+  812:   async getConnectionTags(
+  813:     _connection: Connection,
+  814:     connectionContext: ConnectionContext,
+  815:   ): Promise<string[]> {
+  816:     const connectionRole = await resolveApolloConnectionRole(
+  817:       new URL(connectionContext.request.url),
+  818:       this.env,
+  819:     );
+  820:     return connectionRole === null ? [] : [connectionRole];
+  821:   }
+  822: 
+  823:   // The SDK's own frames are not part of the Apollo protocol, and the firmware
+  824:   // answers an unrecognized frame with an error.
+  825:   shouldSendProtocolMessages(
+  826:     connection: Connection,
+  827:     _connectionContext: ConnectionContext,
+  828:   ): boolean {
+  829:     return !hasDeviceConnectionTag(connection.tags);
+  830:   }
+  831: 
+  832:   async onConnect(
+  833:     connection: Connection,
+  834:     connectionContext: ConnectionContext,
+  835:   ): Promise<void> {
+  836:     await this.#ensurePreferencesLoaded();
+  837:     // Everything below replays desk session state to the arriving client, and
+  838:     // the pending-message flush *consumes* what it sends. A dashboard taking
+  839:     // this path swallows a queued reminder the device never gets to announce,
+  840:     // and stamps its own browser origin over the one OTA hands the device.
+  841:     if (!hasDeviceConnectionTag(connection.tags)) {
+  842:       return;
+  843:     }
+  844:     // The DO has no ambient request origin, and the OTA push must hand the
+  845:     // device a URL it can reach â€” the connection that just arrived proves this
+  846:     // origin works, so it is captured here instead of configured.
+  847:     const publicOrigin = new URL(connectionContext.request.url).origin;
+  848:     const storedPublicOrigin = await getSessionPreference(
+  849:       this.#sqlExecutor(),
+  850:       PUBLIC_ORIGIN_PREFERENCE_KEY,
+  851:     );
+  852:     if (storedPublicOrigin !== publicOrigin) {
+  853:       await setSessionPreference(
+  854:         this.#sqlExecutor(),
+  855:         PUBLIC_ORIGIN_PREFERENCE_KEY,
+  856:         publicOrigin,
+  857:       );
+  858:     }
+  859:     // A caption describes the turn that produced it, not the session. Left in
+  860:     // durable state, a failure message greets the user on every reconnect long
+  861:     // after the turn that failed.
+  862:     if (this.state.caption !== null) {
+  863:       this.setState({ ...this.state, caption: null });
+  864:     }
+  865:     this.#pushUiState(connection);
+  866:     await this.#pushDashboard(connection);
+  867:     await this.#flushPendingDeviceMessages(connection);
+  868:   }
+  869: 
+  870:   async onMessage(connection: Connection, message: WSMessage): Promise<void> {
+  871:     // Everything below this line is the device protocol: mic audio, the listen
+  872:     // state machine, telemetry that steers OTA, MCP replies that resolve a
+  873:     // pending device tool call, and confirm answers to a prompt on the device's
+  874:     // own screen. None of it means anything from a browser, and honoring it
+  875:     // would let one desynchronize the desk. The SDK dispatches @callable RPC
+  876:     // and state sync before this runs, so the dashboard keeps both.
+  877:     if (!hasDeviceConnectionTag(connection.tags)) {
+  878:       return;
+  879:     }
+  880: 
+  881:     if (message instanceof ArrayBuffer) {
+  882:       this.#audioChunkList.push(message);
+  883:       return;
+  884:     }
+  885:     if (ArrayBuffer.isView(message)) {
+  886:       const audioChunkBuffer = new ArrayBuffer(message.byteLength);
+  887:       new Uint8Array(audioChunkBuffer).set(
+  888:         new Uint8Array(message.buffer, message.byteOffset, message.byteLength),
+  889:       );
+  890:       this.#audioChunkList.push(audioChunkBuffer);
+  891:       return;
+  892:     }
+  893: 
+  894:     let deviceMessage: DeviceToServerMessage;
+  895:     try {
+  896:       deviceMessage = parseDeviceToServerMessage(message);
+  897:     } catch (error) {
+  898:       console.error(
+  899:         JSON.stringify({
+  900:           level: 'error',
+  901:           message: 'apollo_device_message_invalid',
+  902:           error: error instanceof Error ? error.message : String(error),
+  903:         }),
+  904:       );
+  905:       connection.send(
+  906:         encodeServerToDeviceMessage({
+  907:           type: 'error',
+  908:           code: 'invalid_message',
+  909:           message: 'Mensaje no reconocido',
+  910:         }),
+  911:       );
+  912:       return;
+  913:     }
+  914: 
+  915:     switch (deviceMessage.type) {
+  916:       case 'hello': {
+  917:         this.#pushUiState(connection);
+  918:         break;
+  919:       }
+  920:       case 'hold_start':
+  921:       case 'wake': {
+  922:         this.#audioChunkList = [];
+  923:         this.#applyUiEvent('START_LISTEN');
+  924:         // Whatever the previous turn left on screen is stale the moment a new
+  925:         // one starts, including an error from a turn the user has moved on from.
+  926:         this.setState({ ...this.state, caption: null });
+  927:         this.#pushUiState(connection);
+  928:         break;
+  929:       }
+  930:       case 'hold_end': {
+  931:         await this.#runTurnFromAudio(connection);
+  932:         break;
+  933:       }
+  934:       case 'audio_end': {
+  935:         await this.#runTurnFromAudio(connection);
+  936:         break;
+  937:       }
+  938:       case 'listen_cancel': {
+  939:         this.#audioChunkList = [];
+  940:         this.#applyUiEvent('CANCEL');
+  941:         this.#pushUiState(connection);
+  942:         break;
+  943:       }
+  944:       case 'text_input': {
+  945:         await this.#runTurnFromText(
+  946:           connection,
+  947:           deviceMessage.text,
+  948:           deviceMessage.tts,
+  949:           deviceMessage.request_id,
+  950:           deviceMessage.client_turn_id,
+  951:           deviceMessage.generation,
+  952:         );
+  953:         break;
+  954:       }
+  955:       case 'abort': {
+  956:         // Only a flag: the paced TTS loop is awaiting between chunks, so it
+  957:         // picks this up on its next turn and stops sending.
+  958:         this.#isSpeechAborted = true;
+  959:         break;
+  960:       }
+  961:       case 'confirm': {
+  962:         await this.#resolveConfirm(connection, deviceMessage.ok);
+  963:         break;
+  964:       }
+  965:       case 'gesture': {
+  966:         await this.#handleGesture(connection, deviceMessage.gesture);
+  967:         break;
+  968:       }
+  969:       case 'telemetry': {
+  970:         await this.#handleTelemetry(deviceMessage);
+  971:         break;
+  972:       }
+  973:       case 'mcp': {
+  974:         this.#deviceMcpRequestRegistry.resolvePendingRequest(deviceMessage.payload);
+  975:         break;
+  976:       }
+  977:       case 'playback_ack': {
+  978:         this.#lastPlaybackAck = {
+  979:           sequence: deviceMessage.sequence,
+  980:           playedMilliseconds: deviceMessage.playedMilliseconds,
+  981:           receivedAtMilliseconds: Date.now(),
+  982:         };
+  983:         break;
+  984:       }
+  985:       case 'alarm_dismiss': {
+  986:         if (deviceMessage.id === this.#activeAlarmId) {
+  987:           this.#alarmStopSignal = true;
+  988:           this.#activeAlarmId = null;
+  989:           this.#pushUiState(connection);
+  990:         }
+  991:         break;
+  992:       }
+  993:       case 'set_response_output_target': {
+  994:         this.setState({
+  995:           ...this.state,
+  996:           responseOutputTarget: deviceMessage.target,
+  997:         });
+  998:         break;
+  999:       }
+ 1000:     }
+ 1001:   }
+ 1002: 
+ 1003:   // BLOCK 9.1/9.2: corre el camino de PRODUCCIÃ“N de una tool â€”mismo pipeline,
+ 1004:   // mismo resolver, mismo catÃ¡logoâ€” para poder verificarlo contra workerd real
+ 1005:   // sin el LLM.
+ 1006:   //
+ 1007:   // NO es un @callable: no estÃ¡ en el RPC del WebSocket, asÃ­ que ningÃºn cliente
+ 1008:   // de device puede invocarlo aunque tenga la conexiÃ³n abierta. Se atiende acÃ¡,
+ 1009:   // en el fetch del DO, y sÃ³lo si el servidor tiene la condiciÃ³n test-only
+ 1010:   // prendida. En una deployment real la superficie no existe.
+
+
+===== lineas 1011-1120 : fetch: routing HTTP del nodo =====
+
+ 1011:   override async fetch(request: Request): Promise<Response> {
+ 1012:     const requestUrl = new URL(request.url);
+ 1013:     if (requestUrl.pathname.endsWith(`/${APOLLO_TOOL_HARNESS_PATH}`)) {
+ 1014:       // Sin la condicion test-only la superficie NO existe: 404, no 403. Y
+ 1015:       // nunca se atiende por WebSocket, asi que ningun device conectado puede
+ 1016:       // alcanzarlo aunque tenga la sesion abierta.
+ 1017:       const isHarnessRequest = isApolloToolHarnessRequest({
+ 1018:         pathname: requestUrl.pathname,
+ 1019:         upgradeHeader: request.headers.get('Upgrade'),
+ 1020:         environment: this.env,
+ 1021:       });
+ 1022:       if (!isHarnessRequest) {
+ 1023:         return buildApolloToolHarnessDisabledResponse();
+ 1024:       }
+ 1025:       const harnessRequest = readApolloToolHarnessRequest(await request.text());
+ 1026:       if (harnessRequest.status !== 'parsed' || harnessRequest.request === undefined) {
+ 1027:         return Response.json({ status: 'invalid_request' }, { status: 400 });
+ 1028:       }
+ 1029:       return Response.json(await this.#runToolForHarness(harnessRequest.request), {
+ 1030:         headers: { 'Cache-Control': 'no-store' },
+ 1031:       });
+ 1032:     }
+ 1033:     return super.fetch(request);
+ 1034:   }
+ 1035: 
+ 1036:   // El harness NO puede tocar la resoluciÃ³n ni la autorizaciÃ³n: llama al mismo
+ 1037:   // pipeline que un turno. Por eso no expone capability, ni deviceId, ni una
+ 1038:   // forma de saltear pasos.
+ 1039:   async #runToolForHarness(request: ApolloToolHarnessRequest): Promise<{
+ 1040:     readonly status: 'ran';
+ 1041:     readonly outcome: string;
+ 1042:     readonly ok?: boolean;
+ 1043:     readonly summary?: string;
+ 1044:     readonly capabilityName?: string | null;
+ 1045:     readonly targetDeviceId?: string | null;
+ 1046:     readonly targetDeviceType?: string | null;
+ 1047:   }> {
+ 1048:     const toolDefinitionMap = buildToolDefinitionMap(listBuiltinToolDefinitionList());
+ 1049:     const correlation = {
+ 1050:       requestId: request.correlation?.requestId ?? crypto.randomUUID(),
+ 1051:       clientTurnId: request.correlation?.clientTurnId ?? null,
+ 1052:       generation: request.correlation?.generation ?? null,
+ 1053:     };
+ 1054:     // BLOCK 11 Â§21: el harness es el Ãºnico camino que corre el pipeline real
+ 1055:     // fuera de un turno de voz, asÃ­ que es donde se pueden medir las etapas
+ 1056:     // (resoluciÃ³n de capability, autorizaciÃ³n, ejecuciÃ³n) sin inventar nÃºmeros.
+ 1057:     const pipelineStartMs = Date.now();
+ 1058:     // La capability se resuelve ANTES de la llamada: dentro de onTiming no se
+ 1059:     // puede leer `pipelineOutcome` porque todavÃ­a no estÃ¡ inicializado.
+ 1060:     const harnessCapabilityName = resolveCapabilityForToolName(
+ 1061:       toolDefinitionMap,
+ 1062:       request.toolName,
+ 1063:     );
+ 1064:     const pipelineOutcome = await executeToolWithTargetResolution({
+ 1065:       toolName: request.toolName,
+ 1066:       args: (request.args ?? {}) as JsonSerializableValue,
+ 1067:       origin: 'llm',
+ 1068:       toolDefinitionMap,
+ 1069:       context: { environment: this.env, nowMilliseconds: Date.now() },
+ 1070:       resolver: buildCapabilityTargetResolver(this.env),
+ 1071:       correlation,
+ 1072:       onTiming: (timing) => {
+ 1073:         console.log(
+ 1074:           buildCapabilityTimingLogLine({
+ 1075:             requestId: correlation.requestId,
+ 1076:             clientTurnId: correlation.clientTurnId,
+ 1077:             generation: correlation.generation,
+ 1078:             toolName: request.toolName,
+ 1079:             capabilityName: harnessCapabilityName ?? null,
+ 1080:             timing,
+ 1081:             routingMs: 0,
+ 1082:             totalActionMs: Date.now() - pipelineStartMs,
+ 1083:           }),
+ 1084:         );
+ 1085:       },
+ 1086:     });
+ 1087:     if (pipelineOutcome.status === 'skipped') {
+ 1088:       return {
+ 1089:         status: 'ran',
+ 1090:         outcome: 'skipped',
+ 1091:         ok: false,
+ 1092:         summary: pipelineOutcome.cancellation.message,
+ 1093:         capabilityName: pipelineOutcome.capabilityName ?? null,
+ 1094:       };
+ 1095:     }
+ 1096:     if (pipelineOutcome.status === 'needs_confirm') {
+ 1097:       return {
+ 1098:         status: 'ran',
+ 1099:         outcome: 'needs_confirm',
+ 1100:         capabilityName: pipelineOutcome.capabilityName ?? null,
+ 1101:         targetDeviceId: pipelineOutcome.target?.deviceId ?? null,
+ 1102:         targetDeviceType: pipelineOutcome.target?.deviceType ?? null,
+ 1103:       };
+ 1104:     }
+ 1105:     return {
+ 1106:       status: 'ran',
+ 1107:       outcome: 'done',
+ 1108:       ok: pipelineOutcome.result.ok,
+ 1109:       summary: pipelineOutcome.result.summary,
+ 1110:       capabilityName: pipelineOutcome.capabilityName ?? null,
+ 1111:       targetDeviceId: pipelineOutcome.target?.deviceId ?? null,
+ 1112:       targetDeviceType: pipelineOutcome.target?.deviceType ?? null,
+ 1113:     };
+ 1114:   }
+ 1115: 
+ 1116:   @callable()
+ 1117:   async confirmAction(isApproved: boolean): Promise<ApolloState> {
+ 1118:     const connection = [...this.getConnections(DEVICE_CONNECTION_TAG)][0];
+ 1119:     if (connection === undefined) {
+ 1120:       return this.state;
+
+
+===== lineas 2940-2969 : authorizeApolloConnection: autenticacion del socket =====
+
+ 2940:     return models
+ 2941:       .filter(
+ 2942:         (m: any) =>
+ 2943:           (m.supportedActions?.includes('generateContent') ||
+ 2944:             m.supportedGenerationMethods?.includes('generateContent')) &&
+ 2945:           m.name?.toLowerCase().includes('tts'),
+ 2946:       )
+ 2947:       .map((m: any) => ({
+ 2948:         name: m.name,
+ 2949:         displayName: m.displayName,
+ 2950:         supportedActions: m.supportedActions ?? m.supportedGenerationMethods ?? [],
+ 2951:       }));
+ 2952:   }
+ 2953: }
+ 2954: 
+ 2955: export { PcBridge };
+ 2956: 
+ 2957: export async function authorizeApolloConnection(
+ 2958:   request: Request,
+ 2959:   environment: Env,
+ 2960: ): Promise<Response | undefined> {
+ 2961:   const connectionRole = await resolveApolloConnectionRole(
+ 2962:     new URL(request.url),
+ 2963:     environment,
+ 2964:   );
+ 2965:   if (connectionRole === null) {
+ 2966:     return new Response('Unauthorized', { status: 401 });
+ 2967:   }
+ 2968:   return undefined;
+ 2969: }

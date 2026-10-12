@@ -1,0 +1,579 @@
+# BLOQUE: bloque1c-routes-auth
+# Apollo PC / Apollo Node - material de referencia para Android
+# Generado desde el repo, sin secretos.
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\route.ts =====
+
+import { z } from 'zod';
+
+import {
+  isDeviceSharedSecretValid,
+  readBearerCredentialFromRequest,
+  readDeviceTokenFromRequestUrl,
+} from '@/auth/token';
+import {
+  claimEnrollmentChallenge,
+  isDeviceCredentialShaped,
+  issueEnrollmentChallenge,
+  type EnrollmentStore,
+} from '@/devices/enrollment';
+import { resolveMobileBridgeClient } from '@/devices/bridge-client';
+import { deviceIdSchema } from '@/devices/identity';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// BLOCK 12: la frontera de autorizaciÃ³n del endpoint mobile.
+//
+// Antes de este bloque habÃ­a UN secreto para todos: `?token=DEVICE_SHARED_SECRET`
+// abrÃ­a el socket y `mobile-bridge.ts` fabricaba el mismo proof para cualquier
+// conexiÃ³n que llegara. No existÃ­a identidad por dispositivo, asÃ­ que revocar
+// un telÃ©fono era imposible de expresar.
+//
+// Ahora hay DOS Ã¡mbitos, y no se mezclan:
+//
+//   enrolled_android      Authorization: Bearer <credencial individual>
+//                         Se verifica contra el hash guardado, en el servidor.
+//
+//   legacy_shared_secret  ?token=<DEVICE_SHARED_SECRET>
+//                         Desktop y telÃ©fonos legacy. Sin cambios.
+//
+// La separaciÃ³n no es una convenciÃ³n: si viene `Authorization`, se resuelve SÃ“LO
+// por bearer y `?token=` se ignora. No hay fallback de uno al otro, asÃ­ que una
+// credencial revocada no puede "colarse" por el camino legacy, ni una credencial
+// individual puede ser aceptada como secreto global.
+//
+// La autorizaciÃ³n de verdad â€”incluido el rechazo de un deviceId revocado que
+// vuelve por el camino legacyâ€” vive en `devices/enrollment.ts` y se aplica en el
+// DO. AcÃ¡ sÃ³lo se decide si la peticiÃ³n llega.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// Rutas y binding del bridge mobile. Sin cambios respecto de Block 8.1: PcBridge
+// y Apollo siguen por su propio camino.
+//
+// El nombre de instancia del Apollo DO ES la identidad de un desk (memoria,
+// preferencias, trabajo pendiente), y un telÃ©fono no es un desk. MobileBridge es
+// UNA sola instancia compartida que multiplexa todos los sockets mobile sobre un
+// Ãºnico registry: es el mismo patrÃ³n que PcBridge, que tambiÃ©n es dueÃ±o de su
+// registry y se consulta por RPC.
+export const MOBILE_BRIDGE_AGENT_NAME = 'mobile-bridge';
+export const MOBILE_BRIDGE_ROUTE_PREFIX = `/agents/${MOBILE_BRIDGE_AGENT_NAME}`;
+
+export type MobileBridgeRouteDecision =
+  | { readonly isMobileBridgeRoute: true; readonly instanceName: string }
+  | { readonly isMobileBridgeRoute: false };
+
+export function isMobileBridgeRequestPath(pathname: string): boolean {
+  return pathname.startsWith(`${MOBILE_BRIDGE_ROUTE_PREFIX}/`);
+}
+
+// Un device se presenta siempre con Upgrade: websocket. Esto decide si la
+// peticiÃ³n ES una conexiÃ³n de dispositivo.
+export function resolveMobileBridgeRoute(input: {
+  readonly pathname: string;
+  readonly upgradeHeader: string | null;
+}): MobileBridgeRouteDecision {
+  if (input.upgradeHeader?.toLowerCase() !== 'websocket') {
+    return { isMobileBridgeRoute: false };
+  }
+  if (!isMobileBridgeRequestPath(input.pathname)) {
+    return { isMobileBridgeRoute: false };
+  }
+  const instanceName = input.pathname.slice(MOBILE_BRIDGE_ROUTE_PREFIX.length + 1);
+  if (instanceName.length === 0) {
+    return { isMobileBridgeRoute: false };
+  }
+  return { isMobileBridgeRoute: true, instanceName };
+}
+
+export type MobileRequestAuth = {
+  readonly scope: 'enrolled_android' | 'legacy_shared_secret';
+};
+
+export type MobileRouteAuthorization =
+  | { readonly isAuthorized: true; readonly auth: MobileRequestAuth }
+  | { readonly isAuthorized: false; readonly response: Response };
+
+function unauthorizedResponse(): Response {
+  // El body es exactamente 'Unauthorized': ni el motivo ni el secreto
+  // presentado van en la respuesta. El por quÃ© se queda en el log del servidor,
+  // que es donde lo consulta el dueÃ±o y no un atacante anÃ³nimo.
+  return new Response('Unauthorized', { status: 401 });
+}
+
+/**
+ * Decide si una peticiÃ³n al endpoint mobile estÃ¡ autorizada, y con quÃ© Ã¡mbito.
+ *
+ * Orden deliberado:
+ *   1. Si hay `Authorization`, Ã©se es el Ã¡mbito. Sin fallback al legacy.
+ *   2. Si no hay `Authorization`, es el camino legacy: rol 'device' por
+ *      `DEVICE_SHARED_SECRET`, exactamente como antes de este bloque.
+ */
+export async function authorizeMobileDeviceRequest(input: {
+  readonly request: Request;
+  readonly environment: Env;
+}): Promise<MobileRouteAuthorization> {
+  const bearerCredential = readBearerCredentialFromRequest(input.request);
+  if (bearerCredential !== null) {
+    // El borde NO verifica la credencial contra el store: el store vive en el
+    // SQLite del DO y consultarlo desde acÃ¡ serÃ­a un round-trip por conexiÃ³n.
+    //
+    // Lo que sÃ­ hace el borde es descartar lo que no puede ser vÃ¡lido nunca: un
+    // bearer con otra forma no es una credencial per-device. Eso es lo que
+    // impide que alguien ponga DEVICE_SHARED_SECRET en el header Authorization
+    // esperando que se lo aceptemos como credencial.
+    //
+    // La verificaciÃ³n real â€”y la revocaciÃ³nâ€” pasan en `MobileBridge.onConnect`,
+    // que es la Ãºnica autoridad. Dos reglas de autorizaciÃ³n en dos lugares es
+    // exactamente cÃ³mo nace un bypass.
+    if (!isDeviceCredentialShaped(bearerCredential)) {
+      return { isAuthorized: false, response: unauthorizedResponse() };
+    }
+    return { isAuthorized: true, auth: { scope: 'enrolled_android' } };
+  }
+
+  // Camino legacy, idÃ©ntico al de antes: rol 'device' por el secreto global.
+  const presentedToken = readDeviceTokenFromRequestUrl(new URL(input.request.url));
+  const isLegacyDevice = await isDeviceSharedSecretValid(
+    presentedToken,
+    input.environment.DEVICE_SHARED_SECRET,
+  );
+  if (!isLegacyDevice) {
+    return { isAuthorized: false, response: unauthorizedResponse() };
+  }
+  // Sin deviceId todavÃ­a: la regla anti-bypass se aplica en el DO, cuando llega
+  // el hello, que es el primer momento en que el cliente declara su identidad.
+  return { isAuthorized: true, auth: { scope: 'legacy_shared_secret' } };
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Superficie HTTP de enrollment (Â§2).
+//
+// Rutas relativas al prefijo del bridge, sobre el MISMO DO que las conexiones,
+// que es lo que hace posible revocar un socket vivo sin salir al Worker.
+//
+// La autenticaciÃ³n de estas rutas NO es la de device: issuing un desafÃ­o es una
+// acciÃ³n del dueÃ±o, asÃ­ que pide el rol 'dashboard'. El claim NO pide nada,
+// porque el telÃ©fono todavÃ­a no tiene credencial: lo autoriza el desafÃ­o, que
+// es de un solo uso y expira solo.
+//
+// El transporte del rol `dashboard` es `Authorization: Bearer` y sÃ³lo eso. Estas
+// rutas NO comparten el camino `?token=` que sigue usando el Ã¡mbito legacy del
+// socket mobile: ese `?token=` abre conexiones, no administra enrollment. Que un
+// secreto sirva para una cosa no lo hace servir para la de al lado.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export const ENROLLMENT_CHALLENGE_SUFFIX = '/enrollment/challenge';
+export const ENROLLMENT_CLAIM_SUFFIX = '/enrollment/claim';
+export const ENROLLMENT_REVOKE_SUFFIX = '/enrollment/revoke';
+
+export type EnrollmentHttpResponse = {
+  readonly status: number;
+  readonly body: unknown;
+};
+
+/**
+ * BLOCK 12.1 Â§4: el token del dashboard viaja en `Authorization: Bearer` para las
+ * operaciones administrativas de enrollment, no en la URL.
+ *
+ * `Authorization` es el ÃšNICO mecanismo. No hay fallback a `?token=`, y antes de
+ * escribir esto el comentario afirmaba lo contrario: decÃ­a que `?token=` quedaba
+ * "como compatibilidad" mientras el cÃ³digo no lo aceptaba. No era una decisiÃ³n,
+ * era un comentario equivocado que ademÃ¡s se contradecÃ­a a sÃ­ mismo en la misma
+ * frase ("no hay cliente legado que preservar" / "romperÃ­a a un script").
+ *
+ * No se agrega el fallback. Las rutas son nuevas de BLOCK 12, ningÃºn cliente del
+ * repo las llama con `?token=` â€”el Ãºnico que las usa es `apps/mobile`, por
+ * `Authorization`â€” y un token del dueÃ±o en la query aparece en los access logs,
+ * en el `Referer` y en cualquier diagnÃ³stico de URL.
+ *
+ * Comprobado sobre workerd: `?token=<DASHBOARD_SHARED_SECRET>` responde 401 en
+ * `/enrollment/challenge` y en `/enrollment/revoke`.
+ *
+ * El bearer se compara contra DASHBOARD_SHARED_SECRET y NUNCA contra
+ * DEVICE_SHARED_SECRET: una credencial de dispositivo no puede administrar
+ * enrollment. Tampoco acepta el esquema `Basic`.
+ */
+function isOwnerAuthorized(request: Request, environment: Env): Promise<boolean> {
+  return isDeviceSharedSecretValid(
+    readBearerCredentialFromRequest(request),
+    environment.DASHBOARD_SHARED_SECRET,
+  );
+}
+
+/** Â§2 paso 2: el dueÃ±o pide un desafÃ­o. Devuelve el valor UNA vez, en claro. */
+export async function handleEnrollmentChallengeRequest(input: {
+  readonly request: Request;
+  readonly environment: Env;
+  readonly store: EnrollmentStore;
+  readonly nowMilliseconds: number;
+}): Promise<Response> {
+  // El body se lee ANTES de autorizar, no despuÃ©s.
+  //
+  // Un handler que responde 401 sin consumir el cuerpo deja el stream abierto:
+  // el runtime de Cloudflare y el middleware de wrangler intentan drenarlo despuÃ©s
+  // de que la respuesta ya saliÃ³, y el request muere con un 500 en vez del 401.
+  // Pasaba en el smoke una de cada N corridas, y sÃ³lo con el camino NO autorizado,
+  // que es justo el que se prueba para confirmar que rechaza.
+  let body: unknown;
+  try {
+    body = await input.request.clone().json();
+  } catch {
+    body = null;
+  }
+  if (!(await isOwnerAuthorized(input.request, input.environment))) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  const parsed = enrollmentChallengeRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return Response.json({ status: 'rejected', reason: 'body_invalid' }, { status: 400 });
+  }
+  const deviceId = parsed.data.deviceId;
+  if (!isEnrollableMobileDeviceId(deviceId)) {
+    return Response.json(
+      { status: 'rejected', reason: 'device_id_invalid' },
+      { status: 400 },
+    );
+  }
+  const issued = await issueEnrollmentChallenge({
+    store: input.store,
+    nowMilliseconds: input.nowMilliseconds,
+    boundDeviceId: deviceId,
+  });
+  return Response.json({
+    challenge: issued.challenge,
+    deviceId,
+    expiresAtMilliseconds: issued.expiresAtMilliseconds,
+  });
+}
+
+/**
+ * BLOCK 12.1 Â§2.3: el dueÃ±o declara el `deviceId` que autoriza y el vÃ­nculo queda
+ * guardado con el desafÃ­o. Antes el desafÃ­o era un pase sin dueÃ±o, asÃ­ que quien
+ * lo obtuviera podÃ­a reclamar cualquier identidad.
+ *
+ * El body va con Zod estricto: un campo de mÃ¡s, o un deviceId que no sea mobile,
+ * se rechazan antes de tocar el store y no despuÃ©s.
+ */
+export const enrollmentChallengeRequestSchema = z
+  .object({
+    deviceId: z.string().min(3).max(128),
+  })
+  .strict();
+
+/**
+ * Â§2 pasos 3 a 5: el telÃ©fono canjea el desafÃ­o y recibe su credencial.
+ *
+ * Sin autenticaciÃ³n propia a propÃ³sito: el desafÃ­o ES la autorizaciÃ³n. Por eso
+ * tiene que ser impredecible, de un solo uso y corto â€” y por eso el claim corre
+ * SIEMPRE contra el reloj del servidor.
+ */
+export async function handleEnrollmentClaimRequest(input: {
+  readonly request: Request;
+  readonly store: EnrollmentStore;
+  readonly nowMilliseconds: number;
+}): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await input.request.clone().json();
+  } catch {
+    return Response.json({ status: 'rejected', reason: 'body_invalid' }, { status: 400 });
+  }
+  const claim = readClaimInput(body);
+  if (claim === null) {
+    return Response.json({ status: 'rejected', reason: 'body_invalid' }, { status: 400 });
+  }
+  const result = await claimEnrollmentChallenge({
+    store: input.store,
+    nowMilliseconds: input.nowMilliseconds,
+    challenge: claim.challenge,
+    deviceId: claim.deviceId,
+    isDeviceIdValid: isEnrollableMobileDeviceId,
+  });
+  if (result.status !== 'enrolled') {
+    return Response.json({ status: 'rejected', reason: result.reason }, { status: 403 });
+  }
+  // La credencial viaja una sola vez, en el body de esta respuesta, y de ahÃ­
+  // sigue al Keystore del telÃ©fono. Nunca se loguea ni vuelve al servidor.
+  return Response.json({
+    status: 'enrolled',
+    deviceId: result.deviceId,
+    credential: result.credential,
+    rotated: result.rotated,
+  });
+}
+
+/** Â§5: revocar. SÃ³lo el dueÃ±o. La fila revocada es lo que cierra el bypass legacy. */
+export async function handleEnrollmentRevokeRequest(input: {
+  readonly request: Request;
+  readonly environment: Env;
+  readonly store: EnrollmentStore;
+  readonly nowMilliseconds: number;
+  readonly revoke: (deviceId: string) => Promise<'closed_socket' | 'no_socket'>;
+}): Promise<Response> {
+  // Mismo motivo que en el challenge: el cuerpo se consume antes de responder,
+  // incluso en el 401.
+  let body: unknown;
+  try {
+    body = await input.request.clone().json();
+  } catch {
+    body = null;
+  }
+  if (!(await isOwnerAuthorized(input.request, input.environment))) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  const deviceId = readDeviceIdInput(body);
+  if (deviceId === null || !isEnrollableMobileDeviceId(deviceId)) {
+    return Response.json({ status: 'rejected', reason: 'body_invalid' }, { status: 400 });
+  }
+  const record = await input.store.readCredential(deviceId);
+  if (record === null) {
+    return Response.json({ status: 'unknown_device', deviceId }, { status: 404 });
+  }
+  // Se marca revoked conservando el hash, igual que `revokeDeviceCredential`: es
+  // lo que permite reportar `credential_revoked` al telÃ©fono en vez de un
+  // `credential_unknown` que lo harÃ­a reconectar en loop.
+  await input.store.saveCredential({
+    deviceId,
+    credentialHash: record.credentialHash,
+    status: 'revoked',
+    updatedAtMilliseconds: input.nowMilliseconds,
+  });
+  // El socket vivo se cierra acÃ¡, no por timeout del cliente: revocar tiene que
+  // doler en el momento.
+  const socketOutcome = await input.revoke(deviceId);
+  return Response.json({ status: 'revoked', deviceId, socketOutcome });
+}
+
+function readClaimInput(body: unknown): { challenge: string; deviceId: string } | null {
+  if (typeof body !== 'object' || body === null) {
+    return null;
+  }
+  const record = body as Record<string, unknown>;
+  const challenge = record['challenge'];
+  const deviceId = record['deviceId'];
+  if (typeof challenge !== 'string' || typeof deviceId !== 'string') {
+    return null;
+  }
+  return { challenge, deviceId };
+}
+
+function readDeviceIdInput(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) {
+    return null;
+  }
+  const deviceId = (body as Record<string, unknown>)['deviceId'];
+  return typeof deviceId === 'string' ? deviceId : null;
+}
+
+/**
+ * Las tres rutas de enrollment comparten un mismo contrato: 401 sin autorizaciÃ³n
+ * de dueÃ±o, 400 con body invÃ¡lido, y un body `{status, reason}` con el motivo
+ *estable. El smoke y los tests leen siempre esa forma.
+ */
+export type EnrollmentRouteKind = 'challenge' | 'claim' | 'revoke';
+
+export function resolveEnrollmentRouteKind(pathname: string): EnrollmentRouteKind | null {
+  if (pathname.endsWith(ENROLLMENT_CHALLENGE_SUFFIX)) {
+    return 'challenge';
+  }
+  if (pathname.endsWith(ENROLLMENT_CLAIM_SUFFIX)) {
+    return 'claim';
+  }
+  if (pathname.endsWith(ENROLLMENT_REVOKE_SUFFIX)) {
+    return 'revoke';
+  }
+  return null;
+}
+
+// El binding lo hereda el starter. El index.ts usa este alias; la resoluciÃ³n de
+// la instancia vive en devices/bridge-client.ts para que no haya dos formas de
+// nombrar el bridge.
+export const resolveMobileBridgeStub = resolveMobileBridgeClient;
+
+/**
+ * Un deviceId de enrollment tiene que ser mobile. Aceptar `desktop:algo` serÃ­a
+ * abrir una fila de credenciales para algo que no es un telÃ©fono, y `?token=`
+ * seguirÃ­a siendo la Ãºnica forma de autenticarse para ese id.
+ */
+export function isEnrollableMobileDeviceId(deviceId: string): boolean {
+  return deviceIdSchema.safeParse(deviceId).success && deviceId.startsWith('mobile:');
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\token.ts =====
+
+function encodeUtf8(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
+
+/**
+ * Compara dos textos sin filtrar por longitud ni por posiciÃ³n del primer byte
+ * distinto.
+ *
+ * El `difference` acumula todos los XOR en vez de cortar en el primero: si
+ * cortara, el tiempo que tarda depende de cuÃ¡ntos bytes correctos hubo, y eso ya
+ * es un canal.
+ */
+export function areTextsEqualTimingSafe(leftText: string, rightText: string): boolean {
+  return areByteArraysEqualTimingSafe(encodeUtf8(leftText), encodeUtf8(rightText));
+}
+
+function areByteArraysEqualTimingSafe(
+  leftBytes: Uint8Array,
+  rightBytes: Uint8Array,
+): boolean {
+  if (leftBytes.byteLength !== rightBytes.byteLength) {
+    return false;
+  }
+  let difference = 0;
+  for (let index = 0; index < leftBytes.byteLength; index += 1) {
+    const leftByte = leftBytes[index] ?? 0;
+    const rightByte = rightBytes[index] ?? 0;
+    difference |= leftByte ^ rightByte;
+  }
+  return difference === 0;
+}
+
+/**
+ * Un secreto esperado que no estÃ¡ cargado NO es un secreto vacÃ­o: es la
+ * ausencia del secreto, y la respuesta es siempre no.
+ *
+ * Centralizado porque los tres caminos que comparan secretos tienen que
+ * coincidir en esto. Donde un camino `===` y otro usa esta funciÃ³n, uno de los
+ * dos estÃ¡ abierto: si el binding no se provisionÃ³, la comparaciÃ³n directa
+ * terminarÃ­a comparando contra `undefined`.
+ */
+function isPresentedSecretAccepted(
+  presentedSecret: string | null,
+  expectedSecret: string | undefined,
+): boolean {
+  if (expectedSecret === undefined || expectedSecret.length === 0) {
+    return false;
+  }
+  if (presentedSecret === null) {
+    return false;
+  }
+  return areTextsEqualTimingSafe(presentedSecret, expectedSecret);
+}
+
+export async function isDeviceSharedSecretValid(
+  presentedSecret: string | null,
+  // The generated Env type claims the Worker secret is always a string, but an
+  // unset secret arrives as undefined at runtime: accept that honestly and
+  // reject the connection instead of throwing a 500.
+  expectedSecret: string | undefined,
+): Promise<boolean> {
+  return isPresentedSecretAccepted(presentedSecret, expectedSecret);
+}
+
+export function readDeviceTokenFromRequestUrl(requestUrl: URL): string | null {
+  return requestUrl.searchParams.get('token');
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// BLOCK 12 Â§4: credenciales individuales en el header Authorization.
+//
+// Por quÃ© el header y no la URL: un `?token=` aparece en access logs, en
+// `Referer` cuando el cliente navega, en cualquier `console.log` de una URL y en
+// los diagnostics del runtime. La credencial de un telÃ©fono no puede ir ahÃ­.
+//
+// El header tiene su propio namespace: un `Authorization` NUNCA se valida contra
+// DEVICE_SHARED_SECRET ni contra DASHBOARD_SHARED_SECRET. Si se aceptara, una
+// credencial individual podrÃ­a actuar como secreto global, y al revÃ©s: el secreto
+// global podrÃ­a ocupar el lugar de una credencial individual. Son Ã¡mbitos
+// separados y el cÃ³digo los separa por construcciÃ³n: cada uno sÃ³lo se compara
+// contra lo que le corresponde.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const BEARER_PREFIX = 'bearer ';
+
+/**
+ * El valor crudo del header Authorization, o null. No se valida acÃ¡: sÃ³lo se
+ * separa del header. Quien valida es `verifyDeviceCredential`, contra el store
+ * de enrollment.
+ */
+export function readBearerCredentialFromRequest(request: Request): string | null {
+  const authorizationHeader = request.headers.get('Authorization');
+  if (authorizationHeader === null) {
+    return null;
+  }
+  const normalizedHeader = authorizationHeader.trim().toLowerCase();
+  if (!normalizedHeader.startsWith(BEARER_PREFIX)) {
+    return null;
+  }
+  const credential = authorizationHeader.trim().slice(BEARER_PREFIX.length);
+  return credential.length === 0 ? null : credential;
+}
+
+/**
+ * BLOCK 12.2 Â§3: el token interno de `/api/internal/*`.
+ *
+ * Antes comparaba con `===` contra `env.INTERNAL_CORE_TOKEN`. Eso ya fallaba
+ * cerrado por casualidad â€”`null === undefined` es `false`â€” y por eso el hueco no
+ * se veÃ­a. Lo que faltaba era el motivo: si algÃºn dÃ­a el valor esperado llegaba
+ * vacÃ­o en vez de ausente, `''` y un header vacÃ­o habrÃ­an coincidido. Ahora usa el
+ * mismo camino que los secretos de device y de dashboard.
+ */
+export function isInternalCoreTokenValid(
+  presentedToken: string | null,
+  expectedToken: string | undefined,
+): boolean {
+  return isPresentedSecretAccepted(presentedToken, expectedToken);
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\role.ts =====
+
+import { isDeviceSharedSecretValid, readDeviceTokenFromRequestUrl } from '@/auth/token';
+
+export type ApolloConnectionRole = 'device' | 'dashboard' | 'pc_visual';
+
+export const DEVICE_CONNECTION_TAG: ApolloConnectionRole = 'device';
+export const PC_VISUAL_CONNECTION_TAG: ApolloConnectionRole = 'pc_visual';
+
+export function hasDeviceConnectionTag(connectionTagList: readonly string[]): boolean {
+  return connectionTagList.includes(DEVICE_CONNECTION_TAG);
+}
+
+export function hasPcVisualConnectionTag(connectionTagList: readonly string[]): boolean {
+  return connectionTagList.includes(PC_VISUAL_CONNECTION_TAG);
+}
+
+export async function resolveApolloConnectionRole(
+  requestUrl: URL,
+  environment: Env,
+): Promise<ApolloConnectionRole | null> {
+  const presentedToken = readDeviceTokenFromRequestUrl(requestUrl);
+  if (await isDeviceSharedSecretValid(presentedToken, environment.DEVICE_SHARED_SECRET)) {
+    return 'device';
+  }
+  if (
+    await isDeviceSharedSecretValid(presentedToken, environment.DASHBOARD_SHARED_SECRET)
+  ) {
+    return 'dashboard';
+  }
+  return null;
+}
+
+
+===== C:\Users\Admin\Documents\Apollo y Jarvis\ApolloHouse\docs\apollo-pc-mobile-porting\02-identity-auth\http.ts =====
+
+import { resolveApolloConnectionRole } from '@/auth/role';
+
+// The MCP OAuth provider redirects the owner's browser to the agent callback
+// path without an Apollo token; the agents SDK validates its own state
+// parameter there, so that path must stay reachable.
+export async function authorizeApolloHttpRequest(
+  request: Request,
+  environment: Env,
+): Promise<Response | undefined> {
+  const requestUrl = new URL(request.url);
+  if (requestUrl.pathname.endsWith('/callback')) {
+    return undefined;
+  }
+  const connectionRole = await resolveApolloConnectionRole(requestUrl, environment);
+  if (connectionRole === null) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  return undefined;
+}
+

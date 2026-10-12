@@ -30,12 +30,13 @@ class LocalQwenProvider:
         self,
         base_url: str | None = None,
         model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float = 3.0,
     ):
         self.base_url = base_url or os.getenv("LLAMA_SERVER_URL", DEFAULT_LLAMA_SERVER_URL)
         self.model = model or os.getenv("LLAMA_MODEL", DEFAULT_MODEL)
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.timeout = aiohttp.ClientTimeout(total=timeout, connect=2.0)
         self._session: aiohttp.ClientSession | None = None
+        self._server_down = False
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -53,6 +54,8 @@ class LocalQwenProvider:
         Does NOT use history - classifier works best with short prompts.
         Uses temperature=0 for deterministic output, max_tokens=1 for single letter.
         """
+        if self._server_down:
+            return "C"
         session = await self._ensure_session()
 
         messages = [
@@ -75,8 +78,10 @@ class LocalQwenProvider:
                     raise RuntimeError(f"llama-server error {resp.status}: {error_text}")
                 data = await resp.json()
         except asyncio.TimeoutError:
+            self._server_down = True
             raise RuntimeError("llama-server timeout")
         except aiohttp.ClientError as e:
+            self._server_down = True
             raise RuntimeError(f"llama-server connection error: {e}")
 
         try:
@@ -91,6 +96,8 @@ class LocalQwenProvider:
 
     async def chat_local(self, user_text: str, history: list[dict] | None = None) -> str:
         """Generate a local conversational response (for intent C)."""
+        if self._server_down:
+            raise RuntimeError("llama-server down")
         session = await self._ensure_session()
 
         messages = [
@@ -113,10 +120,12 @@ class LocalQwenProvider:
         try:
             async with session.post(self.base_url, json=payload) as resp:
                 if resp.status != 200:
+                    self._server_down = True
                     raise RuntimeError(f"llama-server error {resp.status}")
                 data = await resp.json()
                 return data["choices"][0]["message"]["content"].strip()
         except Exception as e:
+            self._server_down = True
             raise RuntimeError(f"Local chat failed: {e}")
 
 

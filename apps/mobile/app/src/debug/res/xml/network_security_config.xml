@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BLOCK 12.5.2: cleartext acotado a loopback, solo en la variante debug.
+
+  `base-config` con `cleartextTrafficPermitted="false"` es lo que importa: es el
+  default por omision desde targetSdk 28, pero se declara explicito para que
+  quede a la vista que la app no lo pide en ningun lado. Ahi aplica para todos
+  los dominios, incluidos loopback.
+
+  Recien despues, `domain-config` lo habilita para tres hosts: el loopback de
+  la maquina de desarrollo (al que llega el telefono por `adb reverse`), el
+  alias localhost, y `10.0.2.2`, que es como el emulador ve al host.
+
+  Si mañana se agrega un host de produccion, NO va aca: va con TLS, y por eso
+  no existe un camino en este archivo que lo habilite sin cifrado.
+
+  `<certificates src="@raw/apollo_dev_ca" />` confía la CA de desarrollo de
+  Apollo y SOLO esa: viene incrustada como recurso, no hace falta instalar nada
+  en el telefono y ninguna otra CA del usuario queda confiable. Es lo que
+  permite probar contra el proxy TLS de la red local sin abrir cleartext.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <certificates src="@raw/apollo_dev_ca" />
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>
