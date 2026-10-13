@@ -117,12 +117,19 @@ class ConversationSession(
         transitionTo(ConversationState.CONNECTING)
 
         val request = DeviceSocketRequest(
-            url = ConversationContract.buildConversationUrl(
-                workerHost = workerHost,
-                deviceId = boundDeviceId,
-                isDebugBuild = isDebugBuild
-            ),
-            headerMap = buildHeaderMap(credential)
+            url = when (credential) {
+                is DeviceCredential.AccountSession -> ConversationContract.buildAccountConversationUrl(
+                    workerHost = workerHost,
+                    accountId = credential.accountId,
+                    isDebugBuild = isDebugBuild,
+                )
+                else -> ConversationContract.buildConversationUrl(
+                    workerHost = workerHost,
+                    deviceId = boundDeviceId,
+                    isDebugBuild = isDebugBuild,
+                )
+            },
+            headerMap = buildHeaderMap(credential),
         )
         val newSocket = socketFactory.open(request, object : DeviceSocketListener {
             override fun onOpen() {
@@ -176,6 +183,10 @@ class ConversationSession(
         when (credential) {
             is DeviceCredential.Enrolled -> mapOf(
                 "Authorization" to "Bearer ${credential.credential}"
+            )
+            // La sesión de cuenta viaja igual de privada: header, nunca query.
+            is DeviceCredential.AccountSession -> mapOf(
+                "Authorization" to "Bearer ${credential.sessionToken}"
             )
             // El camino legacy del PC mete el secreto en la query. El teléfono
             // enrolado NUNCA lo usa: si no tiene credencial, no tiene sesión.

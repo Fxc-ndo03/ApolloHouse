@@ -32,7 +32,7 @@ export async function consumeApolloQueueBatch(
           memoryId: job.memoryId,
           content: job.content,
           values,
-          deviceId: job.deviceId,
+          accountId: job.accountId,
         });
         message.ack();
         continue;
@@ -82,14 +82,14 @@ export async function enqueueMemoryIndexJob(
   input: {
     readonly memoryId: string;
     readonly content: string;
-    readonly deviceId: string;
+    readonly accountId: string;
   },
 ): Promise<void> {
   await environment.APOLLO_QUEUE.send({
     type: 'index_memory',
     memoryId: input.memoryId,
     content: input.content,
-    deviceId: input.deviceId,
+    accountId: input.accountId,
   });
 }
 

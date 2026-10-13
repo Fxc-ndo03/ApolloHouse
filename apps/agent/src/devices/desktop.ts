@@ -2,8 +2,14 @@ import {
   listImplementedCapabilityNameList,
   type CapabilityName,
 } from '@/devices/capability';
-import { LEGACY_PROTOCOL_VERSION, type DeviceType } from '@/devices/schema';
+import {
+  targetPreferenceSchema,
+  LEGACY_PROTOCOL_VERSION,
+  type DeviceType,
+  type TargetPreference,
+} from '@/devices/schema';
 import type { DeviceIdentitySource } from '@/devices/identity';
+import { deviceIdSchema } from '@/devices/identity';
 import {
   normalizePresence,
   normalizeUnavailableReason,
@@ -47,12 +53,19 @@ export function buildDesktopRegistrationFromHello(input: {
   readonly protocolVersion: number;
   readonly lastSeenAt: number;
 } {
+  // FASE 2.4: el deviceId persistente de la instalación (si el cliente lo
+  // manda y tiene formato válido) gana sobre el hostname. La AUTORIZACIÓN no
+  // viene de acá: la resuelve authorizeDesktopHello contra el registro.
+  const declaredDeviceId = input.hello.deviceId;
+  const usesDeclaredIdentity =
+    declaredDeviceId !== undefined && deviceIdSchema.safeParse(declaredDeviceId).success;
+  const deviceId = usesDeclaredIdentity
+    ? declaredDeviceId
+    : buildDesktopDeviceIdFromHostname(input.hostname);
   return {
-    deviceId: buildDesktopDeviceIdFromHostname(input.hostname),
+    deviceId,
     deviceType: 'desktop',
-    // El desktop sí deriva su id del hostname (identidad de transporte heredada).
-    // Es explícito para que ningún otro device type pueda aplicarlo.
-    identitySource: 'desktop_hostname_legacy',
+    identitySource: usesDeclaredIdentity ? 'device_id' : 'desktop_hostname_legacy',
     capabilityNameList: resolveDesktopCapabilityNameList(input.hello.capabilities),
     protocolVersion: input.hello.protocolVersion ?? LEGACY_PROTOCOL_VERSION,
     lastSeenAt: input.nowMilliseconds,
@@ -63,13 +76,76 @@ export function buildDesktopRegistrationFromHello(input: {
 // real y su registry.
 export function buildPcBridgeCapabilityTargetResolver(
   environment: Env,
+  requestingAccountId: string | null = null,
 ): CapabilityTargetResolver {
   return async ({ capabilityName, targetPreference }) => {
     const { getAgentByName } = await import('agents');
+    // FASE 2.5 — con cuenta autenticada, el destino se elige entre los
+    // desktops ENROLADOS de ESA cuenta, instancia PcBridge por dispositivo.
+    if (requestingAccountId !== null) {
+      const { selectDesktopTarget } = await import('@/devices/desktop-target');
+      const registry = environment.AccountRegistry.getByName('registry');
+      const accountDesktopList = await registry.listAccountDesktopDevices(
+        requestingAccountId,
+      );
+      const parsedPreference = targetPreferenceSchema.safeParse(
+        targetPreference ?? { kind: 'any' },
+      );
+      const preference: TargetPreference = parsedPreference.success
+        ? parsedPreference.data
+        : { kind: 'any' };
+      const preferenceKind: 'any' | 'specific' =
+        preference.kind === 'device' ? 'specific' : 'any';
+      const specificDeviceId =
+        preference.kind === 'device' ? preference.deviceId : null;
+      const isDesktopOnline = async (deviceId: string): Promise<boolean> => {
+        try {
+          const bridge = await getAgentByName(environment.PcBridge, deviceId);
+          return (await bridge.isDesktopConnectionAlive()) === true;
+        } catch {
+          return false;
+        }
+      };
+      const candidateStatusList = await Promise.all(
+        accountDesktopList.map(async (candidate) => ({
+          deviceId: candidate.deviceId,
+          isRevoked: candidate.isRevoked,
+          isOnline: await isDesktopOnline(candidate.deviceId),
+        })),
+      );
+      const selection = selectDesktopTarget({
+        requestingAccountId,
+        targetPreference:
+          preferenceKind === 'specific' && specificDeviceId !== null
+            ? { kind: 'specific', deviceId: specificDeviceId }
+            : { kind: 'any' },
+        accountDesktopList: candidateStatusList,
+        isDesktopOnline: (deviceId) =>
+          candidateStatusList.find((candidate) => candidate.deviceId === deviceId)?.isOnline ===
+          true,
+      });
+      if (selection.status !== 'resolved') {
+        return {
+          status: 'unavailable',
+          reason: normalizeUnavailableReason(selection.reason),
+        };
+      }
+      const targetBridge = await getAgentByName(environment.PcBridge, selection.deviceId);
+      const presence = (await targetBridge.resolveDesktopPresence()) ?? 'online';
+      return {
+        status: 'resolved',
+        target: {
+          deviceId: selection.deviceId,
+          deviceType: 'desktop',
+          presence: normalizePresence(presence),
+        },
+      };
+    }
     const pcBridge = await getAgentByName(environment.PcBridge, 'pc-bridge');
     const answer = (await pcBridge.resolveCapabilityTarget({
       capabilityName,
       targetPreference,
+      requestingAccountId,
     })) as {
       readonly status: 'resolved' | 'unavailable';
       readonly deviceId: string | null;

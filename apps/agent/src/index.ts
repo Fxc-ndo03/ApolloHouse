@@ -3,7 +3,9 @@ import { Sandbox } from '@cloudflare/sandbox';
 
 import { authorizeApolloConnection, Apollo, PcBridge } from '@/agents/apollo';
 import { MobileBridge } from '@/agents/mobile-bridge';
+import { AccountRegistry } from '@/accounts/do';
 import { authorizeApolloHttpRequest } from '@/auth/http';
+import { handleAccountAuthRequest } from '@/auth/routes';
 import { CODING_PROXY_PATH_PREFIX, handleCodingLlmProxyRequest } from '@/coding/proxy';
 import { handleOtaRequest } from '@/ota/routes';
 import { consumeApolloQueueBatch } from '@/queues/consume';
@@ -26,7 +28,7 @@ import type { ToolDefinition } from '@/tools/types';
 import { chatWithGemini } from '@/voice/llm';
 import { chatWithFallbackLlm } from '@/voice/provider';
 
-export { Apollo, ApolloBackground, ApolloCoding, Sandbox, PcBridge, MobileBridge };
+export { Apollo, ApolloBackground, ApolloCoding, Sandbox, PcBridge, MobileBridge, AccountRegistry };
 
 // The hosted management console probes /health cross-origin before opening
 // the agent WebSocket; auth is the query token, never a cookie, so a wildcard
@@ -46,10 +48,41 @@ function requireInternalToken(request: Request, env: Env): boolean {
 }
 
 export default {
-  async fetch(request: Request, environment: Env): Promise<Response> {
-    const requestUrl = new URL(request.url);
+    async fetch(request: Request, environment: Env): Promise<Response> {
+      const requestUrl = new URL(request.url);
 
-    if (requestUrl.pathname === '/health') {
+      if (requestUrl.pathname.startsWith('/api/auth/')) {
+        const registry = environment.AccountRegistry.get(
+          environment.AccountRegistry.idFromName('registry'),
+        );
+        return handleAccountAuthRequest(request, requestUrl.pathname, registry);
+      }
+
+      // FASE 2.6/2.7 — SOLO STAGING: la ruta no existe salvo que el var
+      // APOLLO_ENABLE_USAGE_DEBUG esté prendido (staging) Y venga el token
+      // interno. En producción no se declara el var: 404, nunca superficie.
+      if (
+        environment.APOLLO_ENABLE_USAGE_DEBUG === 'true' &&
+        requestUrl.pathname.startsWith('/api/debug/usage')
+      ) {
+        if (request.method !== 'GET') {
+          return new Response('Method Not Allowed', { status: 405 });
+        }
+        if (!requireInternalToken(request, environment)) {
+          return new Response('Unauthorized', { status: 401 });
+        }
+        const debugAccountId = requestUrl.searchParams.get('accountId') ?? '';
+        if (!debugAccountId.startsWith('acc_')) {
+          return Response.json({ error: 'invalid_account' }, { status: 400 });
+        }
+        const apollo = environment.Apollo.get(
+          environment.Apollo.idFromName(`acct-${debugAccountId}`),
+        );
+        const rows = await apollo.debugListUsageEvents(debugAccountId);
+        return Response.json({ accountId: debugAccountId, events: rows });
+      }
+
+      if (requestUrl.pathname === '/health') {
       if (request.method === 'OPTIONS') {
         return new Response(null, { headers: CONSOLE_CORS_HEADER_MAP });
       }

@@ -1,11 +1,13 @@
 import { z } from 'zod';
 
+import { accountIdSchema, LEGACY_ACCOUNT_ID } from '@/accounts/identity';
+
 export const apolloQueueJobSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('index_memory'),
     memoryId: z.string().min(1),
     content: z.string().min(1),
-    deviceId: z.string().min(1).default('default'),
+    accountId: accountIdSchema.default(LEGACY_ACCOUNT_ID),
   }),
   z.object({
     type: z.literal('run_background'),

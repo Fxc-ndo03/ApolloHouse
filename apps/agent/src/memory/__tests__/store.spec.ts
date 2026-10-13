@@ -1,4 +1,7 @@
+const TEST_ACCOUNT_ID = 'acc_2222222222222222222222222222test';
+
 import { describe, expect, it } from 'bun:test';
+
 
 import {
   addMemoryRecord,
@@ -15,6 +18,7 @@ function createInMemorySqlExecutor(): MemorySqlExecutor {
     id: string;
     content: string;
     created_at: number;
+    account_id: string;
   }> = [];
   const preferenceMap = new Map<string, string>();
 
@@ -27,19 +31,20 @@ function createInMemorySqlExecutor(): MemorySqlExecutor {
         id: String(bindValues[0]),
         content: String(bindValues[1]),
         created_at: Number(bindValues[2]),
+        account_id: String(bindValues[3]),
       });
       return [];
     }
-    if (query.startsWith('SELECT id, content, created_at FROM memories WHERE')) {
+    if (query.includes('LIKE')) {
       const likePattern = String(bindValues[0]).replaceAll('%', '');
-      const limit = Number(bindValues[1]);
+      const limit = Number(bindValues[2]);
       return memoryRowList
         .filter((row) => row.content.includes(likePattern))
         .toSorted((left, right) => right.created_at - left.created_at)
         .slice(0, limit);
     }
-    if (query.startsWith('SELECT id, content, created_at FROM memories')) {
-      const limit = Number(bindValues[0]);
+    if (query.startsWith('SELECT id, content, created_at FROM memories WHERE')) {
+      const limit = Number(bindValues[1]);
       return [...memoryRowList]
         .toSorted((left, right) => right.created_at - left.created_at)
         .slice(0, limit);
@@ -64,8 +69,8 @@ function createInMemorySqlExecutor(): MemorySqlExecutor {
 describe('memory store', () => {
   it('adds and lists recent memories', async () => {
     const sqlExecutor = createInMemorySqlExecutor();
-    await addMemoryRecord(sqlExecutor, 'me gusta el mate', 1000, () => 'mem-1');
-    const recentList = await listRecentMemoryRecords(sqlExecutor, 5);
+    await addMemoryRecord(sqlExecutor, 'me gusta el mate', TEST_ACCOUNT_ID, 1000, () => 'mem-1');
+    const recentList = await listRecentMemoryRecords(sqlExecutor, 5, TEST_ACCOUNT_ID);
     expect(recentList).toEqual([
       { id: 'mem-1', content: 'me gusta el mate', createdAt: 1000 },
     ]);
@@ -73,9 +78,9 @@ describe('memory store', () => {
 
   it('recalls by query text', async () => {
     const sqlExecutor = createInMemorySqlExecutor();
-    await addMemoryRecord(sqlExecutor, 'tomo mate a la mañana', 1, () => 'a');
-    await addMemoryRecord(sqlExecutor, 'prefiero té', 2, () => 'b');
-    const recalledList = await recallMemoryRecords(sqlExecutor, 'mate', 5);
+    await addMemoryRecord(sqlExecutor, 'tomo mate a la mañana', TEST_ACCOUNT_ID, 1, () => 'a');
+    await addMemoryRecord(sqlExecutor, 'prefiero té', TEST_ACCOUNT_ID, 2, () => 'b');
+    const recalledList = await recallMemoryRecords(sqlExecutor, 'mate', 5, TEST_ACCOUNT_ID);
     expect(recalledList).toHaveLength(1);
     expect(recalledList[0]?.content).toContain('mate');
   });

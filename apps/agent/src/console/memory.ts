@@ -36,14 +36,15 @@ export async function deleteConsoleMemory(
 
 export async function browseConsoleMemory(
   sqlExecutor: MemorySqlExecutor,
+  accountId: string,
   input: { readonly query?: string; readonly limit?: number },
 ): Promise<ConsoleMemoryBrowseResult> {
   const limit = input.limit ?? CONSOLE_MEMORY_DEFAULT_LIMIT;
   const trimmedQuery = input.query?.trim() ?? '';
   const memoryList =
     trimmedQuery.length === 0
-      ? await listRecentMemoryRecords(sqlExecutor, limit)
-      : await recallMemoryRecords(sqlExecutor, trimmedQuery, limit);
+      ? await listRecentMemoryRecords(sqlExecutor, limit, accountId)
+      : await recallMemoryRecords(sqlExecutor, trimmedQuery, limit, accountId);
 
   const storedOwnerMemoryState = await getSessionPreference(
     sqlExecutor,

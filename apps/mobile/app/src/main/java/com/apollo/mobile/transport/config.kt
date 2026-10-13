@@ -51,6 +51,15 @@ data class ClientConfig(
                     "UTF-8"
                 )
             )
+            // FASE 2.3: la sesión de cuenta es del plano de CONVERSACIÓN
+            // (`acct:<accountId>`), no del plano de capacidades (MobileBridge
+            // exige credencial de dispositivo). Sin credencial el bridge
+            // rechaza la conexión y la UI muestra el estado DENIED: el cliente
+            // no finge que hay capacidades cuando no las hay.
+            is DeviceCredential.AccountSession -> DeviceSocketRequest(
+                url = baseUrl,
+                headerMap = emptyMap(),
+            )
         }
     }
 

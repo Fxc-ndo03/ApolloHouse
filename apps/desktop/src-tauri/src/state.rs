@@ -56,7 +56,7 @@ impl OrbState {
 }
 
 pub fn default_input_device_name() -> String {
-    "Micrófono (JBL Quantum 300)".to_string()
+    "MicrÃƒÆ’Ã‚Â³fono (JBL Quantum 300)".to_string()
 }
 
 pub fn default_output_device_name() -> String {
@@ -107,8 +107,28 @@ impl Default for DevicePreferences {
 pub struct AppSettings {
     #[serde(default)]
     pub worker_url: String,
+    /// Identidad estable de ESTA instalaciÃƒÆ’Ã‚Â³n, no un secreto.
+    ///
+    /// Antes no existÃƒÆ’Ã‚Â­a: `CloudCoreManager` usaba `"desktop"` fijo, asÃƒÆ’Ã‚Â­ que dos
+    /// PCs distintas se presentaban como el mismo dispositivo. Va en el JSON de
+    /// preferencias porque no es una credencial: es un identificador pÃƒÆ’Ã‚Âºblico que
+    /// el dueÃƒÆ’Ã‚Â±o necesita leer para autorizar esta instalaciÃƒÆ’Ã‚Â³n.
+    #[serde(default)]
+    pub installation_id: String,
     #[serde(default)]
     pub device_shared_secret: String,
+    /// Cuenta autenticada (FASE 2.3). No es secreto: la UI lo muestra. El
+    /// token de sesión vive en Credential Manager; sin token, este campo se
+    /// ignora y el cliente cae al camino legacy.
+    #[serde(default)]
+    pub account_id: String,
+    /// Marca que el secreto ya fue copiado a Credential Manager.
+    ///
+    /// No borra el secreto del JSON: se conserva para que un rollback manual
+    /// sea posible y para que una instalaciÃƒÆ’Ã‚Â³n existente no quede sin conexiÃƒÆ’Ã‚Â³n.
+    /// Lo que sÃƒÆ’Ã‚Â­ evita es reintentar la escritura en cada arranque.
+    #[serde(default)]
+    pub device_secret_migrated: bool,
     #[serde(default)]
     pub wake_words: Vec<String>,
     #[serde(default)]
@@ -149,8 +169,11 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            worker_url: "wss://apollo.facupapollo.workers.dev/agents/apollo/default".to_string(),
-            device_shared_secret: String::new(),
+        worker_url: "wss://apollo.facupapollo.workers.dev/agents/apollo/default".to_string(),
+        installation_id: String::new(),
+        device_shared_secret: String::new(),
+        account_id: String::new(),
+        device_secret_migrated: false,
             wake_words: vec!["apollo".to_string(), "hey apollo".to_string()],
             use_vosk_wake: true,
             wake_model_dir: None,
@@ -174,26 +197,71 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /**
+     * Identificador estable y ÃƒÆ’Ã‚Âºnico de esta instalaciÃƒÆ’Ã‚Â³n.
+     *
+     * No es una credencial: es el `deviceId` que el Worker ve, y el dueÃƒÆ’Ã‚Â±o lo
+     * necesita conocer para autorizar ESTA PC. Por eso va en el JSON de
+     * preferencias, que ya es legible, y no en un almacÃƒÆ’Ã‚Â©n de secretos.
+     *
+     * El prefijo `desktop:` lo alinea con el que ya usa el telÃƒÆ’Ã‚Â©fono
+     * (`mobile:`), para que los dos clientes se distinguan en el mismo
+     * registro y una interfaz de vinculaciÃƒÆ’Ã‚Â³n pueda mostrarlos juntos.
+     */
+    pub fn generate_installation_id() -> String {
+        format!("desktop:{}", uuid::Uuid::new_v4())
+    }
+
     pub async fn load(app: &AppHandle) -> Result<Self, String> {
         let path = Self::settings_path(app)?;
         if path.exists() {
             let content = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
             let mut loaded: Self =
                 serde_json::from_str(&content).map_err(|e| e.to_string())?;
-            // Migración: si el archivo es viejo/vacío, rellenar con defaults permanentes
+            // MigraciÃƒÆ’Ã‚Â³n: si el archivo es viejo/vacÃƒÆ’Ã‚Â­o, rellenar con defaults permanentes
             let defaults = Self::default();
+            // Una instalaciÃƒÆ’Ã‚Â³n existente no tiene `installation_id`: se le genera
+            // uno y se persiste abajo. Esto NO borra ni altera ninguna otra
+            // preferencia, y el resto del archivo se conserva tal cual.
+            if loaded.installation_id.trim().is_empty() {
+                loaded.installation_id = Self::generate_installation_id();
+            }
             if loaded.device_shared_secret.trim().is_empty() {
                 loaded.device_shared_secret = String::new();
             }
+            let mut needs_save = false;
+            // MigraciÃƒÆ’Ã‚Â³n del secreto a Credential Manager.
+            //
+            // El orden importa: primero se resuelve el valor vigente (el almacÃƒÆ’Ã‚Â©n
+            // si ya tiene algo, el JSON si no), y sÃƒÆ’Ã‚Â³lo despuÃƒÆ’Ã‚Â©s se reescribe el
+            // JSON con ese valor para que las dos fuentes coincidan. Si el
+            // almacÃƒÆ’Ã‚Â©n falla, el JSON conserva el valor y la conexiÃƒÆ’Ã‚Â³n sigue igual.
+            if !loaded.device_shared_secret.trim().is_empty() {
+                let effective_secret = crate::secret_store::load_effective_secret(
+                    &loaded.device_shared_secret,
+                );
+                if !effective_secret.trim().is_empty() {
+                    loaded.device_shared_secret = effective_secret;
+                    needs_save = true;
+                }
+                if !loaded.device_secret_migrated {
+                    loaded.device_secret_migrated =
+                        matches!(crate::secret_store::store_device_secret(
+                            &loaded.device_shared_secret
+                        ), crate::secret_store::SecretStoreOutcome::Ok);
+                    needs_save = true;
+                }
+            }
             if loaded.wake_words.is_empty() {
                 loaded.wake_words = defaults.wake_words.clone();
+                needs_save = true;
             }
-            // Migración: nuevos campos Local Core LAN
-            // No sobrescribir use_local_core si ya fue configurado explícitamente
+            // MigraciÃƒÆ’Ã‚Â³n: nuevos campos Local Core LAN
+            // No sobrescribir use_local_core si ya fue configurado explÃƒÆ’Ã‚Â­citamente
             if loaded.core_lan_url.trim().is_empty() {
                 loaded.core_lan_url = defaults.core_lan_url.clone();
             }
-            // Directorio del modelo: "" o ruta rota → usar el bundleado
+            // Directorio del modelo: "" o ruta rota ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ usar el bundleado
             if let Some(dir) = loaded.wake_model_dir.as_ref() {
                 let trimmed = dir.trim();
                 if trimmed.is_empty()
@@ -206,8 +274,7 @@ impl AppSettings {
             if loaded.worker_url.trim().is_empty() {
                 loaded.worker_url = defaults.worker_url.clone();
             }
-            // Migración: solo guardar si HICIMOS cambios reales en la estructura
-            let mut needs_save = false;
+            // MigraciÃƒÆ’Ã‚Â³n: solo guardar si HICIMOS cambios reales en la estructura
             if loaded.wake_words.is_empty() {
                 loaded.wake_words = defaults.wake_words.clone();
                 needs_save = true;
@@ -238,6 +305,10 @@ impl AppSettings {
                 loaded.output_device_name = defaults.output_device_name.clone();
                 needs_save = true;
             }
+            if loaded.installation_id.trim().is_empty() {
+                loaded.installation_id = Self::generate_installation_id();
+                needs_save = true;
+            }
             let path_str = path.to_string_lossy();
             let secret_diag = if loaded.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" };
             eprintln!("[apollo] settings: path={} secret={secret_diag} needs_save={}", path_str, needs_save);
@@ -247,7 +318,10 @@ impl AppSettings {
             Ok(loaded)
         } else {
             eprintln!("[apollo] settings: path={} file-exists=false secret=(vacio)", path.to_string_lossy());
-            let defaults = Self::default();
+            let mut defaults = Self::default();
+            // InstalaciÃƒÆ’Ã‚Â³n nueva: el identificador se genera una vez y se
+            // persiste con el resto de preferencias.
+            defaults.installation_id = Self::generate_installation_id();
             let _ = defaults.save(app).await;
             Ok(defaults)
         }
@@ -335,6 +409,81 @@ mod tests {
     fn default_settings_have_empty_secret() {
         let s = AppSettings::default();
         assert!(s.device_shared_secret.is_empty());
+    }
+
+    #[test]
+    fn default_settings_have_no_installation_id() {
+        // El default NO trae un id fijo: si lo trajera, dos instalaciones
+        //arias arrancadas del mismo binario serÃƒÆ’Ã‚Â­an el mismo dispositivo.
+        let s = AppSettings::default();
+        assert!(s.installation_id.is_empty());
+    }
+
+    #[test]
+    fn generated_installation_id_has_the_desktop_prefix() {
+        let id = AppSettings::generate_installation_id();
+        assert!(
+            id.starts_with("desktop:"),
+            "el id debe llevar el prefijo desktop:, se obtuvo {id}"
+        );
+    }
+
+    #[test]
+    fn generated_installation_ids_are_unique() {
+        let first = AppSettings::generate_installation_id();
+        let second = AppSettings::generate_installation_id();
+        assert_ne!(first, second, "dos instalaciones no pueden coincidir");
+    }
+
+    #[test]
+    fn installation_id_survives_a_serialization_round_trip() {
+        let mut settings = AppSettings::default();
+        settings.installation_id = AppSettings::generate_installation_id();
+        let persisted = settings.installation_id.clone();
+
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            restored.installation_id, persisted,
+            "el id debe sobrevivir a guardar y cargar"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_without_installation_id_still_deserializes() {
+        // MigraciÃƒÆ’Ã‚Â³n: una instalaciÃƒÆ’Ã‚Â³n existente no tiene el campo. serde
+        // `default` debe rellenar "" y no fallar la carga completa.
+        let legacy_json = r#"{"worker_url":"wss://test.example.com","wake_words":["apollo"]}"#;
+        let parsed: AppSettings = serde_json::from_str(legacy_json).unwrap();
+
+        assert!(parsed.installation_id.is_empty());
+        // El resto de las preferencias NO se pierde por la migraciÃƒÆ’Ã‚Â³n.
+        assert_eq!(parsed.worker_url, "wss://test.example.com");
+        assert_eq!(parsed.wake_words, vec!["apollo".to_string()]);
+    }
+
+    #[test]
+    fn installing_an_id_does_not_touch_the_rest_of_the_settings() {
+        // La migraciÃƒÆ’Ã‚Â³n agrega el id y nada mÃƒÆ’Ã‚Â¡s: una preferencia ya configurada
+        // por el dueÃƒÆ’Ã‚Â±o tiene que sobrevivir intacta.
+        let legacy_json = r#"{
+            "worker_url":"wss://worker.example/agents/apollo/default",
+            "device_shared_secret":"TEST_DEVICE_SECRET_123",
+            "wake_words":["hola apollo"]
+        }"#;
+        let mut parsed: AppSettings = serde_json::from_str(legacy_json).unwrap();
+
+        if parsed.installation_id.trim().is_empty() {
+            parsed.installation_id = AppSettings::generate_installation_id();
+        }
+
+        assert!(parsed.installation_id.starts_with("desktop:"));
+        assert_eq!(
+            parsed.device_shared_secret, "TEST_DEVICE_SECRET_123",
+            "el secreto no debe cambiar durante la migraciÃƒÆ’Ã‚Â³n"
+        );
+        assert_eq!(parsed.wake_words, vec!["hola apollo".to_string()]);
     }
 
     #[test]

@@ -258,7 +258,7 @@ describe('B9.2 §5+6: the harness cannot bypass the pipeline', () => {
     const harnessStart = source.indexOf('async #runToolForHarness(');
     const harnessBody = source.slice(harnessStart, harnessStart + 2_000);
     // Usa el resolver de producción, no uno propio.
-    expect(harnessBody).toContain('buildCapabilityTargetResolver(this.env)');
+    expect(harnessBody).toContain('buildCapabilityTargetResolver(this.env, this.#accountId)');
     // Y no resuelve targets por su cuenta ni acepta un resolver del cliente.
     expect(harnessBody).not.toContain('resolveTarget(');
     expect(harnessBody).not.toContain('targetPreference');
@@ -379,7 +379,7 @@ describe('B9.2 §8: no alternative route', () => {
     const source = readApolloSource();
     const harnessStart = source.indexOf('async #runToolForHarness(');
     const harnessBody = source.slice(harnessStart, harnessStart + 2_000);
-    expect(harnessBody).toContain('buildCapabilityTargetResolver(this.env)');
+    expect(harnessBody).toContain('buildCapabilityTargetResolver(this.env, this.#accountId)');
     expect(harnessBody).not.toContain('resolveMobileBridgeClient');
     expect(harnessBody).not.toContain('getAgentByName');
     // Y el cliente del bridge sigue siendo el único que nombra la instancia.

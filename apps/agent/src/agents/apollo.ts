@@ -16,6 +16,25 @@ import {
   shouldPushDashboardOnWeatherRefresh,
   UNAVAILABLE_WEATHER_CONDITION_LABEL,
 } from '@/agents/dashboard';
+import {
+  LEGACY_ACCOUNT_ID,
+  accountIdFromPathSegment,
+} from '@/accounts/identity';
+import {
+  createUsageTableStatement,
+  recordUsageEvent,
+} from '@/usage/usage';
+import {
+  evaluateUsageQuota,
+  listUsageTotalsWithinWindow,
+  resolveUsagePolicyFromEnvironment,
+  startOfUtcDayMilliseconds,
+  startOfUtcMonthMilliseconds,
+} from '@/usage/usage';
+import {
+  createAuthorizedConnectionRegistry,
+  type AuthorizedConnectionRegistry,
+} from '@/agents/connection-authorization';
 import { createDeskToolEffects } from '@/agents/effects';
 import {
   deliverDeskDeviceNotification,
@@ -43,6 +62,7 @@ import {
   type BroadcastUploadSession,
 } from '@/broadcast/logic';
 import {
+    ACCOUNT_SESSION_CONNECTION_TAG,
     DEVICE_CONNECTION_TAG,
     PC_VISUAL_CONNECTION_TAG,
     ENROLLED_DEVICE_CONNECTION_TAG,
@@ -370,6 +390,29 @@ export class Apollo extends Agent<Env, ApolloState> {
   #isSpeechAborted = false;
   #sessionManager: SessionManager | undefined;
   #activeThreadSessionId: string | undefined;
+  #resolvedAccountId: string | undefined;
+  // FASE 2.6: conexiones cuya identidad ya se verificó en onConnect (los tags
+  // asíncronos pueden llegar después del primer mensaje).
+  #authorizedConnectionIds: AuthorizedConnectionRegistry = createAuthorizedConnectionRegistry();
+
+  /**
+   * Cuenta de esta instancia. Las instancias por cuenta se llaman
+   * `acct-<accountId>`; el camino legacy (`default`) resuelve a
+   * `LEGACY_ACCOUNT_ID` mientras dure la migración.
+   */
+  get #accountId(): string {
+    if (this.#resolvedAccountId !== undefined) {
+      return this.#resolvedAccountId;
+    }
+    const resolved = accountIdFromPathSegment(this.name) ?? LEGACY_ACCOUNT_ID;
+    this.#resolvedAccountId = resolved;
+    return resolved;
+  }
+
+  #isAccountInstance(): boolean {
+    return accountIdFromPathSegment(this.name) !== null;
+  }
+
   #idleThreadCheckScheduleId: string | undefined;
   #lastKnownWeatherSnapshot: DeskWeatherSnapshot | undefined;
   #lastTelemetrySnapshot: DeskTelemetrySnapshot | undefined;
@@ -483,13 +526,22 @@ export class Apollo extends Agent<Env, ApolloState> {
     for (const addTargetColumnStatement of [
       'ALTER TABLE pending_confirmations ADD COLUMN target_device_id TEXT',
       'ALTER TABLE pending_confirmations ADD COLUMN target_device_type TEXT',
+      // FASE 2.2/2.4: columnas account_id (defensa en profundidad sobre el
+      // aislamiento por instancia). Las filas pre-fase quedan con NULL: sólo
+      // existen en instancias single-tenant, y las lecturas toleran NULL
+      // dentro de la MISMA instancia. Nunca cruzan instancias.
+      'ALTER TABLE memories ADD COLUMN account_id TEXT',
+      'ALTER TABLE thread_meta ADD COLUMN account_id TEXT',
+      'CREATE INDEX IF NOT EXISTS memories_account_idx ON memories (account_id, created_at)',
+      'CREATE INDEX IF NOT EXISTS thread_meta_account_idx ON thread_meta (account_id, last_turn_at)',
     ]) {
       try {
         this.#sqlExecutor().execute(addTargetColumnStatement);
       } catch {
-        // La columna ya existe: la migración es idempotente.
+        // La columna/índice ya existe: la migración es idempotente.
       }
     }
+    this.#sqlExecutor().execute(createUsageTableStatement);
     // The SDK owns the server rows in cf_agents_mcp_servers; which of their
     // tools Apollo may actually call is ours.
     void this.sql`
@@ -755,13 +807,14 @@ export class Apollo extends Agent<Env, ApolloState> {
     const expiredSessionIdList = listExpiredCommandThreadSessionIds(
       sqlExecutor,
       retentionCutoffMilliseconds,
+      this.#accountId,
     );
     for (const expiredSessionId of expiredSessionIdList) {
       if (expiredSessionId === this.#activeThreadSessionId) {
         continue;
       }
       await this.sessionManager.delete(expiredSessionId);
-      deleteThreadMeta(sqlExecutor, expiredSessionId);
+      deleteThreadMeta(sqlExecutor, expiredSessionId, this.#accountId);
     }
     if (expiredSessionIdList.length > 0) {
       console.log(
@@ -819,6 +872,26 @@ export class Apollo extends Agent<Env, ApolloState> {
     _connection: Connection,
     connectionContext: ConnectionContext,
   ): Promise<string[]> {
+    // FASE 2.2: sesión de cuenta — el dueño de la cuenta, sólo entra a la
+    // instancia `acct-<accountId>` que la sesión dice ser suya. La cuenta se
+    // resuelve SIEMPRE del token; el nombre de la URL se compara, no se confía.
+    const accountSessionResolution = await this.#resolveAccountSession(
+      connectionContext.request,
+    );
+    if (accountSessionResolution.status === 'invalid') {
+      return [];
+    }
+    if (accountSessionResolution.status === 'valid') {
+      if (accountSessionResolution.accountId !== this.#accountId) {
+        return [];
+      }
+      return [ACCOUNT_SESSION_CONNECTION_TAG, DEVICE_CONNECTION_TAG];
+    }
+    // FASE 2.4: el secreto global legacy SÓLO abre la instancia legacy
+    // `default`. Si volviera a abrir instancias de cuenta sería un bypass.
+    if (this.#isAccountInstance()) {
+      return [];
+    }
     // Un nodo enrolado lleva su credencial en `Authorization: Bearer`, nunca en
     // `?token=`. Se verifica contra la tabla que vive en el MobileBridge y se
     // exige que la identidad resuelta sea la duena de esta instancia.
@@ -854,6 +927,114 @@ export class Apollo extends Agent<Env, ApolloState> {
   #isOwnDeviceInstance(deviceId: string): boolean {
     const expectedInstanceId = this.env.Apollo.idFromName(deviceId);
     return expectedInstanceId.equals(this.ctx.id);
+  }
+
+  /**
+   * FASE 2.7 — chequeo + reserva de cuota en UN SOLO bloque síncrono.
+   *
+   * Todas las operaciones son `storage.sql.exec` síncronas: sin `await` entre
+   * el chequeo y la reserva, JavaScript no puede intercalar otro turno entre
+   * ambos (el input gate del DO sólo se abre en awaits). Así dos turnos
+   * simultáneos de la misma cuenta no pueden pasar el chequeo con la misma
+   * cuota — la carrera detectada en staging con la versión async.
+   *
+   * Devuelve `null` si la cuota fue reservada (turno autorizado), o el límite
+   * excedido sin haber reservado nada.
+   */
+  #checkAndReserveTurnQuota(): string | null {
+    const nowMilliseconds = Date.now();
+    const executor = this.#sqlExecutor();
+    const dailyUsage = listUsageTotalsWithinWindow(
+      executor,
+      this.#accountId,
+      startOfUtcDayMilliseconds(nowMilliseconds),
+      nowMilliseconds,
+    );
+    const monthlyUsage = listUsageTotalsWithinWindow(
+      executor,
+      this.#accountId,
+      startOfUtcMonthMilliseconds(nowMilliseconds),
+      nowMilliseconds,
+    );
+    const recentUsage = listUsageTotalsWithinWindow(
+      executor,
+      this.#accountId,
+      nowMilliseconds - 60_000,
+      nowMilliseconds,
+    );
+    const policy = resolveUsagePolicyFromEnvironment(this.env.APOLLO_USAGE_TIER, this.env);
+    const decision = evaluateUsageQuota(
+      policy,
+      dailyUsage,
+      monthlyUsage,
+      recentUsage.requests,
+    );
+    if (!decision.allowed) {
+      return decision.exceededLimit ?? 'quota';
+    }
+    recordUsageEvent(executor, {
+      accountId: this.#accountId,
+      tokens: 0,
+      requests: 1,
+      voiceSeconds: 0,
+      atMilliseconds: nowMilliseconds,
+    });
+    return null;
+  }
+
+  /** FASE 2.6 — instrumentación de usage (sólo /api/debug/usage con token interno). */
+  async debugListUsageEvents(
+    accountId: string,
+  ): Promise<
+    readonly {
+      readonly tokens: number;
+      readonly requests: number;
+      readonly createdAtMilliseconds: number;
+    }[]
+  > {
+    this.#sqlExecutor().execute(createUsageTableStatement);
+    const rows = this.#sqlExecutor().execute(
+      'SELECT tokens, requests, created_at FROM usage_events WHERE account_id = ? ORDER BY created_at DESC LIMIT 50',
+      accountId,
+    );
+    return rows.map((row) => {
+      const record = row as unknown as {
+        tokens?: unknown;
+        requests?: unknown;
+        created_at?: unknown;
+      };
+      return {
+        tokens: Number(record.tokens ?? 0),
+        requests: Number(record.requests ?? 0),
+        createdAtMilliseconds: Number(record.created_at ?? 0),
+      };
+    });
+  }
+
+  /**
+   * FASE 2.2 — intent de sesión de cuenta deducido sólo del Bearer, sin mirar
+   * la URL. `not_session` = el Bearer es una credencial de dispositivo o no
+   * existe (otro camino de auth). `invalid` = había un token de sesión pero el
+   * AccountRegistry no lo resolvió: se rechaza, nunca se degrada a legacy.
+   * `valid` = sesión viva; la cuenta que devuelve es autoridad.
+   */
+  async #resolveAccountSession(request: Request): Promise<
+    | { readonly status: 'not_session' }
+    | { readonly status: 'invalid' }
+    | { readonly status: 'valid'; readonly accountId: string }
+  > {
+    const credential = readBearerCredentialFromRequest(request);
+    if (credential === null || isDeviceCredentialShaped(credential)) {
+      return { status: 'not_session' };
+    }
+    const registry = this.env.AccountRegistry.getByName('registry');
+    const resolved = await registry.session({
+      token: credential,
+      atMilliseconds: Date.now(),
+    });
+    return resolved.status === 'ok'
+      ? { status: 'valid', accountId: resolved.accountId }
+      : { status: 'invalid' };
   }
 
   /**
@@ -897,26 +1078,67 @@ export class Apollo extends Agent<Env, ApolloState> {
     return !hasDeviceConnectionTag(connection.tags);
   }
 
+  /**
+   * FASE 2.7 — ciclo de vida: el cierre de una conexión elimina su
+   * autorización. Una reconexión es OTRA conexión y pasa SIEMPRE de nuevo por
+   * `onConnect` (sesión válida o credencial no revocada); nada de lo cerrado
+   * reutiliza acceso previo.
+   */
+  async onClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean,
+  ): Promise<void> {
+    this.#authorizedConnectionIds.revoke(connection.id);
+    await super.onClose(connection, code, reason, wasClean);
+  }
+
   async onConnect(
     connection: Connection,
     connectionContext: ConnectionContext,
   ): Promise<void> {
-    // El nodo enrolado abre la ruta con su credencial individual, que el borde
-    // ya dejó pasar por tener la forma. La verificación estricta es acá: si no
-    // es válida, fue revocada o no resuelve una identidad, no entra.
-    const enrolledResolution = await this.#readEnrolledDeviceResolution(connectionContext.request);
-    if (enrolledResolution !== null) {
-      if (enrolledResolution.status !== 'valid' || enrolledResolution.deviceId === null) {
-        connection.close(1008, 'credential_rejected');
-        return;
+    // FASE 2.2: sesión de cuenta primero — inválida o cruzada se cierra, nunca
+    // se degrada a legacy.
+    const accountSessionResolution = await this.#resolveAccountSession(
+      connectionContext.request,
+    );
+    if (
+      accountSessionResolution.status === 'invalid' ||
+      (accountSessionResolution.status === 'valid' &&
+        accountSessionResolution.accountId !== this.#accountId)
+    ) {
+      connection.close(1008, 'account_session_rejected');
+      return;
+    }
+    if (accountSessionResolution.status === 'not_session') {
+      // El nodo enrolado abre la ruta con su credencial individual, que el borde
+      // ya dejó pasar por tener la forma. La verificación estricta es acá: si no
+      // es válida, fue revocada o no resuelve una identidad, no entra.
+      const enrolledResolution = await this.#readEnrolledDeviceResolution(
+        connectionContext.request,
+      );
+      if (enrolledResolution !== null) {
+        if (enrolledResolution.status !== 'valid' || enrolledResolution.deviceId === null) {
+          connection.close(1008, 'credential_rejected');
+          return;
+        }
+        // Y debe ser la dueña de ESTA instancia: sin ese chequeo un movil con
+        // credencial valida entraria al Apollo de otro escribiendo su deviceId en
+        // la URL. Es lo que impide el acceso cruzado entre dispositivos.
+        if (!this.#isOwnDeviceInstance(enrolledResolution.deviceId)) {
+          connection.close(1008, 'device_identity_mismatch');
+          return;
+        }
+        // FASE 2.7: credencial válida y dueña de la instancia — misma
+        // protección que la sesión contra el race de tags asíncronos.
+        this.#authorizedConnectionIds.authorize(connection.id);
       }
-      // Y debe ser la dueña de ESTA instancia: sin ese chequeo un movil con
-      // credencial valida entraria al Apollo de otro escribiendo su deviceId en
-      // la URL. Es lo que impide el acceso cruzado entre dispositivos.
-      if (!this.#isOwnDeviceInstance(enrolledResolution.deviceId)) {
-        connection.close(1008, 'device_identity_mismatch');
-        return;
-      }
+    } else {
+      // FASE 2.6: sesión válida y dueña de esta instancia. Los tags de
+      // getConnectionTags resuelven por RPC y pueden llegar DESPUÉS del primer
+      // mensaje — este registro evita descartar el primer turno legítimo.
+      this.#authorizedConnectionIds.authorize(connection.id);
     }
     await this.#ensurePreferencesLoaded();
     // Everything below replays desk session state to the arriving client, and
@@ -963,7 +1185,11 @@ export class Apollo extends Agent<Env, ApolloState> {
     // `enrolled_device` entra acá SOLO si su identidad es la duena de este
     // `Apollo`: `onConnect` ya cerro con 1008 a los que no lo eran, asi que
     // llegar con ese tag implica haber pasado el chequeo.
-    if (!hasDeviceConnectionTag(connection.tags) && !hasEnrolledDeviceConnectionTag(connection.tags)) {
+    if (
+      !hasDeviceConnectionTag(connection.tags) &&
+      !hasEnrolledDeviceConnectionTag(connection.tags) &&
+      !this.#authorizedConnectionIds.isAuthorized(connection.id)
+    ) {
       return;
     }
 
@@ -1155,8 +1381,12 @@ export class Apollo extends Agent<Env, ApolloState> {
       args: (request.args ?? {}) as JsonSerializableValue,
       origin: 'llm',
       toolDefinitionMap,
-      context: { environment: this.env, nowMilliseconds: Date.now() },
-      resolver: buildCapabilityTargetResolver(this.env),
+      context: {
+        environment: this.env,
+        nowMilliseconds: Date.now(),
+        accountId: this.#accountId,
+      },
+      resolver: buildCapabilityTargetResolver(this.env, this.#accountId),
       correlation,
       onTiming: (timing) => {
         console.log(
@@ -1360,7 +1590,7 @@ export class Apollo extends Agent<Env, ApolloState> {
   ): Promise<ConsoleMemoryBrowseResult> {
     const input = consoleMemoryBrowseInputSchema.parse(rawInput);
     await this.#assertDashboardSecret(input.secret);
-    return browseConsoleMemoryRecords(this.#sqlExecutor(), {
+    return browseConsoleMemoryRecords(this.#sqlExecutor(), this.#accountId, {
       query: input.query,
       limit: input.limit,
     });
@@ -1548,14 +1778,14 @@ export class Apollo extends Agent<Env, ApolloState> {
   ): Promise<ConsoleMemoryBrowseResult> {
     const input = consoleAddMemoryInputSchema.parse(rawInput);
     await this.#assertDashboardSecret(input.secret);
-    const memoryRecord = await addMemoryRecord(this.#sqlExecutor(), input.content);
+    const memoryRecord = await addMemoryRecord(this.#sqlExecutor(), input.content, this.#accountId);
     await rememberFactInSession(this.session, input.content);
     await enqueueMemoryIndexJob(this.env, {
       memoryId: memoryRecord.id,
       content: input.content,
-      deviceId: this.name ?? 'default',
+      accountId: this.#accountId,
     });
-    return browseConsoleMemoryRecords(this.#sqlExecutor(), {});
+    return browseConsoleMemoryRecords(this.#sqlExecutor(), this.#accountId, {});
   }
 
   @callable()
@@ -1569,7 +1799,7 @@ export class Apollo extends Agent<Env, ApolloState> {
       this.env.VECTORIZE,
       input.memoryId,
     );
-    return browseConsoleMemoryRecords(this.#sqlExecutor(), {});
+    return browseConsoleMemoryRecords(this.#sqlExecutor(), this.#accountId, {});
   }
 
   @callable()
@@ -1629,7 +1859,7 @@ export class Apollo extends Agent<Env, ApolloState> {
     );
     return mapThreadCatalogToConsoleThreadList({
       sessionInfoList: this.sessionManager.list(),
-      threadMetaList: listThreadMeta(this.#sqlExecutor()),
+      threadMetaList: listThreadMeta(this.#sqlExecutor(), this.#accountId),
       activeThreadSessionId: this.#activeThreadSessionId ?? null,
       hasLegacyHistory: legacyMessageCount > 0,
       legacySessionId: LEGACY_THREAD_SESSION_ID,
@@ -1992,7 +2222,7 @@ export class Apollo extends Agent<Env, ApolloState> {
         sqlExecutor: this.#sqlExecutor(),
         session: this.session,
         environment: this.env,
-        deviceId: this.name ?? 'default',
+        accountId: this.#accountId,
         nowMilliseconds: Date.now(),
         createIdentifier: () => crypto.randomUUID(),
         gatherTranscriptSince: async (sinceMilliseconds, transcriptByteBudget) =>
@@ -2010,6 +2240,7 @@ export class Apollo extends Agent<Env, ApolloState> {
     const activeThreadSessionIdList = listThreadSessionIdsActiveSince(
       this.#sqlExecutor(),
       sinceMilliseconds,
+      this.#accountId,
     );
     if (activeThreadSessionIdList.length === 0) {
       return { transcriptText: '', hasNewActivity: false };
@@ -2090,7 +2321,7 @@ export class Apollo extends Agent<Env, ApolloState> {
       ACTIVE_THREAD_LAST_TURN_PREFERENCE_KEY,
       String(nowMilliseconds),
     );
-    recordThreadActivity(sqlExecutor, activeThreadSessionId, nowMilliseconds);
+    recordThreadActivity(sqlExecutor, activeThreadSessionId, nowMilliseconds, this.#accountId);
     await this.#scheduleIdleThreadCheck();
   }
 
@@ -2152,7 +2383,7 @@ export class Apollo extends Agent<Env, ApolloState> {
     if (threadInfo === null) {
       return undefined;
     }
-    const threadMeta = getThreadMeta(sqlExecutor, resolvedSessionId);
+    const threadMeta = getThreadMeta(sqlExecutor, resolvedSessionId, this.#accountId);
     const nowMilliseconds = Date.now();
     this.#activeThreadSessionId = resolvedSessionId;
     await setSessionPreference(
@@ -2166,8 +2397,8 @@ export class Apollo extends Agent<Env, ApolloState> {
       String(nowMilliseconds),
     );
     await setSessionPreference(sqlExecutor, PREVIOUS_THREAD_SESSION_PREFERENCE_KEY, '');
-    recordThreadActivity(sqlExecutor, resolvedSessionId, nowMilliseconds);
-    reopenThreadMeta(sqlExecutor, resolvedSessionId);
+    recordThreadActivity(sqlExecutor, resolvedSessionId, nowMilliseconds, this.#accountId);
+    reopenThreadMeta(sqlExecutor, resolvedSessionId, this.#accountId);
     await this.#scheduleIdleThreadCheck();
     return { title: threadInfo.name, summary: threadMeta?.summary ?? null };
   }
@@ -2196,7 +2427,7 @@ export class Apollo extends Agent<Env, ApolloState> {
       const matchList = await queryMemoryVectors({
         vectorizeIndex: this.env.VECTORIZE,
         values,
-        deviceId: this.name ?? 'default',
+        accountId: this.#accountId,
         topK: 8,
       });
       for (const match of matchList) {
@@ -2217,7 +2448,7 @@ export class Apollo extends Agent<Env, ApolloState> {
 
   #findThreadByKeyword(query: string): string | undefined {
     const metaBySessionId = new Map(
-      listThreadMeta(this.#sqlExecutor()).map((meta) => [meta.sessionId, meta]),
+      listThreadMeta(this.#sqlExecutor(), this.#accountId).map((meta) => [meta.sessionId, meta]),
     );
     const candidateList = this.sessionManager
       .list()
@@ -2266,7 +2497,7 @@ export class Apollo extends Agent<Env, ApolloState> {
     if (payload.sessionId === activeThreadSessionId) {
       return;
     }
-    const existingMeta = getThreadMeta(sqlExecutor, payload.sessionId);
+    const existingMeta = getThreadMeta(sqlExecutor, payload.sessionId, this.#accountId);
     if (existingMeta !== undefined && existingMeta.kind !== 'pending') {
       return;
     }
@@ -2306,11 +2537,15 @@ export class Apollo extends Agent<Env, ApolloState> {
         this.sessionManager.rename(payload.sessionId, title);
       },
       persistOutcome: async (outcome) => {
-        markThreadFinalized(sqlExecutor, {
-          sessionId: payload.sessionId,
-          kind: outcome.kind,
-          summary: outcome.summary,
-        });
+        markThreadFinalized(
+          sqlExecutor,
+          {
+            sessionId: payload.sessionId,
+            kind: outcome.kind,
+            summary: outcome.summary,
+          },
+          this.#accountId,
+        );
         // The summary rides the same embedding pipeline as owner facts; the
         // thread- prefix is what resume_conversation later maps back to a
         // session id.
@@ -2321,7 +2556,7 @@ export class Apollo extends Agent<Env, ApolloState> {
               outcome.title !== null
                 ? `${outcome.title}: ${outcome.summary}`
                 : outcome.summary,
-            deviceId: this.name ?? 'default',
+            accountId: this.#accountId,
           });
         }
       },
@@ -2819,10 +3054,35 @@ export class Apollo extends Agent<Env, ApolloState> {
     this.#isSpeechAborted = false;
     await this.#ensureTelemetrySnapshotLoaded();
     await this.#rotateThreadForTurn();
+    const turnReportedUsage = { totalTokens: 0 };
+    // FASE 2.2 - cuota evaluada ANTES de gastar en Gemini: sin chequeo previo,
+    // un usuario fuera de cuota seguiría generando coste.
+    const turnQuotaExceededLimit = this.#checkAndReserveTurnQuota();
+    if (turnQuotaExceededLimit !== null) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          message: 'apollo_turn_quota_blocked',
+          accountId: this.#accountId,
+          limit: turnQuotaExceededLimit,
+        }),
+      );
+      connection.send(
+        encodeServerToDeviceMessage({
+          type: 'error',
+          code: 'quota_exceeded',
+          message: `Límite de uso alcanzado (${turnQuotaExceededLimit})`,
+        }),
+      );
+      return;
+    }
+    // (La reserva ya se hizo dentro de #checkAndReserveTurnQuota, de forma
+    // atómica con el chequeo — no se vuelve a contar aquí.)
     const deskToolEffects = createDeskToolEffects({
       sqlExecutor: this.#sqlExecutor(),
       environment: this.env,
       deviceId,
+      accountId: this.#accountId,
       session: this.session,
       applyFocusMinutes: async (minutes) => {
         const startedAt = Date.now();
@@ -2925,11 +3185,12 @@ export class Apollo extends Agent<Env, ApolloState> {
           },
           session: this.session,
           deviceId,
+          accountId: this.#accountId,
           effects: deskToolEffects,
           loadToolDefinitionMap: () => this.#buildTurnToolDefinitionMap(deskToolEffects),
           // BLOCK 6: el runtime no habla con PcBridge para elegir device;
           // pregunta al registry que vive ahí y recibe sólo un target.
-          resolveCapabilityTarget: buildCapabilityTargetResolver(this.env),
+          resolveCapabilityTarget: buildCapabilityTargetResolver(this.env, this.#accountId),
           // BLOCK 11 §11/§13: una sola llamada al MobileBridge por turno LLM
           // para saber qué devices hay. El runtime decide si filtra el catálogo
           // y si agrega el contexto cross-device.
@@ -2949,11 +3210,35 @@ export class Apollo extends Agent<Env, ApolloState> {
               : null,
           telemetrySnapshot: this.#lastTelemetrySnapshot,
           acquireGeminiToken: () => this.acquireGeminiToken(),
+          onGeminiUsage: (usage) => {
+            turnReportedUsage.totalTokens = usage.totalTokens;
+          },
           pcVisualConnection: [...this.getConnections(PC_VISUAL_CONNECTION_TAG)][0],
         },
         turnPart,
       );
+      if (turnReportedUsage.totalTokens > 0) {
+        // FASE 2.4: tokens reales reportados por Gemini; el request ya se
+        // reservó antes del turno (anti-carrera). Sin reporte, no se inventa.
+        recordUsageEvent(this.#sqlExecutor(), {
+          accountId: this.#accountId,
+          tokens: turnReportedUsage.totalTokens,
+          requests: 0,
+          voiceSeconds: 0,
+          atMilliseconds: Date.now(),
+        });
+      }
     } catch (error) {
+      // FASE 2.5: el intento fallido TAMBIÉN consumió request (el turno llegó
+      // a ejecutarse): se cuenta, si no un cliente en error podría reintentar
+      // sin límite.
+      recordUsageEvent(this.#sqlExecutor(), {
+        accountId: this.#accountId,
+        tokens: 0,
+        requests: 1,
+        voiceSeconds: 0,
+        atMilliseconds: Date.now(),
+      });
       console.error(
         JSON.stringify({
           level: 'error',
@@ -3047,10 +3332,8 @@ export async function authorizeApolloConnection(
   request: Request,
   environment: Env,
 ): Promise<Response | undefined> {
-  const connectionRole = await resolveApolloConnectionRole(
-    new URL(request.url),
-    environment,
-  );
+  const requestUrl = new URL(request.url);
+  const connectionRole = await resolveApolloConnectionRole(requestUrl, environment, request);
   if (connectionRole !== null) {
     return undefined;
   }
@@ -3061,6 +3344,24 @@ export async function authorizeApolloConnection(
   const credential = readBearerCredentialFromRequest(request);
   if (credential !== null && isDeviceCredentialShaped(credential)) {
     return undefined;
+  }
+  // FASE 2.2: sesión de cuenta — el token SÓLO entra a instancias
+  // `acct-<accountId>` y la cuenta la decide la sesión, no el cliente. La
+  // verificación sí puede hacerse acá porque el AccountRegistry es global.
+  if (credential !== null) {
+    const expectedAccountId = accountIdFromPathSegment(
+      requestUrl.pathname.split('/').pop() ?? '',
+    );
+    if (expectedAccountId === null) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+    const registry = environment.AccountRegistry.getByName('registry');
+    const isValid = await registry.verifySessionAccount({
+      token: credential,
+      atMilliseconds: Date.now(),
+      expectedAccountId,
+    });
+    return isValid ? undefined : new Response('Unauthorized', { status: 401 });
   }
   return new Response('Unauthorized', { status: 401 });
 }

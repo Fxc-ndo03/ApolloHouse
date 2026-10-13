@@ -4,6 +4,7 @@ import { useAppStore } from '@/store';
 import { Icon, ApolloMark } from '@/components/ui/Icon';
 import { Orb, toOrbVoiceState } from '@/components/Orb/Orb';
 import { Composer } from '@/components/Chat/Composer';
+import { AccountPanel } from '@/components/Account/AccountPanel';
 import '../Chat/Composer.css';
 import './Assistant.css';
 
@@ -187,6 +188,8 @@ export function Assistant() {
   return (
     <div className="apollo-home">
       <div className="apollo-home-bg" />
+
+      <AccountPanel />
 
       <header className="apollo-home-head">
         <span className="apollo-home-brand">

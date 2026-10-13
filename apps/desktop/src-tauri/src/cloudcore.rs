@@ -18,7 +18,60 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+/// Nombre del header que lleva el secreto global del cliente legacy.
+///
+/// Tiene su propio namespace: `Authorization` es de credencial individual por
+/// dispositivo y nunca debe mezclarse con el secreto global.
+pub const DEVICE_SECRET_HEADER: &str = "X-Apollo-Device-Secret";
+
+/// Arma el request del handshake con el secreto en un header.
+///
+/// Se separa en su propia función para poder testear lo que de verdad importa:
+/// que el secreto NO aparezca en la URL. `connect_async` acepta un
+/// `IntoClientRequest`, y un `Request` completo cumple eso.
+pub fn build_secret_request(
+    worker_url: &str,
+    device_secret: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(worker_url)
+        .header(DEVICE_SECRET_HEADER, device_secret)
+        .body(())
+        .map_err(|build_error| format!("no se pudo armar el request: {build_error}"))
+}
+
+/// Identidad con la que se abre la conversación. Los dos modos no se mezclan:
+/// el secreto global es del cliente legacy (`Apollo/default`) y la sesión de
+/// cuenta es del dueño (`Apollo/acct:<accountId>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationAuth {
+    LegacyDeviceSecret(String),
+    AccountSession { session_token: String },
+}
+
+impl ConversationAuth {
+    pub fn has_credential(&self) -> bool {
+        match self {
+            ConversationAuth::LegacyDeviceSecret(secret) => !secret.is_empty(),
+            ConversationAuth::AccountSession { session_token } => !session_token.is_empty(),
+        }
+    }
+}
+
+/// Arma el request del handshake para la sesión de cuenta: token en el header
+/// `Authorization: Bearer`, nunca en la URL.
+pub fn build_account_request(
+    worker_url: &str,
+    session_token: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(worker_url)
+        .header("Authorization", format!("Bearer {session_token}"))
+        .body(())
+        .map_err(|build_error| format!("no se pudo armar el request: {build_error}"))
+}
 
 use crate::state::{AppState, ConnectionStatus, OrbState};
 
@@ -264,7 +317,7 @@ impl CloudCoreManager {
         &self,
         app: AppHandle,
         worker_url: String,
-        device_secret: String,
+        auth: ConversationAuth,
         device_id: String,
     ) {
         if self.is_running() {
@@ -281,10 +334,11 @@ impl CloudCoreManager {
         let app_handle = app.clone();
         let attempts = self.connect_attempts.clone();
         let metrics = self.metrics.clone();
+        let denied = Arc::new(AtomicBool::new(false));
         let task_handle = tauri::async_runtime::spawn(async move {
             run_reconnect_loop(
                 worker_url,
-                device_secret,
+                auth,
                 device_id,
                 running,
                 connected,
@@ -292,6 +346,7 @@ impl CloudCoreManager {
                 rx,
                 attempts,
                 metrics,
+                denied,
             )
             .await;
         });
@@ -427,7 +482,7 @@ impl Default for CloudCoreManager {
 
 async fn run_reconnect_loop(
     worker_url: String,
-    device_secret: String,
+    auth: ConversationAuth,
     device_id: String,
     running: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
@@ -435,13 +490,14 @@ async fn run_reconnect_loop(
     mut rx: mpsc::Receiver<String>,
     attempts: Arc<std::sync::atomic::AtomicU32>,
     metrics: Arc<Mutex<TurnMetrics>>,
+    denied: Arc<AtomicBool>,
 ) {
     let mut failures: u32 = 0;
-    while running.load(Ordering::SeqCst) {
+    while running.load(Ordering::SeqCst) && !denied.load(Ordering::SeqCst) {
         let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         match serve_once(
             &worker_url,
-            &device_secret,
+            &auth,
             &device_id,
             &running,
             &connected,
@@ -449,6 +505,7 @@ async fn run_reconnect_loop(
             &mut rx,
             attempt,
             &metrics,
+            &denied,
         )
         .await
         {
@@ -481,7 +538,7 @@ async fn run_reconnect_loop(
 
 async fn serve_once(
     worker_url: &str,
-    device_secret: &str,
+    auth: &ConversationAuth,
     device_id: &str,
     running: &Arc<AtomicBool>,
     connected: &Arc<AtomicBool>,
@@ -489,6 +546,7 @@ async fn serve_once(
     rx: &mut mpsc::Receiver<String>,
     attempt: u32,
     metrics: &Arc<Mutex<TurnMetrics>>,
+    denied: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     // Host sin secreto: nunca se registra el token en logs.
     let host = worker_url
@@ -498,17 +556,41 @@ async fn serve_once(
         .split('/')
         .next()
         .unwrap_or("?");
-    let token_present = !device_secret.is_empty();
+    let token_present = auth.has_credential();
     eprintln!(
         "[text-debug] cloudcore-connect-start attempt={} host={} token_present={}",
         attempt, host, token_present,
     );
     let connect_start = std::time::Instant::now();
-    let url = format!("{}?token={device_secret}", worker_url);
-    // Sin timeout, un handshake colgado bloquea el loop de reconexion para
-    // siempre (probado: 0.3s a 28s+ segun frialdad del isolate). Con timeout
-    // se convierte en reintento con backoff en vez de muerte permanente.
-    let connect_result = tokio::time::timeout(std::time::Duration::from_secs(25), connect_async(&url)).await;
+    // El secreto viaja en un header, no en la query string.
+    //
+    // Una URL completa queda en los access logs del Worker, en `Referer`, en
+    // cualquier volcado de URL y en los diagnósticos del runtime. El secreto no
+    // puede estar ahí. El Worker acepta este header; el `?token=` se sigue
+    // aceptando del lado servidor sólo para los clientes viejos que aún lo
+    // usen, y el cliente nuevo ya no lo manda.
+    let built_request = match auth {
+        ConversationAuth::LegacyDeviceSecret(device_secret) => {
+            build_secret_request(worker_url, device_secret)
+        }
+        ConversationAuth::AccountSession { session_token } => {
+            build_account_request(worker_url, session_token)
+        }
+    };
+    let connect_result = match built_request {
+        Ok(request) => {
+            // Sin timeout, un handshake colgado bloquea el loop de reconexion
+            // para siempre. Con timeout se convierte en reintento con backoff.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                connect_async(request),
+            )
+            .await
+        }
+        Err(build_error) => {
+            return Err(format!("request build fallo: {build_error}"));
+        }
+    };
     let handshake_ms = connect_start.elapsed().as_millis();
     let (socket, _) = match connect_result {
         Err(_) => {
@@ -609,6 +691,22 @@ async fn serve_once(
                                 vlog!("[tts-debug] rust-forward-python bytes={}", b64.len());
                             }
                         }
+                    }
+                    Some(Ok(Message::Close(close_frame))) => {
+                        // 1008 = policy violation: el servidor rechazo la
+                        // identidad (sesion expirada/revocada o credencial
+                        // revocada). Reconectar con la MISMA credencial seria
+                        // un loop infinito de rechazos.
+                        let close_code = close_frame.map(|frame| frame.code);
+                        if close_code == Some(tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy) {
+                            denied.store(true, Ordering::SeqCst);
+                            let _ = app_handle.emit(
+                                "account-session-rejected",
+                                serde_json::json!({ "reason": "credential_rejected" }),
+                            );
+                            return Err("credential_rejected (1008)".to_string());
+                        }
+                        return Ok(());
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
@@ -824,6 +922,85 @@ async fn update_connection_status(app_handle: &AppHandle, status: ConnectionStat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn el_token_de_sesion_va_en_el_header_y_no_en_la_url() {
+        let url = "wss://worker.example/agents/apollo/acct:acc_abc123def456abc123def456abc12345";
+        let request = build_account_request(url, "token-sesion-1234567890")
+            .expect("el request debe armarse");
+        assert!(request.uri().to_string().ends_with("acc_abc123def456abc123def456abc12345"));
+        assert!(!request.uri().to_string().contains("token-sesion"));
+        assert_eq!(
+            request.headers().get("Authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer token-sesion-1234567890"),
+        );
+    }
+
+    #[test]
+    fn los_dos_modos_de_auth_no_se_confunden() {
+        let legacy = ConversationAuth::LegacyDeviceSecret("secreto-global".to_string());
+        let account = ConversationAuth::AccountSession {
+            session_token: "token-sesion-1234567890".to_string(),
+        };
+        assert!(legacy.has_credential());
+        assert!(account.has_credential());
+        assert_ne!(legacy, account);
+        assert!(!ConversationAuth::AccountSession {
+            session_token: String::new(),
+        }
+        .has_credential());
+    }
+
+    #[test]
+    fn el_secreto_no_aparece_en_la_url_del_handshake() {
+        // Esta es la razón del cambio: una URL completa queda en los access
+        // logs del Worker, en `Referer` y en los diagnósticos del runtime. Si el
+        // secreto volviera a la query string, aparecería ahí sin que nadie lo
+        // note. El test falla si alguien lo mueve de vuelta.
+        let secret = "secreto-global-de-prueba";
+        let url = "wss://worker.example/agents/apollo/default";
+
+        let request = build_secret_request(url, secret).expect("el request debe armarse");
+
+        assert!(
+            !request.uri().to_string().contains(secret),
+            "el secreto no puede estar en la URL: {}",
+            request.uri()
+        );
+    }
+
+    #[test]
+    fn el_secreto_va_en_el_header_propio() {
+        let secret = "secreto-global-de-prueba";
+        let request = build_secret_request("wss://worker.example/agents/apollo/default", secret)
+            .expect("el request debe armarse");
+
+        let header_value = request
+            .headers()
+            .get(DEVICE_SECRET_HEADER)
+            .and_then(|value| value.to_str().ok());
+
+        assert_eq!(header_value, Some(secret));
+    }
+
+    #[test]
+    fn la_url_del_handshake_no_cambia() {
+        // El header reemplaza al query param, no se suma: la ruta del Apollo
+        // tiene que seguir siendo exactamente la misma de siempre.
+        let url = "wss://apollo.facupapollo.workers.dev/agents/apollo/default";
+        let request = build_secret_request(url, "cualquiera").expect("el request debe armarse");
+        assert_eq!(request.uri().to_string(), url);
+    }
+
+    #[test]
+    fn un_secreto_vacio_no_rompe_el_armado() {
+        // La validación real es del servidor. Si el dueño no cargó secreto, el
+        // header viaja vacío y el Worker responde 401: preferible a un error
+        // local que impida al cliente ni intentar conectarse.
+        let request = build_secret_request("wss://worker.example/agents/apollo/default", "")
+            .expect("un secreto vacío no debe romper el armado");
+        assert_eq!(request.uri().query(), None);
+    }
 
     #[test]
     fn backoff_grows_then_caps() {

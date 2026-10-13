@@ -77,6 +77,14 @@ export type ApolloTurnRuntimeDependencies = {
   ) => Promise<void>;
   readonly session: Session;
   readonly deviceId: string;
+  readonly accountId: string;
+  /** FASE 2.4: tokens reales de Gemini por turno (si el proveedor los reporta). */
+  readonly onGeminiUsage?: (usage: {
+    readonly modelId: string;
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly totalTokens: number;
+  }) => void;
   readonly effects: DeskToolEffects;
   readonly loadToolDefinitionMap?: () => Promise<ReadonlyMap<string, ToolDefinition>>;
   // BLOCK 6: puerto de target selection. Ausente = el runtime se comporta como
@@ -205,7 +213,7 @@ export async function executeApolloTurn(
       geminiEmbeddingModelId:
         dependencies.environment.GEMINI_EMBEDDING_MODEL ?? 'models/text-embedding-004',
       queryText,
-      deviceId: dependencies.deviceId,
+      accountId: dependencies.accountId,
     });
 
   // BLOCK 11 §11: una tool mobile sin teléfono conectado no se le ofrece al
@@ -685,6 +693,16 @@ export async function executeApolloTurn(
               }
             }
             trackQuotaOutcome(() => clearLlmQuotaFailure(dependencies.sqlExecutor));
+            // FASE 2.4: contabilidad real del proveedor. Si Gemini reportó
+            // usageMetadata se entrega a la cuenta; si no, no se inventa nada.
+            if (geminiResult.usage !== undefined) {
+              dependencies.onGeminiUsage?.({
+                modelId: defaultModelId,
+                inputTokens: geminiResult.usage.inputTokens,
+                outputTokens: geminiResult.usage.outputTokens,
+                totalTokens: geminiResult.usage.totalTokens,
+              });
+            }
             const llmElapsedMs = Date.now() - llmStartMs;
             console.log(
               JSON.stringify({
@@ -877,6 +895,7 @@ export async function executeApolloTurn(
       };
 
   const baseTurnInput: TurnInput = {
+    accountId: dependencies.accountId,
     text: turnPart.text,
     audioBuffer: turnPart.audioBuffer,
     request_id: requestId,

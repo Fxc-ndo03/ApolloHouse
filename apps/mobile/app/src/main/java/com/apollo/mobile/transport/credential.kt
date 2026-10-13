@@ -21,6 +21,13 @@ sealed class DeviceCredential {
     /** Credencial individual emitida por enrollment. */
     data class Enrolled(val credential: String) : DeviceCredential()
 
+    /**
+     * Sesión de CUENTA (FASE 2.3): el dueño de la cuenta, no el dispositivo.
+     * Entra por `/agents/apollo/acct:<accountId>` y el servidor decide la
+     * cuenta desde la sesión; el cliente no elige la cuenta.
+     */
+    data class AccountSession(val accountId: String, val sessionToken: String) : DeviceCredential()
+
     /** El secreto global, para Desktop y telefonos legacy. */
     data class LegacySharedSecret(val sharedSecret: String) : DeviceCredential()
 

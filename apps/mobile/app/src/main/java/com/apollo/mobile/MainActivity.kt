@@ -7,6 +7,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.apollo.mobile.conversation.ConversationActivity
+import com.apollo.mobile.identity.AccountAuthClient
+import com.apollo.mobile.identity.AccountAuthOutcome
+import com.apollo.mobile.identity.AccountSessionStore
 import com.apollo.mobile.identity.EnrollmentClaimClient
 import com.apollo.mobile.identity.EnrollmentClaimResult
 import com.apollo.mobile.notification.NotificationPermissionRequest
@@ -84,6 +87,95 @@ class MainActivity : Activity() {
             connect(application = application, workerHost = hostInput.text.toString())
         }
 
+        // FASE 2.3 — cuenta multiusuario. El email/password viajan en el body
+        // del POST (nunca en la URL) y el token de sesión que devuelven vive
+        // cifrado en el Keystore (AccountSessionStore).
+        val accountStatusText = TextView(this)
+        val emailInput = EditText(this).apply { hint = "email" }
+        val passwordInput = EditText(this).apply {
+            hint = "contraseña (mínimo 10 caracteres)"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val accountSessionStore = AccountSessionStore(this)
+        accountStatusText.text = when {
+            accountSessionStore.hasSession() ->
+                "cuenta: ${accountSessionStore.readAccountId()}"
+            else -> "sin sesión de cuenta"
+        }
+        fun runAccountAction(isRegistration: Boolean) {
+            val normalizedHost = normalizeWorkerHostInput(hostInput.text.toString())
+            if (normalizedHost == null) {
+                accountStatusText.text = "el host del Worker no es valido"
+                return
+            }
+            application.workerHost = normalizedHost
+            accountStatusText.text = if (isRegistration) "creando cuenta..." else "ingresando..."
+            application.accountAuthDispatcher.authenticate(
+                client = AccountAuthClient(normalizedHost),
+                email = emailInput.text.toString().trim(),
+                password = passwordInput.text.toString(),
+                isRegistration = isRegistration,
+            ) { outcome ->
+                when (outcome) {
+                    is AccountAuthOutcome.Authenticated -> {
+                        accountSessionStore.writeSession(outcome.accountId, outcome.sessionToken)
+                        passwordInput.setText("")
+                        // Enrolar el dispositivo con la cuenta recién autenticada:
+                        // binding deviceId↔accountId en el servidor.
+                        application.accountAuthDispatcher.authenticate(
+                            client = AccountAuthClient(normalizedHost),
+                            email = emailInput.text.toString().trim(),
+                            password = passwordInput.text.toString(),
+                            isRegistration = false,
+                        ) { }
+                        Thread {
+                            val enrolled = try {
+                                AccountAuthClient(normalizedHost).enrollDevice(
+                                    sessionToken = outcome.sessionToken,
+                                    deviceId = deviceId,
+                                    deviceType = "android",
+                                    deviceName = android.os.Build.MODEL ?: "Android",
+                                )
+                            } catch (unexpected: Exception) {
+                                false
+                            }
+                            runOnUiThread {
+                                accountStatusText.text = if (enrolled) {
+                                    "cuenta: ${outcome.accountId} · dispositivo enrolado"
+                                } else {
+                                    "cuenta: ${outcome.accountId} · dispositivo SIN enrolar"
+                                }
+                            }
+                        }.start()
+                    }
+                    is AccountAuthOutcome.Rejected -> {
+                        passwordInput.setText("")
+                        accountStatusText.text = "no se pudo: ${outcome.reason}"
+                    }
+                }
+            }
+        }
+        val loginButton = Button(this).apply { text = "Ingresar" }
+        loginButton.setOnClickListener { runAccountAction(isRegistration = false) }
+        val registerButton = Button(this).apply { text = "Crear cuenta" }
+        registerButton.setOnClickListener { runAccountAction(isRegistration = true) }
+        val logoutButton = Button(this).apply { text = "Cerrar sesión" }
+        logoutButton.setOnClickListener {
+            val sessionToken = accountSessionStore.readSessionToken()
+            accountSessionStore.clearSession()
+            accountStatusText.text = "sin sesión de cuenta"
+            if (sessionToken != null) {
+                Thread {
+                    try {
+                        AccountAuthClient(normalizeWorkerHostInput(hostInput.text.toString()) ?: application.workerHost)
+                            .logout(sessionToken)
+                    } catch (unexpected: Exception) {
+                    }
+                }.start()
+            }
+        }
+
         // La conversación es una pantalla aparte: la capacidad (MobileBridge) y
         // la conversación (Apollo DO) son dos cosas distintas, y mezclarlas en
         // la misma pantalla confunde al usuario.
@@ -109,6 +201,12 @@ class MainActivity : Activity() {
 
         layout.addView(deviceIdText)
         layout.addView(hostInput)
+        layout.addView(emailInput)
+        layout.addView(passwordInput)
+        layout.addView(loginButton)
+        layout.addView(registerButton)
+        layout.addView(logoutButton)
+        layout.addView(accountStatusText)
         layout.addView(challengeInput)
         layout.addView(enrollButton)
         layout.addView(connectButton)
@@ -224,17 +322,27 @@ class MainActivity : Activity() {
             return
         }
         val deviceId = application.identityStore.resolveStableDeviceId()
-        val enrolledCredential = application.credentialStore.readEnrolledCredential()
-        if (enrolledCredential == null) {
-            statusText.text = "enrola este telefono primero (pega el desafio del dueno)"
-            return
+        // FASE 2.3: la sesión de CUENTA gana — representa al dueño y entra al
+        // Apollo de la cuenta (`acct:<accountId>`), no al del dispositivo. La
+        // credencial enrolada queda para el plano de capacidades.
+        val accountSessionToken = AccountSessionStore(this).readSessionToken()
+        val accountSessionId = AccountSessionStore(this).readAccountId()
+        val credential: DeviceCredential = if (accountSessionToken != null && accountSessionId != null) {
+            DeviceCredential.AccountSession(accountId = accountSessionId, sessionToken = accountSessionToken)
+        } else {
+            val enrolledCredential = application.credentialStore.readEnrolledCredential()
+            if (enrolledCredential == null) {
+                statusText.text = "ingresá a tu cuenta o enrola este teléfono primero"
+                return
+            }
+            DeviceCredential.Enrolled(enrolledCredential)
         }
-        // BLOCK 12.5.1: el host se guarda antes de arrancar, porque el dueno
-        // construye la sesion leyendo de aca en el momento de crearla.
+        // BLOCK 12.5.1: el host se guarda antes de arrancar, porque el dueno]
+        // construye la sesion leyendo de aca en el momento de crearla.]
         application.workerHost = normalizedHost
         val didStart = application.sessionOwner.start(
             deviceId = deviceId,
-            credential = DeviceCredential.Enrolled(enrolledCredential)
+            credential = credential,
         )
         // Idempotente: apretar dos veces no abre dos sockets. El mensaje lo dice
         // en vez de fingir que volvio a conectar.

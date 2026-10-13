@@ -68,6 +68,7 @@ export type TurnInput = {
   readonly speechMode: string;
   readonly focusState: DeskFocusState;
   readonly sqlExecutor: MemorySqlExecutor;
+  readonly accountId: string;
   readonly environment: Env;
   readonly adapters: VoiceAdapters;
   readonly toolDefinitionMap: ReadonlyMap<string, ToolDefinition>;
@@ -361,7 +362,7 @@ export async function runDeskTurn(input: TurnInput): Promise<TurnOutput> {
 
   await input.onThinkingCaption?.('Pensando…');
 
-  const recalledMemoryList = await recallMemoryRecords(input.sqlExecutor, userText, 8);
+  const recalledMemoryList = await recallMemoryRecords(input.sqlExecutor, userText, 8, input.accountId);
   const keywordMemoryContentList = recalledMemoryList.map(
     (memoryRecord) => memoryRecord.content,
   );

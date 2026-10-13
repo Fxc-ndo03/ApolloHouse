@@ -143,7 +143,8 @@ export type ToolCorrelation = {
 export type ToolExecutionContext = {
   readonly environment: Env;
   readonly nowMilliseconds: number;
-  readonly deviceId?: string;
+    readonly deviceId?: string;
+    readonly accountId?: string;
   readonly effects?: DeskToolEffects;
   readonly correlation?: ToolCorrelation;
   // BLOCK 9.1: el device que el pipeline resolvió para ESTA ejecución. Sin

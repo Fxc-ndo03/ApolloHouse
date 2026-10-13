@@ -130,6 +130,7 @@ function buildHarness(): Harness {
     },
     session: buildFakeSession(),
     deviceId: 'desk-confirm',
+    accountId: 'acc_0000000000000000000000000000abc1',
     effects: createStubDeskToolEffects(),
     loadToolDefinitionMap: async () => buildToolDefinitionMap([countedClosePcAppTool]),
     acquireGeminiToken: async () => {},

@@ -37,10 +37,14 @@
         "name": "PcBridge",
         "class_name": "PcBridge",
       },
-      {
-        "name": "MobileBridge",
-        "class_name": "MobileBridge",
-      },
+        {
+          "name": "MobileBridge",
+          "class_name": "MobileBridge",
+        },
+        {
+          "name": "AccountRegistry",
+          "class_name": "AccountRegistry",
+        },
     ],
   },
 
@@ -57,11 +61,15 @@
       "tag": "v3",
       "new_sqlite_classes": ["PcBridge"],
     },
-    {
-      "tag": "v4",
-      "new_sqlite_classes": ["MobileBridge"],
-    },
-  ],
+      {
+        "tag": "v4",
+        "new_sqlite_classes": ["MobileBridge"],
+      },
+      {
+        "tag": "v5",
+        "new_sqlite_classes": ["AccountRegistry"],
+      },
+    ],
 
   "vectorize": [
     {
@@ -87,16 +95,113 @@
     ],
   },
 
-  "workflows": [
-    {
-      "name": "apollo-background",
-      "binding": "BACKGROUND",
-      "class_name": "ApolloBackground",
+    "workflows": [
+      {
+        "name": "apollo-background",
+        "binding": "BACKGROUND",
+        "class_name": "ApolloBackground",
+      },
+      {
+        "name": "apollo-coding",
+        "binding": "CODING",
+        "class_name": "ApolloCoding",
+      },
+    ],
+
+    // ============================================================
+    // FASE 2.5 — entorno STAGING, aislado de producción.
+    //
+    // Worker separado (`apollo-staging`), índice Vectorize propio
+    // (`apollo-memory-staging`), cola propia (`apollo-jobs-staging`) y
+    // workflows propios. Los DOs viven DENTRO de cada script, así que el
+    // `Apollo/default` de producción es inalcanzable desde staging por
+    // construcción. Las migraciones v1..v5 son top-level y se aplican por
+    // script: en staging arrancan desde cero (no tocan producción).
+    // Los secrets de staging son sintéticos y se setean aparte con
+    // `wrangler secret put --env staging`.
+    // ============================================================
+    "env": {
+      "staging": {
+        "name": "apollo-staging",
+        "main": "src/index.ts",
+        "compatibility_date": "2026-08-05",
+        "compatibility_flags": ["nodejs_compat"],
+        "workers_dev": true,
+        "preview_urls": false,
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+        },
+        "ai": {
+          "binding": "AI",
+        },
+        "durable_objects": {
+          "bindings": [
+            {
+              "name": "Apollo",
+              "class_name": "Apollo",
+            },
+            {
+              "name": "PcBridge",
+              "class_name": "PcBridge",
+            },
+            {
+              "name": "MobileBridge",
+              "class_name": "MobileBridge",
+            },
+            {
+              "name": "AccountRegistry",
+              "class_name": "AccountRegistry",
+            },
+          ],
+        },
+        "vars": {
+          "GEMINI_MODEL": "gemini-3.6-flash",
+          "GEMINI_STT_MODEL": "gemini-3.6-flash",
+          "GEMINI_LIVE_MODEL": "gemini-3.1-flash-live-preview",
+          "GEMINI_TTS_MODEL": "gemini-3.1-flash-tts-preview",
+          "GEMINI_EMBEDDING_MODEL": "text-embedding-004",
+          // FASE 2.5: límite de cuota deliberadamente chico para probar el
+          // enforcement con volumen de prueba. Sólo existe en staging.
+"APOLLO_USAGE_TIER": "free",
+          "APOLLO_REQUESTS_PER_MINUTE": "1",
+          "APOLLO_PBKDF2_ITERATIONS": "10000",
+          "APOLLO_ENABLE_USAGE_DEBUG": "true",
+        },
+        "vectorize": [
+          {
+            "binding": "VECTORIZE",
+            "index_name": "apollo-memory-staging",
+            "remote": true,
+          },
+        ],
+        "queues": {
+          "producers": [
+            {
+              "binding": "APOLLO_QUEUE",
+              "queue": "apollo-jobs-staging",
+            },
+          ],
+          "consumers": [
+            {
+              "queue": "apollo-jobs-staging",
+              "max_batch_size": 10,
+              "max_batch_timeout": 5,
+            },
+          ],
+        },
+        "workflows": [
+          {
+            "name": "apollo-background-staging",
+            "binding": "BACKGROUND",
+            "class_name": "ApolloBackground",
+          },
+          {
+            "name": "apollo-coding-staging",
+            "binding": "CODING",
+            "class_name": "ApolloCoding",
+          },
+        ],
+      },
     },
-    {
-      "name": "apollo-coding",
-      "binding": "CODING",
-      "class_name": "ApolloCoding",
-    },
-  ],
-}
+  }

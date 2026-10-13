@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 
 import { browseConsoleMemory, deleteConsoleMemory } from '@/console/memory';
+
+const TEST_ACCOUNT_ID = 'acc_1111111111111111111111111111test';
 import { addMemoryRecord, setSessionPreference } from '@/memory/store';
 import type { MemorySqlExecutor, MemorySqlRow } from '@/memory/store';
 
@@ -8,6 +10,7 @@ type StoredMemoryRow = {
   readonly id: string;
   readonly content: string;
   readonly created_at: number;
+  readonly account_id: string;
 };
 
 type StoredPreferenceRow = {
@@ -26,6 +29,7 @@ function createInMemoryConsoleSqlExecutor(): MemorySqlExecutor {
         id: String(bindValues[0]),
         content: String(bindValues[1]),
         created_at: Number(bindValues[2]),
+        account_id: String(bindValues[3]),
       });
       return [];
     }
@@ -54,7 +58,7 @@ function createInMemoryConsoleSqlExecutor(): MemorySqlExecutor {
     }
     if (query.includes('WHERE content LIKE')) {
       const likePattern = String(bindValues[0]).replaceAll('%', '').toLowerCase();
-      const limit = Number(bindValues[1]);
+      const limit = Number(bindValues[2]);
       const matchingRowList: readonly MemorySqlRow[] = memoryRowList
         .filter((row) => row.content.toLowerCase().includes(likePattern))
         .toSorted((left, right) => right.created_at - left.created_at)
@@ -64,7 +68,7 @@ function createInMemoryConsoleSqlExecutor(): MemorySqlExecutor {
       // returns.
       return matchingRowList as readonly Row[];
     }
-    const limit = Number(bindValues[0]);
+    const limit = Number(bindValues[1]);
     const recentRowList: readonly MemorySqlRow[] = memoryRowList
       .toSorted((left, right) => right.created_at - left.created_at)
       .slice(0, limit);
@@ -79,10 +83,10 @@ function createInMemoryConsoleSqlExecutor(): MemorySqlExecutor {
 describe('console memory browse', () => {
   it('lists recent memories newest-first when no query is given', async () => {
     const sqlExecutor = createInMemoryConsoleSqlExecutor();
-    await addMemoryRecord(sqlExecutor, 'older fact', 1);
-    await addMemoryRecord(sqlExecutor, 'newer fact', 2);
+    await addMemoryRecord(sqlExecutor, 'older fact', TEST_ACCOUNT_ID, 1);
+    await addMemoryRecord(sqlExecutor, 'newer fact', TEST_ACCOUNT_ID, 2);
 
-    const browseResult = await browseConsoleMemory(sqlExecutor, {});
+    const browseResult = await browseConsoleMemory(sqlExecutor, TEST_ACCOUNT_ID, {});
 
     expect(browseResult.memoryList.map((record) => record.content)).toEqual([
       'newer fact',
@@ -94,10 +98,10 @@ describe('console memory browse', () => {
 
   it('filters by keyword when a query is given', async () => {
     const sqlExecutor = createInMemoryConsoleSqlExecutor();
-    await addMemoryRecord(sqlExecutor, 'prefers yerba mate in the morning', 1);
-    await addMemoryRecord(sqlExecutor, 'works from home on fridays', 2);
+    await addMemoryRecord(sqlExecutor, 'prefers yerba mate in the morning', TEST_ACCOUNT_ID, 1);
+    await addMemoryRecord(sqlExecutor, 'works from home on fridays', TEST_ACCOUNT_ID, 2);
 
-    const browseResult = await browseConsoleMemory(sqlExecutor, { query: 'yerba' });
+    const browseResult = await browseConsoleMemory(sqlExecutor, TEST_ACCOUNT_ID, { query: 'yerba' });
 
     expect(browseResult.memoryList.map((record) => record.content)).toEqual([
       'prefers yerba mate in the morning',
@@ -123,7 +127,7 @@ describe('console memory browse', () => {
       }),
     );
 
-    const browseResult = await browseConsoleMemory(sqlExecutor, {});
+    const browseResult = await browseConsoleMemory(sqlExecutor, TEST_ACCOUNT_ID, {});
 
     expect(browseResult.ownerFactList).toHaveLength(1);
     expect(browseResult.ownerFactList[0]?.content).toBe('lives in Buenos Aires');
@@ -132,7 +136,7 @@ describe('console memory browse', () => {
 
   it('deletes a memory from sql and its vector together', async () => {
     const sqlExecutor = createInMemoryConsoleSqlExecutor();
-    const addedRecord = await addMemoryRecord(sqlExecutor, 'fact to forget', 1);
+    const addedRecord = await addMemoryRecord(sqlExecutor, 'fact to forget', TEST_ACCOUNT_ID, 1);
     const deletedVectorIdList: string[] = [];
 
     await deleteConsoleMemory(
@@ -146,7 +150,7 @@ describe('console memory browse', () => {
       addedRecord.id,
     );
 
-    const browseResult = await browseConsoleMemory(sqlExecutor, {});
+    const browseResult = await browseConsoleMemory(sqlExecutor, TEST_ACCOUNT_ID, {});
     expect(browseResult.memoryList).toEqual([]);
     expect(deletedVectorIdList).toEqual([addedRecord.id]);
   });
@@ -155,7 +159,7 @@ describe('console memory browse', () => {
     const sqlExecutor = createInMemoryConsoleSqlExecutor();
     await setSessionPreference(sqlExecutor, 'ownerMemoryState', 'not-json');
 
-    const browseResult = await browseConsoleMemory(sqlExecutor, {});
+    const browseResult = await browseConsoleMemory(sqlExecutor, TEST_ACCOUNT_ID, {});
 
     expect(browseResult.ownerFactList).toEqual([]);
     expect(browseResult.lastConsolidatedAtMilliseconds).toBeNull();

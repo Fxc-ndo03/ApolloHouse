@@ -25,6 +25,21 @@ object ConversationContract {
         "/agents/$APOLLO_AGENT_NAME/${java.net.URLEncoder.encode(deviceId, "UTF-8")}"
 
     /**
+     * Ruta del Apollo de una CUENTA (FASE 2.3): `/agents/apollo/acct:<accountId>`.
+     * El nombre de la instancia ES la cuenta, así el servidor no puede mezclar
+     * datos entre usuarios aunque el cliente lo pidiera.
+     */
+    const val ACCOUNT_OBJECT_PREFIX = "acct-"
+
+    fun buildAccountConversationPath(accountId: String): String =
+        "/agents/$APOLLO_AGENT_NAME/${java.net.URLEncoder.encode("$ACCOUNT_OBJECT_PREFIX$accountId", "UTF-8")}"
+
+    fun buildAccountConversationUrl(workerHost: String, accountId: String, isDebugBuild: Boolean): String {
+        val scheme = if (resolveIsSecureTransport(workerHost, isDebugBuild)) "wss" else "ws"
+        return "$scheme://$workerHost${buildAccountConversationPath(accountId)}"
+    }
+
+    /**
      * URL completa del socket de conversación.
      *
      * El esquema no se elige acá: lo decide la misma función que ya usa el

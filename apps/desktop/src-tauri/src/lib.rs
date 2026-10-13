@@ -1,11 +1,13 @@
 //! Apollo Desktop - Library root (hosts the Tauri application builder)
 
-pub mod cloudcore;
-pub mod commands;
-pub mod pcbridge;
-pub mod sidecar;
-pub mod state;
-pub mod wallpaper;
+    pub mod cloudcore;
+    pub mod account;
+    pub mod commands;
+    pub mod pcbridge;
+    pub mod secret_store;
+    pub mod sidecar;
+    pub mod state;
+    pub mod wallpaper;
 
 use rustls::crypto::ring::default_provider;
 use std::sync::Mutex;
@@ -18,7 +20,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use commands::*;
-use cloudcore::CloudCoreManager;
+use cloudcore::{CloudCoreManager, ConversationAuth};
 use pcbridge::PcBridgeManager;
 use sidecar::SidecarManager;
 use state::{AppSettings, AppState};
@@ -101,27 +103,85 @@ pub fn run() {
             let app_handle_for_pcbridge = app_handle.clone();
             let worker_url_pc = settings.worker_url.clone();
             let device_secret_pc = settings.device_shared_secret.clone();
+            // FASE 2.4: la sesión de cuenta (si existe) autentica el bridge de
+            // capacidades y binding del deviceId persistente.
+            let pcbridge_session_token = crate::secret_store::read_session_token()
+                .ok()
+                .filter(|token| !token.is_empty());
+            let pcbridge_device_id = if settings.account_id.trim().is_empty() {
+                None
+            } else if settings.installation_id.trim().is_empty() {
+                Some(format!("desktop:{}", uuid::Uuid::new_v4()))
+            } else {
+                Some(settings.installation_id.clone())
+            };
             tauri::async_runtime::spawn(async move {
                 pcbridge_manager_for_start
-                    .start(app_handle_for_pcbridge, worker_url_pc, device_secret_pc)
+                    .start(
+                        app_handle_for_pcbridge,
+                        worker_url_pc,
+                        device_secret_pc,
+                        pcbridge_session_token,
+                        pcbridge_device_id,
+                    )
                     .await;
             });
             app.manage(pcbridge_manager);
 
             // Cloud Core: direct WebSocket to Worker (replaces Python sidecar for cloud path)
             let cloudcore_manager = CloudCoreManager::new();
-            if !settings.worker_url.is_empty() && !settings.device_shared_secret.is_empty() {
+            // FASE 2.3: si hay sesión de cuenta, la conversación va al Apollo de
+            // la cuenta (`acct:<accountId>`) con Bearer. El secreto legacy sólo
+            // se usa si no hay sesión — y el Worker lo restringe a `default`.
+            let account_session_token = crate::secret_store::read_session_token()
+                .ok()
+                .filter(|token| !token.is_empty());
+            let account_id = settings.account_id.trim().to_string();
+            let cloud_auth: Option<(String, ConversationAuth)> = match (
+                account_session_token,
+                account_id.is_empty(),
+            ) {
+                (Some(token), false) => crate::account::account_conversation_url(
+                    &settings.worker_url,
+                    &account_id,
+                )
+                .map(|account_url| {
+                    (account_url, ConversationAuth::AccountSession { session_token: token })
+                }),
+                _ => None,
+            };
+            if let Some((account_url, auth)) = cloud_auth {
+                let cloudcore_for_start = cloudcore_manager.clone();
+                let app_handle_for_cloudcore = app_handle.clone();
+                let device_id_cc = if settings.installation_id.trim().is_empty() {
+                    local_device_id()
+                } else {
+                    settings.installation_id.clone()
+                };
+                tauri::async_runtime::spawn(async move {
+                    cloudcore_for_start
+                        .start(app_handle_for_cloudcore, account_url, auth, device_id_cc)
+                        .await;
+                });
+            } else if !settings.worker_url.is_empty() && !settings.device_shared_secret.is_empty() {
                 let cloudcore_for_start = cloudcore_manager.clone();
                 let app_handle_for_cloudcore = app_handle.clone();
                 let worker_url_cc = settings.worker_url.clone();
-                let device_secret_cc = settings.device_shared_secret.clone();
-                let device_id_cc = local_device_id();
+    let device_secret_cc = settings.device_shared_secret.clone();
+    // La identidad viene de la configuraci��n persistida, no del nombre de la]
+    // mǭquina: renombrar el PC no debe cambiarle el `deviceId`, y un]
+    // `COMPUTERNAME` reutilizado en otra mǭquina s�� habr��a colicionado.]
+    let device_id_cc = if settings.installation_id.trim().is_empty() {
+        local_device_id()
+    } else {
+        settings.installation_id.clone()
+    };
                 tauri::async_runtime::spawn(async move {
                     cloudcore_for_start
                         .start(
                             app_handle_for_cloudcore,
                             worker_url_cc,
-                            device_secret_cc,
+                            ConversationAuth::LegacyDeviceSecret(device_secret_cc),
                             device_id_cc,
                         )
                         .await;
@@ -194,6 +254,11 @@ pub fn run() {
             get_settings,
             update_settings,
             set_device_shared_secret,
+            // FASE 2.3 - cuenta multiusuario
+            account_status,
+            account_register,
+            account_login,
+            account_logout,
             // Protocol messages from sidecar
             on_protocol_message,
         ])

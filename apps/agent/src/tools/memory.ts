@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { requireAccountId } from '@/accounts/identity';
+
 import type { ToolDefinition } from '@/tools/types';
 
 const rememberFactArgsSchema = z.object({
@@ -49,8 +51,8 @@ export const recallMemoryTool: ToolDefinition = {
     required: ['query'],
   },
   async handler(args, context) {
-    const parsedArgs = recallMemoryArgsSchema.parse(args);
-    const deviceId = context.deviceId ?? 'default';
+      const parsedArgs = recallMemoryArgsSchema.parse(args);
+      const accountId = requireAccountId(context.accountId);
 
     try {
       const { queryMemoryVectors } = await import('@/memory/vector');
@@ -73,10 +75,10 @@ export const recallMemoryTool: ToolDefinition = {
               text: parsedArgs.query,
             });
       const matchList = await queryMemoryVectors({
-        vectorizeIndex: context.environment.VECTORIZE,
-        values,
-        deviceId,
-        topK: parsedArgs.limit,
+          vectorizeIndex: context.environment.VECTORIZE,
+          values,
+          accountId,
+          topK: parsedArgs.limit,
       });
       const usableMatchList = matchList.filter((match) => match.content.length > 0);
       if (usableMatchList.length === 0) {

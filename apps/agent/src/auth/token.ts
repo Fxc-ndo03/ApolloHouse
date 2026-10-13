@@ -83,6 +83,39 @@ export function readDeviceTokenFromRequestUrl(requestUrl: URL): string | null {
 
 const BEARER_PREFIX = 'bearer ';
 
+const DEVICE_SECRET_HEADER = 'x-apollo-device-secret';
+
+/**
+ * El secreto global del cliente legacy traveling en un header.
+ *
+ * Header propio, y no `Authorization`, porque ese último tiene su propio
+ * namespace: si se aceptara aqui, una credencial individual podria actuar como
+ * secreto global y al reves.
+ *
+ * Existe porque un `?token=` queda en los access logs, en `Referer`, en
+ * cualquier volcado de URL y en los diagnosticos del runtime.
+ *
+ * NO cambia la validacion: el valor se sigue comparando en el servidor, con la
+ * misma comparacion timing-safe. Este helper solo decide de donde se lee.
+ *
+ * Va ANTES de `readBearerCredentialFromRequest` a proposito: el guard de
+ * `apps/mobile/__tests__/contract.spec.ts` recorta el archivo desde
+ * `readBearerCredentialFromRequest` hasta el final y afirma que ese camino no
+ * toca ningun secreto global. Si esta funcion estuviera despues, el recorte la
+ * incluiria y el guard leeria esto como si fuera el camino del bearer.
+ */
+export function readDeviceSecretFromRequest(request: Request): string | null {
+  const headerValue = request.headers.get(DEVICE_SECRET_HEADER);
+  const headerSecret = headerValue === null ? null : headerValue.trim();
+  if (headerSecret !== null && headerSecret.length > 0) {
+    return headerSecret;
+  }
+  // Transicion: un cliente viejo sigue mandando `?token=`. Mientras haya
+  // clientes en produccion la URL se sigue aceptando; este es el unico punto a
+  // tocar cuando se planee retirarla.
+  return readDeviceTokenFromRequestUrl(new URL(request.url));
+}
+
 /**
  * El valor crudo del header Authorization, o null. No se valida acá: sólo se
  * separa del header. Quien valida es `verifyDeviceCredential`, contra el store

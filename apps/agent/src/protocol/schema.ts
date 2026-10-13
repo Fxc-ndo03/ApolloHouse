@@ -276,6 +276,11 @@ export const pcToServerMessageSchema = z.discriminatedUnion('type', [
     // (LEGACY_PROTOCOL_VERSION + capabilities desktop implementadas).
     protocolVersion: z.number().int().positive().optional(),
     capabilities: z.array(capabilityNameSchema).max(64).optional(),
+    // FASE 2.4: identidad persistente de la instalación (`desktop:<uuid>`).
+    // Opcional: clientes legacy siguen identificándose por hostname. El
+    // servidor NUNCA confía en él para autorizar: lo valida contra el binding
+    // del registro (cuenta + no revocado) cuando hay sesión de cuenta.
+    deviceId: z.string().min(1).optional(),
   }),
   z.object({
     type: z.literal('command_result'),

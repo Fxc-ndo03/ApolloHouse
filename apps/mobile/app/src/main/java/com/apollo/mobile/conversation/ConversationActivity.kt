@@ -102,6 +102,19 @@ class ConversationActivity : Activity() {
     }
 
     private fun renderStatus(state: ConversationState) {
+        val application = application as com.apollo.mobile.ApolloApplication
+        if (state == ConversationState.DENIED) {
+            // FASE 2.4: si el rechazo es por SESIÓN de cuenta (expirada o
+            // revocada), la sesión local ya no sirve: se borra para que la
+            // próxima pantalla pida login en vez de reintentar eternamente.
+            // La cuenta del servidor NO se toca, tampoco otros dispositivos.
+            val reason = application.conversationOwner.rejectionReason ?: ""
+            if (reason.contains("account_session_rejected") ||
+                reason.contains("credential_rejected")
+            ) {
+                com.apollo.mobile.identity.AccountSessionStore(this).clearSession()
+            }
+        }
         statusText.text = when (state) {
             ConversationState.DISCONNECTED -> "Sin conexion"
             ConversationState.CONNECTING -> "Conectando con Apollo..."

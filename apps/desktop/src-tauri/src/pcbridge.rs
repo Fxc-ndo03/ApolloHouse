@@ -36,7 +36,14 @@ impl PcBridgeManager {
         }
     }
 
-    pub async fn start(&self, _app: AppHandle, worker_url: String, device_secret: String) {
+    pub async fn start(
+        &self,
+        _app: AppHandle,
+        worker_url: String,
+        device_secret: String,
+        session_token: Option<String>,
+        device_id: Option<String>,
+    ) {
         if self.is_running() {
             return;
         }
@@ -45,7 +52,8 @@ impl PcBridgeManager {
         let running = self.running.clone();
         let connected = self.connected.clone();
         let task_handle = tauri::async_runtime::spawn(async move {
-            run_reconnect_loop(worker_url, device_secret, running, connected).await;
+            run_reconnect_loop(worker_url, device_secret, session_token, device_id, running, connected)
+                .await;
         });
         *self.task.lock().unwrap() = Some(task_handle);
     }
@@ -76,13 +84,24 @@ impl Default for PcBridgeManager {
 /// wss://host/agents/apollo/default -> wss://host/agents/pc-bridge/pc-bridge
 /// (el SDK rutéa por kebab-case del binding: PcBridge -> pc-bridge;
 /// la instancia 'pc-bridge' es la misma que usa tools/pc.ts)
-fn pcbridge_url(worker_url: &str) -> String {
+/// wss://host/agents/apollo/default -> wss://host/agents/pc-bridge/<deviceId>
+/// (el SDK rutea por kebab-case del binding: PcBridge -> pc-bridge).
+/// FASE 2.5: con identidad persistente, la instancia del bridge ES el
+/// dispositivo — cada PC de la misma cuenta habla con SU instancia. Sin
+/// identidad (legacy), la instancia compartida 'pc-bridge' sigue igual.
+fn pcbridge_url(worker_url: &str, device_id: Option<&str>) -> String {
     let base = worker_url
         .split("/agents/")
         .next()
         .unwrap_or(worker_url)
         .trim_end_matches('/');
-    format!("{base}/agents/pc-bridge/pc-bridge")
+    match device_id {
+        Some(device_id) if !device_id.trim().is_empty() => {
+            let encoded: String = device_id.trim().to_string();
+            format!("{base}/agents/pc-bridge/{encoded}")
+        }
+        _ => format!("{base}/agents/pc-bridge/pc-bridge"),
+    }
 }
 
 fn local_hostname() -> String {
@@ -94,12 +113,14 @@ fn local_hostname() -> String {
 async fn run_reconnect_loop(
     worker_url: String,
     device_secret: String,
+    session_token: Option<String>,
+    device_id: Option<String>,
     running: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
 ) {
     let mut backoff_seconds = 1u64;
     while running.load(Ordering::SeqCst) {
-        match serve_once(&worker_url, &device_secret, &running, &connected).await {
+        match serve_once(&worker_url, &device_secret, &session_token, &device_id, &running, &connected).await {
             Ok(()) => {
                 log::info!("pcbridge: conexion cerrada, reintentando");
                 backoff_seconds = 1;
@@ -118,16 +139,29 @@ async fn run_reconnect_loop(
 async fn serve_once(
     worker_url: &str,
     device_secret: &str,
+    session_token: &Option<String>,
+    device_id: &Option<String>,
     running: &Arc<AtomicBool>,
     connected: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let url = format!("{}?token={device_secret}", pcbridge_url(worker_url));
-    let (socket, _) = connect_async(&url)
+    // FASE 2.4: con sesión de cuenta, la credencial viaja en
+    // `Authorization: Bearer` (el mismo camino que la conversación); el
+    // deviceId persistente de la instalación va en el `hello` para que el
+    // Worker lo verifique contra el binding cuenta↔dispositivo. Sin sesión,
+    // el camino legacy (secreto en header `X-Apollo-Device-Secret`) sigue
+    // funcionando igual que siempre.
+    let bridge_target = pcbridge_url(worker_url, device_id.as_deref());
+    let request = match session_token {
+        Some(token) if !token.is_empty() => crate::cloudcore::build_account_request(&bridge_target, token),
+        _ => crate::cloudcore::build_secret_request(&bridge_target, device_secret),
+    }
+    .map_err(|e| format!("request build fallo: {e}"))?;
+    let (socket, _) = connect_async(request)
         .await
         .map_err(|e| format!("connect fallo: {e}"))?;
     let (mut writer, mut reader) = socket.split();
 
-    let hello = serde_json::json!({
+    let mut hello = serde_json::json!({
         "type": "hello",
         "hostname": local_hostname(),
         // BLOCK 5: el Worker usa esto para decidir si el contrato de
@@ -136,6 +170,11 @@ async fn serve_once(
         "protocolVersion": PCBRIDGE_PROTOCOL_VERSION,
         "ts": chrono::Utc::now().timestamp_millis(),
     });
+    if let Some(persistent_device_id) = device_id {
+        if !persistent_device_id.trim().is_empty() {
+            hello["deviceId"] = serde_json::Value::String(persistent_device_id.clone());
+        }
+    }
     writer
         .send(Message::Text(hello.to_string().into()))
         .await

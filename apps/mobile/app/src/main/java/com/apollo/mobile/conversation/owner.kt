@@ -107,6 +107,10 @@ class ConversationOwner(
         session.start(deviceId, credential)
     }
 
+    /** FASE 2.4: motivo del rechazo vigente (sesión de cuenta revocada, etc.). */
+    val rejectionReason: String?
+        get() = currentSession?.rejectionReason
+
     fun stop() {
         currentSession?.stop()
         currentSession = null

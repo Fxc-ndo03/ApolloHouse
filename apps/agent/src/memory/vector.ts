@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { memoryNamespaceForAccount, requireAccountId } from '@/accounts/identity';
+
 import { embedTextWithGemini } from '@/voice/geminiEmbeddings';
 
 const memoryVectorMetadataSchema = z.object({
@@ -17,13 +19,13 @@ export async function upsertMemoryVector(input: {
   readonly memoryId: string;
   readonly content: string;
   readonly values: number[];
-  readonly deviceId: string;
+  readonly accountId: string;
 }): Promise<void> {
   await input.vectorizeIndex.upsert([
     {
       id: input.memoryId,
       values: input.values,
-      namespace: input.deviceId,
+      namespace: memoryNamespaceForAccount(input.accountId),
       metadata: {
         content: input.content.slice(0, 2048),
       },
@@ -34,12 +36,12 @@ export async function upsertMemoryVector(input: {
 export async function queryMemoryVectors(input: {
   readonly vectorizeIndex: VectorizeIndex;
   readonly values: number[];
-  readonly deviceId: string;
+  readonly accountId: string;
   readonly topK?: number;
 }): Promise<readonly MemoryVectorMatch[]> {
   const queryResult = await input.vectorizeIndex.query(input.values, {
     topK: input.topK ?? 5,
-    namespace: input.deviceId,
+    namespace: memoryNamespaceForAccount(input.accountId),
     returnMetadata: 'all',
   });
 
@@ -58,7 +60,7 @@ export async function recallSemanticMemoryContent(input: {
   readonly geminiApiKey?: string;
   readonly geminiEmbeddingModelId?: string;
   readonly queryText: string;
-  readonly deviceId: string;
+  readonly accountId: string;
   readonly topK?: number;
 }): Promise<readonly string[]> {
   if (input.vectorizeIndex === undefined || input.queryText.trim().length === 0) {
@@ -76,7 +78,7 @@ export async function recallSemanticMemoryContent(input: {
     const matchList = await queryMemoryVectors({
       vectorizeIndex: input.vectorizeIndex,
       values,
-      deviceId: input.deviceId,
+      accountId: input.accountId,
       topK: input.topK,
     });
     return matchList

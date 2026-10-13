@@ -12,6 +12,8 @@ import {
 } from '@/threads/store';
 import type { ThreadSqlExecutor } from '@/threads/store';
 
+const TEST_ACCOUNT_ID = 'acc_4444000000000000000000000000test';
+
 type ThreadMetaRow = {
   session_id: string;
   kind: string;
@@ -30,7 +32,7 @@ function createInMemoryThreadSqlExecutor(): ThreadSqlExecutor {
       query: string,
       ...bindValues: unknown[]
     ): ReadonlyArray<ThreadMetaRow | ThreadSessionIdRow> {
-      if (query.includes("VALUES (?, 'pending', NULL, ?)")) {
+      if (query.includes("VALUES (?, 'pending', NULL, ?")) {
         const sessionId = String(bindValues[0]);
         const lastTurnAt = Number(bindValues[1]);
         const existingRow = rowMap.get(sessionId);
@@ -46,7 +48,7 @@ function createInMemoryThreadSqlExecutor(): ThreadSqlExecutor {
         }
         return [];
       }
-      if (query.includes('VALUES (?, ?, ?, 0)')) {
+      if (query.includes('VALUES (?, ?, ?, 0, ?)')) {
         const sessionId = String(bindValues[0]);
         const kind = String(bindValues[1]);
         const summary = bindValues[2] === null ? null : String(bindValues[2]);
@@ -93,7 +95,7 @@ function createInMemoryThreadSqlExecutor(): ThreadSqlExecutor {
           .toSorted((left, right) => right.last_turn_at - left.last_turn_at)
           .map((row) => ({ session_id: row.session_id }));
       }
-      if (query.includes('WHERE session_id = ? LIMIT 1')) {
+      if (query.includes('WHERE session_id = ? AND')) {
         const targetRow = rowMap.get(String(bindValues[0]));
         return targetRow === undefined ? [] : [{ ...targetRow }];
       }
@@ -111,10 +113,10 @@ function createInMemoryThreadSqlExecutor(): ThreadSqlExecutor {
 describe('thread meta store', () => {
   it('records activity as pending and bumps last_turn_at on repeat turns', () => {
     const sqlExecutor = createInMemoryThreadSqlExecutor();
-    recordThreadActivity(sqlExecutor, 'thread-1', 1_000);
-    recordThreadActivity(sqlExecutor, 'thread-1', 2_000);
+    recordThreadActivity(sqlExecutor, 'thread-1', 1_000, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-1', 2_000, TEST_ACCOUNT_ID);
 
-    expect(getThreadMeta(sqlExecutor, 'thread-1')).toEqual({
+    expect(getThreadMeta(sqlExecutor, 'thread-1', TEST_ACCOUNT_ID)).toEqual({
       sessionId: 'thread-1',
       kind: 'pending',
       summary: null,
@@ -124,15 +126,15 @@ describe('thread meta store', () => {
 
   it('keeps the finalized kind and summary when later activity lands', () => {
     const sqlExecutor = createInMemoryThreadSqlExecutor();
-    recordThreadActivity(sqlExecutor, 'thread-1', 1_000);
+    recordThreadActivity(sqlExecutor, 'thread-1', 1_000, TEST_ACCOUNT_ID);
     markThreadFinalized(sqlExecutor, {
       sessionId: 'thread-1',
       kind: 'conversation',
       summary: 'trip planning',
-    });
-    recordThreadActivity(sqlExecutor, 'thread-1', 3_000);
+    }, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-1', 3_000, TEST_ACCOUNT_ID);
 
-    expect(getThreadMeta(sqlExecutor, 'thread-1')).toEqual({
+    expect(getThreadMeta(sqlExecutor, 'thread-1', TEST_ACCOUNT_ID)).toEqual({
       sessionId: 'thread-1',
       kind: 'conversation',
       summary: 'trip planning',
@@ -143,62 +145,63 @@ describe('thread meta store', () => {
   it('maps unknown kinds back to pending and misses to undefined', () => {
     const sqlExecutor = createInMemoryThreadSqlExecutor();
     sqlExecutor.execute(
-      'INSERT INTO thread_meta (session_id, kind, summary, last_turn_at) VALUES (?, ?, ?, 0)',
+      'INSERT INTO thread_meta (session_id, kind, summary, last_turn_at, account_id) VALUES (?, ?, ?, 0, ?)',
       'thread-odd',
       'archived',
       null,
+      TEST_ACCOUNT_ID,
     );
 
-    expect(getThreadMeta(sqlExecutor, 'thread-odd')?.kind).toBe('pending');
-    expect(getThreadMeta(sqlExecutor, 'thread-missing')).toBeUndefined();
+    expect(getThreadMeta(sqlExecutor, 'thread-odd', TEST_ACCOUNT_ID)?.kind).toBe('pending');
+    expect(getThreadMeta(sqlExecutor, 'thread-missing', TEST_ACCOUNT_ID)).toBeUndefined();
   });
 
   it('lists meta newest-first and reopens finalized threads to pending', () => {
     const sqlExecutor = createInMemoryThreadSqlExecutor();
-    recordThreadActivity(sqlExecutor, 'thread-old', 1_000);
-    recordThreadActivity(sqlExecutor, 'thread-new', 5_000);
+    recordThreadActivity(sqlExecutor, 'thread-old', 1_000, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-new', 5_000, TEST_ACCOUNT_ID);
     markThreadFinalized(sqlExecutor, {
       sessionId: 'thread-old',
       kind: 'command',
       summary: null,
-    });
+    }, TEST_ACCOUNT_ID);
 
-    expect(listThreadMeta(sqlExecutor).map((record) => record.sessionId)).toEqual([
+    expect(listThreadMeta(sqlExecutor, TEST_ACCOUNT_ID).map((record) => record.sessionId)).toEqual([
       'thread-new',
       'thread-old',
     ]);
 
-    reopenThreadMeta(sqlExecutor, 'thread-old');
-    expect(getThreadMeta(sqlExecutor, 'thread-old')?.kind).toBe('pending');
+    reopenThreadMeta(sqlExecutor, 'thread-old', TEST_ACCOUNT_ID);
+    expect(getThreadMeta(sqlExecutor, 'thread-old', TEST_ACCOUNT_ID)?.kind).toBe('pending');
   });
 
   it('lists expired command threads and deletes their meta', () => {
     const sqlExecutor = createInMemoryThreadSqlExecutor();
-    recordThreadActivity(sqlExecutor, 'thread-command', 1_000);
+    recordThreadActivity(sqlExecutor, 'thread-command', 1_000, TEST_ACCOUNT_ID);
     markThreadFinalized(sqlExecutor, {
       sessionId: 'thread-command',
       kind: 'command',
       summary: null,
-    });
-    recordThreadActivity(sqlExecutor, 'thread-command', 1_500);
-    recordThreadActivity(sqlExecutor, 'thread-conversation', 1_500);
+    }, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-command', 1_500, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-conversation', 1_500, TEST_ACCOUNT_ID);
 
-    expect(listExpiredCommandThreadSessionIds(sqlExecutor, 2_000)).toEqual([
+    expect(listExpiredCommandThreadSessionIds(sqlExecutor, 2_000, TEST_ACCOUNT_ID)).toEqual([
       'thread-command',
     ]);
-    expect(listExpiredCommandThreadSessionIds(sqlExecutor, 1_000)).toEqual([]);
+    expect(listExpiredCommandThreadSessionIds(sqlExecutor, 1_000, TEST_ACCOUNT_ID)).toEqual([]);
 
-    deleteThreadMeta(sqlExecutor, 'thread-command');
-    expect(getThreadMeta(sqlExecutor, 'thread-command')).toBeUndefined();
+    deleteThreadMeta(sqlExecutor, 'thread-command', TEST_ACCOUNT_ID);
+    expect(getThreadMeta(sqlExecutor, 'thread-command', TEST_ACCOUNT_ID)).toBeUndefined();
   });
 
   it('lists sessions active since a cutoff, newest first', () => {
     const sqlExecutor = createInMemoryThreadSqlExecutor();
-    recordThreadActivity(sqlExecutor, 'thread-a', 1_000);
-    recordThreadActivity(sqlExecutor, 'thread-b', 3_000);
-    recordThreadActivity(sqlExecutor, 'thread-c', 2_000);
+    recordThreadActivity(sqlExecutor, 'thread-a', 1_000, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-b', 3_000, TEST_ACCOUNT_ID);
+    recordThreadActivity(sqlExecutor, 'thread-c', 2_000, TEST_ACCOUNT_ID);
 
-    expect(listThreadSessionIdsActiveSince(sqlExecutor, 2_000)).toEqual([
+    expect(listThreadSessionIdsActiveSince(sqlExecutor, 2_000, TEST_ACCOUNT_ID)).toEqual([
       'thread-b',
       'thread-c',
     ]);

@@ -38,15 +38,16 @@ export function createDeskToolEffects(input: {
   readonly resumeConversationThread: DeskToolEffects['resumeConversationThread'];
   readonly callDeviceTool: DeskToolEffects['callDeviceTool'];
   readonly callInstalledMcpTool: DeskToolEffects['callInstalledMcpTool'];
+  readonly accountId: string;
 }): DeskToolEffects {
   return {
     persistMemory: async (content) => {
-      const memoryRecord = await addMemoryRecord(input.sqlExecutor, content);
+      const memoryRecord = await addMemoryRecord(input.sqlExecutor, content, input.accountId);
       await rememberFactInSession(input.session, content);
       await enqueueMemoryIndexJob(input.environment, {
         memoryId: memoryRecord.id,
         content,
-        deviceId: input.deviceId,
+        accountId: input.accountId,
       });
       return { memoryId: memoryRecord.id, content };
     },

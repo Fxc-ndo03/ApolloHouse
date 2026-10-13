@@ -189,6 +189,7 @@ function buildHarness(
       },
     } as unknown as Session,
     deviceId: 'desk-b6',
+    accountId: 'acc_0000000000000000000000000000abc3',
     effects: createStubDeskToolEffects(),
     loadToolDefinitionMap: async () =>
       buildToolDefinitionMap([

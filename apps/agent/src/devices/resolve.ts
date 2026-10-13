@@ -89,9 +89,10 @@ function buildMobileBridgeCapabilityTargetResolver(
 
 export function buildCapabilityTargetResolver(
   environment: Env,
+  requestingAccountId: string | null = null,
 ): CapabilityTargetResolver {
   const resolverMap: CapabilityResolverMap = buildCapabilityResolverMap({
-    desktop: buildPcBridgeCapabilityTargetResolver(environment),
+    desktop: buildPcBridgeCapabilityTargetResolver(environment, requestingAccountId),
     mobile: buildMobileBridgeCapabilityTargetResolver(environment),
   });
   return async ({ capabilityName, targetPreference }) =>

@@ -11,7 +11,7 @@ export async function authorizeApolloHttpRequest(
   if (requestUrl.pathname.endsWith('/callback')) {
     return undefined;
   }
-  const connectionRole = await resolveApolloConnectionRole(requestUrl, environment);
+  const connectionRole = await resolveApolloConnectionRole(requestUrl, environment, request);
   if (connectionRole === null) {
     return new Response('Unauthorized', { status: 401 });
   }

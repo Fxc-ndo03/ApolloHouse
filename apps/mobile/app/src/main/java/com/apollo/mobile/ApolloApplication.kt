@@ -1,10 +1,11 @@
-﻿package com.apollo.mobile
+package com.apollo.mobile
 
 import android.app.Application
 import com.apollo.mobile.command.CommandDispatcher
 import com.apollo.mobile.conversation.ConversationHistory
 import com.apollo.mobile.conversation.ConversationHistoryStore
 import com.apollo.mobile.conversation.ConversationOwner
+import com.apollo.mobile.identity.AccountAuthDispatcher
 import com.apollo.mobile.identity.EnrollmentClaimDispatcher
 import com.apollo.mobile.identity.IdentityStore
 import com.apollo.mobile.notification.AndroidMobilePlatform
@@ -60,6 +61,14 @@ class ApolloApplication : Application() {
      */
     val enrollmentClaimDispatcher: EnrollmentClaimDispatcher by lazy {
         EnrollmentClaimDispatcher(
+            backgroundExecutor = Executors.newSingleThreadExecutor(),
+            mainThreadPoster = { action -> android.os.Handler(android.os.Looper.getMainLooper()).post(action) }
+        )
+    }
+
+    /** FASE 2.3: login/registro/logout fuera del hilo principal. */
+    val accountAuthDispatcher: AccountAuthDispatcher by lazy {
+        AccountAuthDispatcher(
             backgroundExecutor = Executors.newSingleThreadExecutor(),
             mainThreadPoster = { action -> android.os.Handler(android.os.Looper.getMainLooper()).post(action) }
         )

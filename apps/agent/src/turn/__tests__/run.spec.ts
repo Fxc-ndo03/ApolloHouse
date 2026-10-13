@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
+const TEST_ACCOUNT_ID = 'acc_3333333333333333333333333333test';
+
 import { createFakeApolloEnvironment } from '@/configuration/testing';
 import { createInactiveDeskFocusState } from '@/focus/logic';
 import { addMemoryRecord, type MemorySqlExecutor } from '@/memory/store';
@@ -32,7 +34,7 @@ function createInMemorySqlExecutor(): MemorySqlExecutor {
           .slice(0, limit);
       }
       if (query.startsWith('SELECT id, content')) {
-        const limit = Number(bindValues[0]);
+        const limit = Number(bindValues[1]);
         return [...memoryRowList]
           .toSorted((left, right) => right.created_at - left.created_at)
           .slice(0, limit);
@@ -58,7 +60,7 @@ const fakeEnvironment = createFakeApolloEnvironment();
 describe('runDeskTurn', () => {
   it('text turn recalls memory and speaks', async () => {
     const sqlExecutor = createInMemorySqlExecutor();
-    await addMemoryRecord(sqlExecutor, 'tomo mate a la mañana', 1, () => 'm1');
+    await addMemoryRecord(sqlExecutor, 'tomo mate a la mañana', TEST_ACCOUNT_ID, 1, () => 'm1');
     let capturedSystemPrompt = '';
 
     const output = await runDeskTurn({
@@ -66,6 +68,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor,
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -101,6 +104,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -134,6 +138,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -179,6 +184,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -206,6 +212,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -232,6 +239,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -268,6 +276,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([unsafeTool]),
       nowMilliseconds: 10,
@@ -316,6 +325,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([weatherTool, codingTool]),
       exposedToolNames: ['weather_now'],
@@ -363,6 +373,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([unsafeTool]),
       nowMilliseconds: 10,
@@ -411,6 +422,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([weatherTool]),
       nowMilliseconds: 10,
@@ -452,6 +464,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([weatherTool]),
       nowMilliseconds: 10,
@@ -490,6 +503,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,
@@ -534,6 +548,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([weatherTool]),
       nowMilliseconds: 10,
@@ -578,6 +593,7 @@ describe('runDeskTurn', () => {
       speechMode: 'default',
       focusState: createInactiveDeskFocusState(),
       sqlExecutor: createInMemorySqlExecutor(),
+      accountId: TEST_ACCOUNT_ID,
       environment: fakeEnvironment,
       toolDefinitionMap: buildToolDefinitionMap([]),
       nowMilliseconds: 10,

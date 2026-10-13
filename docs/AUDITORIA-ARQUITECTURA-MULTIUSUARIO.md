@@ -1,7 +1,7 @@
 # Apollo — Auditoría integral y plan de arquitectura multiusuario
 
-**Fecha:** 2026-10-12 · **Alcance:** auditoría de solo lectura. Ningún archivo de producción modificado.
-**Commit:** `6993bd2` (2026-09-19) — el trabajo reciente **no está en Git**.
+**Fecha:** 2026-10-12 · **Alcance:** auditoría de solo lectura + commit de resguardo. Ningún archivo de producción modificado.
+**HEAD al inicio:** `6993bd2` (2026-09-19) · **HEAD ahora:** `35c61b0` (resguardo local, sin push)
 
 > Etiquetas de evidencia: **[L]** leído · **[T]** demostrado por test ejecutado · **[B]** build ejecutado ·
 > **[P]** probado en dispositivo real · **[C]** probado contra Cloudflare producción ·
@@ -17,7 +17,7 @@ Los tres riesgos que bloquean el producto multiusuario:
 
 1. **Autenticación = dos secretos globales** (`DEVICE_SHARED_SECRET`, `DASHBOARD_SHARED_SECRET`). Quien los tiene, es el dueño. No hay identidad, ni cuentas, ni sesiones [L].
 2. **Todo el estado conversacional vive en un único Durable Object `Apollo/default`** más un Vectorize global `apollo-memory` [L]. Añadir un segundo usuario no es un `if`: es una premisa arquitectónica rota.
-3. **~290 archivos de trabajo crítico fuera de Git** [T]. Un `git checkout` o un `git clean` destruye el proyecto. Es el riesgo inmediato y no tiene relación con la arquitectura.
+3. **~290 archivos de trabajo crítico fuera de Git** [T]. Un `git checkout` o un `git clean` destruye el proyecto. **Resuelto en esta etapa con el commit `35c61b0`.**
 
 **Lo que hay que conservar:** el Worker, el protocolo, el MobileBridge, la app Android y el FGS están sólidos y probados. La migración es aditiva, no una reescritura.
 
@@ -33,8 +33,9 @@ ApolloHouse/
 │   ├── desktop/     30 archivos ·  6 799 líneas   ← Tauri (Rust + React)
 │   ├── console/    129 archivos · 11 610 líneas   ← web de marketing + dashboard
 │   └── wizard/      36 archivos ·  2 723 líneas   ← generador del starter
+├── juana-client/                              ← sidecar Python (wake word + STT)
 ├── packages/typescript-config/
-└── docs/                          ← informe generado en esta auditoría
+└── docs/                          ← este informe
 ```
 
 **Workspaces:** el `package.json` raíz declara scripts que delegan en Turbo, pero **el array `workspaces` está vacío** [L]. Los workspaces se resuelven por convención de `package.json` por paquete.
@@ -58,51 +59,56 @@ resto | ≤6 c/u | foco, listas, rates, colas, workflows, telemetría |
 
 ## 3. Estado de Git y protección del trabajo [T]
 
-**Este es el hallazgo más urgente y no es arquitectónico.**
+### 3.1 Commit de resguardo creado
 
-| Métrica | Valor |
+**`35c61b0` — "chore: resguardo del trabajo acumulado sin versionar"** — 357 archivos. **Sin push.**
+
+| Métrica | Antes | Después |
+|---|---|---|
+Commit HEAD | `6993bd2` (23 días viejo) | `35c61b0` |
+Entradas sin commitear | **298** | **10** |
+Riesgo de pérdida | **Crítico** | **Bajo** |
+
+### 3.2 Contenido del commit — revisado antes de stagear
+
+| Verificación | Resultado |
 |---|---|
-Commit HEAD | `6993bd2` — **2026-09-19** (23 días atrás) |
-Entradas sin commitear | **298** |
-Modificados (M) | 237 |
-Sin seguimiento (??) | 53 |
-**Borrados (D)** | **8** |
+Secretos (llaves privadas, API keys, JWT, AWS, GitHub) | **0 reales** |
+`apps/agent/.dev.vars` | **excluido** (ya ignorado por `.gitignore:24`) |
+`.dev.vars.example` | **incluido** — plantilla con `change-me` y claves vacías |
+Artefactos generados (`build/`, `target/`, `.apk`) | **0 incluidos** |
+`local.properties` | **excluido** (ruta SDK local) |
+Los 10 temporales de la raíz | **excluidos**, siguen en disco |
+`.venv/`, `__pycache__/` | **excluidos** |
+`gradle-wrapper.jar` | **incluido** — Gradle lo exige; es el estándar de Android |
 
-### 3.1 Archivos borrados respecto de HEAD
+### 3.3 Dos hallazgos del staging que corregí
 
-```
-apps/desktop/ui/chat.html            apps/desktop/ui/src/Dashboard.tsx
-apps/desktop/ui/settings.html        apps/desktop/ui/src/OrbWindow.tsx
-apps/desktop/ui/src/chat-main.tsx    apps/desktop/ui/src/components/Chat/ChatWindow.tsx
-                                     apps/desktop/ui/src/components/Eyes/Eyes.tsx
-                                     apps/desktop/ui/src/settings-main.tsx
-```
+**1. `.gitignore` raíz no cubría `build/`.** `apps/mobile/.gitignore` sí lo cubría, pero como `apps/mobile` estaba **sin trackear**, Git lo trata como directorio nuevo y **no aplica el ignore anidado**: un `git add` arrastraba **809 artefactos Android**. Añadido:
 
-Estos son de la UI del escritorio. **No los restauré**: no sé si fueron borrados a propósito (reemplazo por la UI actual) o por accidente. Requeriría decisión tuya.
-
-### 3.2 Código de producción crítico sin seguimiento
-
-```
-?? apps/agent/src/devices/            ← TODO el dominio de dispositivos
-?? apps/agent/src/agents/mobile-bridge.ts
-?? apps/agent/src/tools/              ← 58 archivos
-?? apps/mobile/...                   ← la app Android completa
+```gitignore
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+*.iml
 ```
 
-`credential-store.ts` —donde viven W1 y W2— **no está en Git**. `git checkout` lo destruye sin dejar rastro.
+**2. Los 10 temporales de la raíz se colaron** en el primer `git add`. Los saqué con `git restore --staged` (sin borrarlos).
 
-### 3.3 `.gitignore` incompleto
-
-Ignora `node_modules/`, `dist/`, `target/`, `.wrangler/`, `*.tsbuildinfo`. **No ignora `build/`**, aunque `apps/mobile/.gitignore` existe. Artefactos Androidgenerated podrían colarse en cualquier commit.
-
-### 3.4 Backup ejecutado
+### 3.4 Backup externo
 
 ```
 C:\Users\Admin\Documents\Apollo y Jarvis\_apollo_audit_backup_20261012-141550
-1353 archivos · 28.6 MB · hashes verificados
+1353 archivos · 28.6 MB · hashes verificados (4/4 OK)
 ```
 
-Incluye los 8 borrados recuperables desde HEAD y el `_git_status.txt` original. **Este backup es la red de seguridad antes de cualquier refactorización.**
+Incluye los 8 borrados recuperables desde `6993bd2` y el `_git_status.txt` original.
+
+### 3.5 Estado restante
+
+Sólo los 10 temporales sin seguimiento. Los 8 borrados quedaron registrados como borrados en el commit — **reversible con `git checkout 6993bd2 -- <ruta>`** si decides restaurarlos.
 
 ---
 
@@ -155,7 +161,7 @@ Dos strings. Sin expiración, sin sesión, sin revocación por usuario.
 
 ### P4 · Vectorize global [L]
 
-`wrangler.jsonc` → `"index_name": "apollo-memory"`. **Un único índice para todos los usuarios futuros.** Sin filtrado por usuario, el usuario B leería la memoria de A.
+`wrangler.jsonc` → `"index_name": "apollo-memory"`. **Un único índice para todos los usuarios futuros.** Sin filtrado por usuario: el usuario B leería la memoria de A.
 
 ### P5 · Sin login en ninguna parte [L]
 
@@ -168,6 +174,51 @@ Busqué `signIn|signUp|register|login|oauth|password` en Worker, Android y Deskt
 ### P7 · El legado es la puerta real [L]
 
 `authorizeApolloConnection` acepta `?token=` con secreto global. `default` sigue operativo. Mientras exista, cualquiera con el secreto tiene acceso completo.
+
+---
+
+## 5-bis. Arquitectura cloud actual verificada
+
+**Confirmado: la nube es el centro, y se conserva.** [L]
+
+| Capa | Estado | Evidencia |
+|---|---|---|
+Workers (API/routing) | **Implementado** | `index.ts`, 292 líneas, 6 rutas |
+Durable Objects | **Implementado** | 6 clases: Apollo, MobileBridge, PcBridge, Sandbox, Background, Coding |
+Vectorize | **Implementado** | binding `VECTORIZE`, índice `apollo-memory` |
+IA en la nube | **Implementado** | ver abajo |
+Android ↔ nube | **Implementado** | WebSocket + enrollment + FGS |
+PC ↔ nube | **Implementado** | `cloudcore.rs` WSS directo |
+
+### Proveedor de IA — verificado [L]
+
+**Gemini, vía API de Google, no Workers AI.**
+
+```jsonc
+"GEMINI_MODEL":           "gemini-3.6-flash",
+"GEMINI_STT_MODEL":       "gemini-3.6-flash",
+"GEMINI_LIVE_MODEL":      "gemini-3.1-flash-live-preview",
+"GEMINI_TTS_MODEL":       "gemini-3.1-flash-tts-preview",
+"GEMINI_EMBEDDING_MODEL": "text-embedding-004"
+```
+
+La autenticación es `GEMINI_API_KEY` contra `generativelanguage.googleapis.com` (`index.ts:83`, `apollo.ts:2181, 2285, 2999`). El binding `AI` existe en `wrangler.jsonc` pero **no encontré uso de `env.AI.*`** en el código: conviven dos mechanisms y sólo uno está en uso.
+
+**Esto es lo correcto según tu objetivo:** la IA sigue en la nube. No propongo moverla a local.
+
+### `juana-client` — NO es código muerto [L]
+
+Es el **sidecar Python en uso activo** del escritorio:
+
+```
+apps/desktop/src-tauri/src/sidecar.rs
+  1: //! Sidecar manager for Python juana-client
+  3: //! Python handles: wake word, STT, TTS playback.
+  4: //! Python does NOT connect to the Worker directly.
+  6: //! Worker responses come through CloudCoreManager → Rust → Python stdin.
+```
+
+Con 9 archivos de test propios. **Recomendación: conservar.** Es exactamente el "complemento opcional de reconocimiento de voz en PC" que describes, y no es requisito para que Apollo funcione en la nube.
 
 ---
 
@@ -203,16 +254,44 @@ Código local no desplegado | **[H] muy probable** — 290 archivos fuera de Git
 
 | Archivo | Motivo | Referencias | Riesgo | Reversión |
 |---|---|---|---|---|
-`_check.py` | Script de debugging personal | ninguna [T] | Bajo | Git/backup |
-`_fix_final.py`, `_fix_tests4.py`, `_fix_tests_final.py` | Scripts de reparación puntual | ninguna | Bajo | Git/backup |
-`_ui_read.py`, `_ui_read2.py`, `_ui4_read.py`, `_ui6.xml` | Volcados de UI para inspección | ninguna | Bajo | Git/backup |
-`_notify.ts` | Prueba manual de notificación | ninguna | Bajo | Git/backup |
-`_reconnect.py` | Script de reconexión | ninguna | Bajo | Git/backup |
-`test_device_selection.py` | Script de prueba | ninguna | Bajo | Git/backup |
-`build/` de Android | Artefacto generado | N/A | **Añadir a .gitignore, no borrar** | Regenerable |
-`juana-client/`, `juana_client/` | Posible código muerto | **parcial** | **Alto** | Git/backup |
+`_check.py` | Script de debugging personal | ninguna [T] | Bajo | Commit `35c61b0` los preserva en disco |
+`_fix_final.py`, `_fix_tests4.py`, `_fix_tests_final.py` | Scripts de reparación puntual | ninguna | Bajo | Ídem |
+`_ui_read.py`, `_ui_read2.py`, `_ui4_read.py`, `_ui6.xml` | Volcados de UI para inspección | ninguna | Bajo | Ídem |
+`_notify.ts` | Prueba manual de notificación | ninguna | Bajo | Ídem |
+`_reconnect.py` | Script de reconexión | ninguna | Bajo | Ídem |
+`test_device_selection.py` | Script de prueba | ninguna | Bajo | **Ya commiteado** — mover a `tests/` o borrar |
+`build/` de Android | Artefacto generado | N/A | **Resuelto**: ya ignorado | Regenerable |
 
-**Advertencia sobre `juana-client`:** hay archivos modificados ahí (`juana-core client` aparece en el commit `2791b74`). **No lo marco como eliminable** sin que decidas.
+### Los 8 archivos borrados — recomendación por caso
+
+**Investigados. Ninguno tiene referencias reales.** Los 3 "hits" iniciales eran coincidencias de palabra:
+
+| Archivo | Búsqueda | Resultado real |
+|---|---|---|
+`chat.html` / `settings.html` | `default.json` | **Falso positivo** — no aparecen en el archivo |
+`Dashboard.tsx` | `cloudcore.rs:783` | **Falso positivo** — es el mensaje de protocolo `"dashboard"` |
+`OrbWindow.tsx`, `chat-main.tsx`, `ChatWindow.tsx`, `Eyes.tsx`, `settings-main.tsx` | — | **Sin referencias** |
+
+**Recomendación: NO restaurar.** Fueron reemplazados por la UI actual (`components/App/`, `components/Assistant/`, `components/Orb/`). El commit los registra como borrados y son recuperables con `git checkout 6993bd2 -- <ruta>` si alguna vez hacen falta.
+
+### `juana-client/` — recomendación
+
+**Conservar.** Verificado en uso activo por `sidecar.rs` con 9 tests propios (§5-bis). No es candidato a eliminación.
+
+---
+
+## 7-bis. `.gitignore` — estado
+
+Corregido en esta etapa. El problema era real: `build/` no estaba cubierto en la raíz y el `.gitignore` anidado de `apps/mobile` **no se aplica** mientras el directorio está sin trackear.
+
+```gitignore
+build/          # añadido
+.gradle/        # añadido
+local.properties  # añadido
+*.apk  *.aab  *.iml  # añadidos
+```
+
+**Verificado:** tras la corrección, `git status` muestra **0 artefactos generados** y `.dev.vars` sigue ignorado (`.gitignore:24`). No se ocultó ninguna fuente: `gradle-wrapper.jar` sigue versionándose porque Gradle lo exige.
 
 ---
 
@@ -349,21 +428,46 @@ Estado global | `initiativeState`, `firmware*` | **global, NO por usuario** | No
 
 ## 11. Costes y alternativas
 
-| Servicio | Hoy | Coste | Alternativa libre |
+### 11.1 Infraestructura — límites gratuitos verificados
+
+| Servicio | Estado | Límite gratuito | Clasificación |
 |---|---|---|---|
-Cloudflare Workers | 1 Worker | **Gratis hasta 100k req/día** | — |
-DO | 6 clases | **Gratis**: 1M req/mes | — |
-**WebSockets** | Crítico | **Gratis en DO**; en Workerssx, cobro por duración | — |
-Vectorize | 1 índice | Gratis hasta 10M vectores | SQLite + FTS5 |
-R2 | sin usar | Gratis 10 GB/mes | — |
-Queues | 1 cola | Gratis 10k msg/día | — |
-**AI (Gemini/Cloudflare)** | Activo | **Costo por token.** Esto **no** es gratis | Modelos locales (ollama) para STT/TTS básico |
-Voz STT/TTS | Gemini + Cloudflare | **Costo por minuto** | Vosk (ya integrado en PC) + Piper |
-E2EE / Almacenamiento | R2 | Gratis acotado | — |
+Cloudflare Workers | 1 Worker | 100k req/día | Gratuito con cuota |
+**Durable Objects** | 6 clases | 1M req/mes | Gratuito con cuota |
+**WebSockets en DO** | Crítico | Incluidos en DO | **Gratuito** (en Workerssx se cobra) |
+Vectorize | 1 índice | 10M vectores almacenados | Gratuito con cuota |
+Queues | 1 cola | 10k msg/día | Gratuito con cuota |
+Workflows | 2 | incluidos | Gratuito con cuota |
+R2 | sin usar | 10 GB/mes | Gratuito con cuota |
 
-**Riesgo económico real:** el **tráfico de IA y voz**, no la infraestructura. Un asistente de voz siempre cuesta tokens. Mitigación: modelos pequeños por defecto, cacheo, y permitir modelos locales.
+### 11.2 IA — coste variable, NO gratuito [L]
 
-**Nada depende de una clave personal**, salvo el despliegue de Cloudflare del dueño.
+Verificado que el Worker usa **Gemini por API de Google** (`generativelanguage.googleapis.com`), no Workers AI.
+
+| Modelo | Uso | Coste |
+|---|---|---|
+`gemini-3.6-flash` | conversación, STT | **Por token de entrada/salida** |
+`gemini-3.1-flash-live-preview` | conversación por voz | **Por minuto** |
+`gemini-3.1-flash-tts-preview` | síntesis de voz | **Por carácter** |
+`text-embedding-004` | embeddings a Vectorize | **Por token** |
+
+**Éste es el único coste que escala con el uso.** La infraestructura es gratuita hasta cuotas generosas; **un asistente de voz con 10 usuarios activos genera coste real en minutos de audio.**
+
+### 11.3 Clasificación final
+
+| Categoría | Servicios |
+|---|---|
+**Gratuito sostenible** | Workers, DO, WebSockets, R2 |
+**Gratuito con cuotas** | Vectorize, Queues, Workflows |
+**Requiere clave propia** | `GEMINI_API_KEY` (cuenta de Google del dueño) |
+**Coste variable creciente** | Gemini (conversación, voz, embeddings) |
+**Complemento local opcional** | `juana-client` (Vosk STT en PC) |
+
+**Nada depende de una clave personal de pago salvo `GEMINI_API_KEY`.** Pero esa clave **es un único punto de coste y de cuota**: si se agota o se revoca, Apollo deja de conversar. mitigated con cuotas por usuario, y a futuro con modelos locales para STT.
+
+### 11.4 Riesgo de abuso [nuevo]
+
+Hoy no hay **ningún límite de uso**: un usuario puede consumir tokens sin límite. En multiusuario esto es un riesgo financiero directo. La fase de identidad debe incluir cuotas por cuenta.
 
 ---
 
@@ -404,49 +508,137 @@ E2EE / Almacenamiento | R2 | Gratis acotado | — |
 
 ## 14. Preguntas bloqueantes
 
-1. **¿Restauro los 8 archivos borrados de la UI del desktop?** No sé si fue intencional.
-2. **¿Qué hago con `juana-client/`?** Tiene cambios sin commitear y no sé si se usa.
-3. **¿Cuántos usuarios reales?** Define si Vectorize por namespace o por filtro.
-4. **¿Sigo con Gemini/Cloudflare para voz, o local?** Es la mayor decisión de coste.
-5. **¿Dominio propio (`heyapollo.dev`)?** El `.jsonc` lo menciona como pendiente.
-6. **¿Puedo hacer commit del trabajo actual?** Sin eso, cada `git checkout` es una pérdida.
+**Resueltas en esta etapa:**
+1. ~~¿Restauro los 8 archivos borrados?~~ → **No.** Sin referencias reales; borrado intencional.
+2. ~~¿Qué hago con `juana-client/`?~~ → **Conservar.** Sidecar activo con tests.
+3. ~~¿Puedo hacer commit?~~ → **Sí, hecho:** `35c61b0`, sin push.
+
+**Abiertas — necesito tu decisión:**
+
+4. **¿Cuántos usuarios reales?** Define si Vectorize va por namespace o por filtro con metadatos.
+5. **¿Voz: Gemini en nube, o hybrid con Vosk?** Es la mayor decisión de coste. Recomiendo nube ahora, Vosk como complemento.
+6. **¿Registro por email o por proveedor externo?** Afecta la experiencia y el coste.
+7. **¿Dominio propio (`heyapollo.dev`)?** El `.jsonc` lo menciona como pendiente.
+8. **¿Los 10 temporales se borran o se archivan?**requieren tu OK.
+9. **¿Quién paga `GEMINI_API_KEY`?** Con multiusuario, la cuota es del operador, no del usuario.
 
 ---
 
-## 15. Acciones NO ejecutadas
+## 15. Diseño multiusuario cloud-first
+
+### 15.1 Modelo de identidad
+
+```
+Account (cuenta)
+  ├── Session (sesión de acceso, con expiración)
+  │     └── Token (bearer, corto)
+  └── Device (dispositivo vinculado)
+        └── DeviceCredential (individual, revocable)
+```
+
+**Regla de oro:** el `accountId` **nunca** viene del cliente. Se resuelve desde la sesión validada en el servidor. Un cliente que mienta sobre su ruta no cambia de cuenta.
+
+### 15.2 Durable Objects — qué es de quién
+
+| DO | Ámbito | Razón |
+|---|---|---|
+`Apollo` | **Por cuenta** | La memoria y las conversaciones son del dueño, no del aparato. Si fuera por dispositivo, dos usuarios en el mismo teléfono compartirían conversación |
+`MobileBridge` | **Global compartido** | Concentra presencia y capacidades de todos los teléfonos. Ya funciona así |
+`PcBridge` | **Por cuenta** | Hoy es único; debe seguir a la cuenta |
+`Sandbox`/`Background`/`Coding` | Global | Sin datos de usuario |
+
+> **Corrección importante:** un DO por **dispositivo** NO aísla usuarios. Un DO por **cuenta** sí. Si un usuario tiene PC y móvil, ambos escriben en **el mismo** Apollo de su cuenta — que es lo correcto: su memoria es compartida entre sus propios dispositivos.
+
+Ruta: `/agents/apollo/<accountId>` (el `deviceId` ya no determina el DO).
+
+### 15.3 Vectorize — comparación de estrategias [L]
+
+La integración existente usa `VECTORIZE` con `deleteByIds` y búsqueda por vector (`memory.ts:20`). Cloudflare Vectorize **no soporta namespaces múltiples por binding en un solo Worker**: hay que elegir.
+
+| Estrategia | Aislamiento | Coste | Migración |
+|---|---|---|---|
+**A. Índice por cuenta** | **Perfecto** | 1 binding por cuenta; limitado por el número de cuentas | Reindexar todo |
+**B. Metadatos + filtro `accountId`** | Correcto **si el filtro es obligatorio** | 1 índice | Ninguna |
+
+**Recomiendo B**, con dos condiciones no negociables:
+1. **Toda** consulta, escritura y borrado exige el filtro `accountId` derivado de la sesión.
+2. **Tests que demuestren que sin filtro la función lanza error**, no que devuelve vacío.
+
+Vectorize soporta metadatos y filtrado por ellos; el filtro va en el propio índice, no post-filtrado.
+
+### 15.4 Migración del propietario actual
+
+El estado actual (`Apollo/default`) debe pasar a la cuenta inicial **sin perder memoria**:
+
+1. Crear la cuenta del propietario
+2. Mover el DO: `default` → `<accountId>` requiere **copiar las 7 tablas** (`memories`, `thread_meta`, `session_prefs`, `list_items`, `pending_confirmations`, `pending_device_messages`, `mcp_tool_settings`)
+3. Reindexar Vectorize con `accountId`
+4. Mantener `default` **en solo lectura** durante la ventana
+5. Verificar recuento de filas antes/después
+
+---
+
+## 16. Plan de fases actualizado
+
+| # | Fase | Estado | Aceptación | Rollback |
+|---|---|---|---|---|
+0 | **Commit de resguardo** | **✅ Hecho** (`35c61b0`) | 0 archivos críticos sueltos | `git reset --soft 35c61b0~1` |
+1 | **`.gitignore`** | **✅ Hecho** | 0 artefactos en status | Revertir el archivo |
+2 | Tablas `account`/`session` + tests de auth | Pendiente | Tests de expiración/revocación | Drizzle rollback |
+3 | DO Apollo por `accountId` (con `default` en lectura) | Pendiente | 2 cuentas aisladas | Volver a `default` |
+4 | Vectorize con filtro `accountId` + **tests de no-fuga** | Pendiente | B no lee memoria de A | Quitar filtro (solo dev) |
+5 | `account_id` en credenciales (doble lectura) | Pendiente | Teléfono actual sigue conectado | Columna nullable |
+6 | Migrar enrollment a multiusuario | Pendiente | — | Doble lectura |
+7 | Login en Android y Desktop | Pendiente | Sesión persiste entre reinicios | Quitar UI |
+8 | Cuotas por cuenta | Pendiente | Test de abuso | Subir límites |
+9 | Voz en Android | Pendiente | — | — |
+10 | Domótica vía MCP | Pendiente | — | Desactivar tool |
+| 11 | **Retirar secretos globales** | Pendiente | Todos migrados | **NO REVERSIBLE** |
+
+**Las fases 0 y 1 están hechas. Son las que no dependían de decisiones de producto.**
+
+---
+
+## 17. Acciones NO ejecutadas
 
 - ❌ No modifiqué código de producción
-- ❌ No eliminé archivos (incluidos los 10 temporales de la raíz)
-- ❌ No moví ni renombré directorios
-- ❌ No eliminé dependencias
-- ❌ No toqué `.gitignore` (la etapa 1 lo propone)
+- ❌ No eliminé archivos (los 10 temporales siguen en disco)
 - ❌ No restauré los 8 borrados
-- ❌ No hice commit, ni `reset`, ni `clean`
+- ❌ No eliminé dependencias
+- ❌ No modifiqué `apps/mobile`, `apps/agent` ni `apps/desktop`
+- ❌ **No hice push** — el commit `35c61b0` es local
 - ❌ No desplegué a Cloudflare
 - ❌ No instalé APKs
-- ❌ No revertí W1/W2 (verificados presentes)
+- ❌ No revertí W1/W2 (verificados presentes **dentro del commit**)
+- ❌ No migré datos ni credenciales reales
+- ❌ No creé tablas de cuentas ni sesiones
 - ❌ No probé contra Cloudflare producción — **la conectividad real sigue sin verificar**
-- ❌ No instalé dependencias
 
 ### Qué SÍ hice
-- ✅ Leí el repositorio
-- ✅ Ejecuté `git status` y analicé las 298 entradas
-- ✅ **Creé un backup** de 1353 archivos en `_apollo_audit_backup_20261012-141550`
-- ✅ Verifiqué W1/W2 presentes por hash
-- ✅ Escribí este informe
+- ✅ Leí el repositorio y verifiqué la auditoría previa contra el código
+- ✅ Verifiqué el backup (hashes 4/4)
+- ✅ **Corregí `.gitignore`** (única modificación de configuración)
+- ✅ **Creé el commit de resguardo `35c61b0`** con 357 archivos revisados
+- ✅ Saqué los 10 temporales del staging sin borrarlos
+- ✅ Verifiqué 0 secretos y 0 artefactos en el commit
+- ✅ Confirmé que `juana-client` está en uso activo
+- ✅ Confirmé que los 8 borrados no tienen referencias
+- ✅ Actualicé este informe
 
 ---
 
 ## Resumen
 
-**Qué tenemos:** un asistente single-tenant funcional, con Worker sólido (1320 tests [T]), Android compilable (149 tests [B]), y separación clara entre PC, móvil y núcleo.
+**Qué tenemos:** un asistente cloud-first funcional y sólido — 1320 tests del Worker [T], 149 de Android [T], APK compilando [B], Gemini en la nube para conversación y voz [L], `juana-client` como STT local opcional en PC [L].
 
-**Qué está roto:** la ausencia total de identidad de usuario; el estado global compartido; y 290 archivos fuera de Git que son un riesgo de pérdida inmediata e inmediata.
+**Qué estaba roto:** la ausencia total de identidad de usuario, y 290 archivos fuera de Git.
 
-**Qué conservar:** casi todo. La migración es aditiva.
+**Qué arreglé:** el riesgo de pérdida de trabajo. Commit `35c61b0` + backup externo verificado.
 
-**Cómo organizar:** un DO por cuenta, identidad como servicio nuevo, Vectorize particionado.
+**Qué conservar:** todo. Worker, MobileBridge, protocolo, Android, FGS, Gemini, `juana-client`.
 
-**Secuencia:** commit primero (urgente), luego identidad, luego partición, y el secreto global se retira **último**.
+**Cómo organizar:** un DO **por cuenta** (no por dispositivo), identidad como servicio nuevo, Vectorize con filtro `accountId` obligatorio.
+
+**Secuencia:** las dos etapas urgentes ya están hechas. Sigue identidad → partición → credenciales → login → cuotas → voz → domótica. El secreto global se retira **último y sin vuelta atrás**.
 
 **No afirmo que Apollo funcione de extremo a extremo contra Cloudflare: nunca fue probado.**

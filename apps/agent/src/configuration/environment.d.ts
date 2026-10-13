@@ -5,12 +5,19 @@ interface Env {
   Sandbox?: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
   Apollo: DurableObjectNamespace<import('@/agents/apollo').Apollo>;
   PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
-  MobileBridge: DurableObjectNamespace<import('@/agents/mobile-bridge').MobileBridge>;
-  // Ausente en toda deployment real: sólo lo prende el harness de tests.
-  MOBILE_SESSION_INSPECTOR?: string;
-  // Ausente en toda deployment real: sólo lo prende el harness de tests.
-  APOLLO_TOOL_HARNESS?: string;
-  DEVICE_SHARED_SECRET: string;
+    MobileBridge: DurableObjectNamespace<import('@/agents/mobile-bridge').MobileBridge>;
+    AccountRegistry: DurableObjectNamespace<import('@/accounts/do').AccountRegistry>;
+// Opcional: tier de la política de uso (anonymous|free|paid|admin). Ausente = free.
+    APOLLO_USAGE_TIER?: string;
+    // Sólo staging: habilita /api/debug/usage. Ausente = ruta inexistente.
+    APOLLO_ENABLE_USAGE_DEBUG?: string;
+    // Opcional: iteraciones PBKDF2 (default 210k; staging usa menos por CPU).
+    APOLLO_PBKDF2_ITERATIONS?: string;
+    // Ausente en toda deployment real: sólo lo prende el harness de tests.
+    MOBILE_SESSION_INSPECTOR?: string;
+    // Ausente en toda deployment real: s��lo lo prende el harness de tests.
+    APOLLO_TOOL_HARNESS?: string;
+    DEVICE_SHARED_SECRET: string;
   DASHBOARD_SHARED_SECRET: string;
   GEMINI_API_KEY: string;
   GEMINI_MODEL: string;
@@ -48,8 +55,15 @@ declare namespace Cloudflare {
   interface Env {
     Sandbox?: DurableObjectNamespace<import('@cloudflare/sandbox').Sandbox>;
     Apollo: DurableObjectNamespace<import('@/agents/apollo').Apollo>;
-    PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
-    MobileBridge: DurableObjectNamespace<import('@/agents/mobile-bridge').MobileBridge>;
+PcBridge: DurableObjectNamespace<import('@/agents/pc-bridge').PcBridge>;
+  MobileBridge: DurableObjectNamespace<import('@/agents/mobile-bridge').MobileBridge>;
+  AccountRegistry: DurableObjectNamespace<import('@/accounts/do').AccountRegistry>;
+// Opcional: tier de la política de uso (anonymous|free|paid|admin). Ausente = free.
+  APOLLO_USAGE_TIER?: string;
+  // Sólo staging: habilita /api/debug/usage. Ausente = ruta inexistente.
+  APOLLO_ENABLE_USAGE_DEBUG?: string;
+    // Opcional: iteraciones PBKDF2 (default 210k; staging usa menos por CPU).
+    APOLLO_PBKDF2_ITERATIONS?: string;
     // Ausente en toda deployment real: sólo lo prende el harness de tests.
     MOBILE_SESSION_INSPECTOR?: string;
     // Ausente en toda deployment real: sólo lo prende el harness de tests.

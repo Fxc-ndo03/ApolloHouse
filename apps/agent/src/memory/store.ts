@@ -18,6 +18,7 @@ export type MemorySqlExecutor = {
 export async function addMemoryRecord(
   sqlExecutor: MemorySqlExecutor,
   content: string,
+  accountId: string,
   nowMilliseconds: number = Date.now(),
   createIdentifier: () => string = () => crypto.randomUUID(),
 ): Promise<MemoryRecord> {
@@ -27,10 +28,11 @@ export async function addMemoryRecord(
     createdAt: nowMilliseconds,
   };
   sqlExecutor.execute(
-    'INSERT INTO memories (id, content, created_at) VALUES (?, ?, ?)',
+    'INSERT INTO memories (id, content, created_at, account_id) VALUES (?, ?, ?, ?)',
     memoryRecord.id,
     memoryRecord.content,
     memoryRecord.createdAt,
+    accountId,
   );
   return memoryRecord;
 }
@@ -38,10 +40,12 @@ export async function addMemoryRecord(
 export async function findMemoryRecordIdByContent(
   sqlExecutor: MemorySqlExecutor,
   content: string,
+  accountId: string,
 ): Promise<string | undefined> {
   const rows = sqlExecutor.execute<{ id: string }>(
-    'SELECT id FROM memories WHERE content = ? LIMIT 1',
+    'SELECT id FROM memories WHERE content = ? AND (account_id = ? OR account_id IS NULL) LIMIT 1',
     content,
+    accountId,
   );
   return rows[0]?.id;
 }
@@ -49,13 +53,15 @@ export async function findMemoryRecordIdByContent(
 export async function listRecentMemoryRecords(
   sqlExecutor: MemorySqlExecutor,
   limit: number,
+  accountId: string,
 ): Promise<readonly MemoryRecord[]> {
   const rows = sqlExecutor.execute<{
     id: string;
     content: string;
     created_at: number;
   }>(
-    'SELECT id, content, created_at FROM memories ORDER BY created_at DESC LIMIT ?',
+    'SELECT id, content, created_at FROM memories WHERE (account_id = ? OR account_id IS NULL) ORDER BY created_at DESC LIMIT ?',
+    accountId,
     limit,
   );
   return rows.map((row) => ({
@@ -69,10 +75,11 @@ export async function recallMemoryRecords(
   sqlExecutor: MemorySqlExecutor,
   queryText: string,
   limit: number,
+  accountId: string,
 ): Promise<readonly MemoryRecord[]> {
   const trimmedQuery = queryText.trim();
   if (trimmedQuery.length === 0) {
-    return listRecentMemoryRecords(sqlExecutor, limit);
+    return listRecentMemoryRecords(sqlExecutor, limit, accountId);
   }
 
   const keywordList = trimmedQuery
@@ -87,8 +94,9 @@ export async function recallMemoryRecords(
       content: string;
       created_at: number;
     }>(
-      'SELECT id, content, created_at FROM memories WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?',
+      'SELECT id, content, created_at FROM memories WHERE content LIKE ? AND (account_id = ? OR account_id IS NULL) ORDER BY created_at DESC LIMIT ?',
       `%${keyword}%`,
+      accountId,
       limit,
     );
     for (const row of rows) {
@@ -106,7 +114,7 @@ export async function recallMemoryRecords(
       .slice(0, limit);
   }
 
-  return listRecentMemoryRecords(sqlExecutor, limit);
+  return listRecentMemoryRecords(sqlExecutor, limit, accountId);
 }
 
 export async function getSessionPreference(

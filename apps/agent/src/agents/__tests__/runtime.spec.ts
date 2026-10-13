@@ -110,6 +110,7 @@ function buildDependencies(input: {
     },
     session: buildFakeSession(),
     deviceId: 'desk-test',
+    accountId: 'acc_0000000000000000000000000000abc2',
     effects,
     ...(input.loadToolDefinitionMap === undefined
       ? {}

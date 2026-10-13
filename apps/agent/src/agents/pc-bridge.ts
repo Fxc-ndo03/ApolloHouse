@@ -5,7 +5,13 @@ import {
   type PcToServerMessage,
   type ServerToPcMessage,
 } from '@/protocol/schema';
+import { readBearerCredentialFromRequest } from '@/auth/token';
 import { buildDesktopRegistrationFromHello } from '@/devices/desktop';
+import {
+  authorizeDesktopHello,
+  isSessionShapedBearer,
+  type DesktopDeviceBinding,
+} from '@/devices/desktop-authorization';
 import {
   buildAuthenticatedDeviceProof,
   CapabilityRegistry,
@@ -46,11 +52,31 @@ export class PcBridge extends Agent<Env, PcBridgeState> {
   // El worker autentica la conexión antes de que llegue onConnect (authorizeApolloConnection),
   // así que la prueba se construye acá y no desde un mensaje del cliente.
   #authProof: AuthenticatedDeviceProof | null = null;
+  // FASE 2.4: cuenta resuelta de la sesión (o null en el camino legacy).
+  #sessionAccount: string | null = null;
 
-  async onConnect(connection: Connection, _ctx: ConnectionContext): Promise<void> {
+  async onConnect(connection: Connection, ctx: ConnectionContext): Promise<void> {
     this.#connection = connection;
+    // FASE 2.4: la sesión de cuenta (si viene) representa al dueño. La
+    // credencial del DISPOSITIVO sigue siendo el plano de capacidades; el
+    // binding deviceId↔cuenta se verifica en el hello, no acá.
+    const bearer = readBearerCredentialFromRequest(ctx.request);
+    this.#sessionAccount =
+      bearer !== null && isSessionShapedBearer(bearer)
+        ? await this.#resolveSessionAccount(bearer)
+        : null;
     this.#authProof = buildAuthenticatedDeviceProof('device');
     this.setState({ ...this.state, connected: true });
+  }
+
+  async #resolveSessionAccount(bearer: string): Promise<string | null> {
+    try {
+      const registry = this.env.AccountRegistry.getByName('registry');
+      const resolved = await registry.session({ token: bearer, atMilliseconds: Date.now() });
+      return resolved.status === 'ok' ? resolved.accountId : null;
+    } catch {
+      return null;
+    }
   }
 
   async onMessage(connection: Connection, message: WSMessage): Promise<void> {
@@ -71,7 +97,34 @@ export class PcBridge extends Agent<Env, PcBridgeState> {
           protocolVersion: msg.protocolVersion ?? null,
           deviceId: null,
         });
-        this.#registerDesktop(msg, msg.hostname);
+        // FASE 2.4: binding dispositivo↔cuenta. Con sesión, el deviceId
+        // declarado sólo vale si el registro lo asigna a ESA cuenta y no está
+        // revocado; revocado o ajeno → cierre (la reconexión no lo restaura).
+        const registration = buildDesktopRegistrationFromHello({
+          hello: msg,
+          hostname: msg.hostname,
+          nowMilliseconds: Date.now(),
+        });
+        let deviceBinding: DesktopDeviceBinding | null = null;
+        if (this.#sessionAccount !== null) {
+          try {
+            const registry = this.env.AccountRegistry.getByName('registry');
+            const binding = await registry.resolveDeviceBinding(registration.deviceId);
+            deviceBinding = binding;
+          } catch {
+            deviceBinding = null;
+          }
+        }
+        const identity = authorizeDesktopHello({
+          sessionAccount: this.#sessionAccount,
+          helloDeviceId: registration.deviceId,
+          deviceBinding,
+        });
+        if (identity.status === 'rejected') {
+          connection.close(1008, identity.reason);
+          return;
+        }
+        this.#registerDesktop(msg, msg.hostname, registration);
         this.#startPingInterval(connection);
         break;
       }
@@ -93,8 +146,9 @@ export class PcBridge extends Agent<Env, PcBridgeState> {
   #registerDesktop(
     hello: Extract<PcToServerMessage, { type: 'hello' }>,
     hostname: string,
+    registrationOverride?: ReturnType<typeof buildDesktopRegistrationFromHello>,
   ): void {
-    const registration = buildDesktopRegistrationFromHello({
+    const registration = registrationOverride ?? buildDesktopRegistrationFromHello({
       hello,
       hostname,
       nowMilliseconds: Date.now(),
@@ -156,6 +210,20 @@ export class PcBridge extends Agent<Env, PcBridgeState> {
     });
   }
 
+  /** FASE 2.5: ¿hay una PC real conectada en esta instancia? */
+  async isDesktopConnectionAlive(): Promise<boolean> {
+    return this.#connection !== null && this.state.connected;
+  }
+
+  /** FASE 2.5: presencia vigente del desktop de esta instancia. */
+  async resolveDesktopPresence(): Promise<string | null> {
+    const deviceId = this.state.deviceId;
+    if (deviceId === null || this.#connection === null) {
+      return null;
+    }
+    return this.#registry.resolvePresence(deviceId);
+  }
+
   // Método RPC público — se llama desde el Worker/tools vía getAgentByName
   async sendCommand(
     type: ServerToPcMessage['type'],
@@ -184,6 +252,7 @@ export class PcBridge extends Agent<Env, PcBridgeState> {
   async resolveCapabilityTarget(input: {
     readonly capabilityName: CapabilityName;
     readonly targetPreference?: unknown;
+    readonly requestingAccountId?: string | null;
   }): Promise<{
     readonly status: 'resolved' | 'unavailable';
     readonly deviceId: string | null;
@@ -192,6 +261,23 @@ export class PcBridge extends Agent<Env, PcBridgeState> {
     readonly reason: string | null;
     readonly commandList: readonly string[];
   }> {
+    // FASE 2.4: la cuenta que pide el target debe ser la dueña del desktop
+    // conectado. Un Apollo de otra cuenta no puede ejecutar comandos acá.
+    if (
+      this.#sessionAccount !== null &&
+      input.requestingAccountId !== undefined &&
+      input.requestingAccountId !== null &&
+      input.requestingAccountId !== this.#sessionAccount
+    ) {
+      return {
+        status: 'unavailable',
+        deviceId: null,
+        deviceType: null,
+        presence: null,
+        reason: 'capability_account_mismatch',
+        commandList: [],
+      };
+    }
     const parsedTargetPreference = targetPreferenceSchema.safeParse(
       input.targetPreference ?? { kind: 'any' },
     );

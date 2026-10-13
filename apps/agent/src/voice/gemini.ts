@@ -25,6 +25,12 @@ export type GeminiChatResult = {
     thoughtSignature?: string;
   }[];
   readonly hadAvailabilityRetry?: boolean;
+  /** Tokens reales reportados por el proveedor; undefined = desconocido. */
+  readonly usage?: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly totalTokens: number;
+  };
 };
 
 export class GeminiQuotaExceededError extends Error {
@@ -107,7 +113,46 @@ const geminiGenerateContentResponseSchema = z.object({
       }),
     )
     .optional(),
+  // FASE 2.4: contabilidad real. Gemini devuelve usageMetadata en
+  // generateContent; si el modo streaming no lo trae, queda undefined
+  // (desconocido) y NUNCA se infiere.
+  usageMetadata: z
+    .object({
+      promptTokenCount: z.number().optional(),
+      candidatesTokenCount: z.number().optional(),
+      totalTokenCount: z.number().optional(),
+    })
+    .optional(),
 });
+
+
+/**
+ * Tokens reales del proveedor; undefined = el proveedor no los reportó
+ * (p. ej. streaming). Nunca se infieren de caracteres ni palabras.
+ */
+function resolveReportedUsage(
+  payload: z.infer<typeof geminiGenerateContentResponseSchema>,
+): GeminiChatResult['usage'] | undefined {
+  const usageMetadata = payload.usageMetadata;
+  if (usageMetadata === undefined) {
+    return undefined;
+  }
+  const inputTokens = usageMetadata.promptTokenCount;
+  const outputTokens = usageMetadata.candidatesTokenCount;
+  const totalTokens = usageMetadata.totalTokenCount;
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    totalTokens: totalTokens ?? (inputTokens ?? 0) + (outputTokens ?? 0),
+  };
+}
 
 export function buildGeminiSystemPrompt(input: {
   readonly soulSystemPrompt: string;
@@ -380,6 +425,7 @@ export async function chatWithGemini(input: {
         text: text.trim(),
         toolCallList,
         hadAvailabilityRetry: availabilityRetried,
+        usage: resolveReportedUsage(payload),
       };
     }
 

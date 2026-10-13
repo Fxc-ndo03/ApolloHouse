@@ -46,6 +46,8 @@ export const deviceIdSchema = z
 export const DEVICE_IDENTITY_SOURCE_LIST = [
   'client_provided',
   'desktop_hostname_legacy',
+  // FASE 2.4: deviceId persistente de la instalación declarado en el hello.
+  'device_id',
 ] as const;
 export const deviceIdentitySourceSchema = z.enum(DEVICE_IDENTITY_SOURCE_LIST);
 export type DeviceIdentitySource = z.infer<typeof deviceIdentitySourceSchema>;

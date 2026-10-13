@@ -48,11 +48,13 @@ async function drainMemoryIndexIntents(
     const existingMemoryId = await findMemoryRecordIdByContent(
       dependencies.sqlExecutor,
       intent.content,
+      dependencies.accountId,
     );
     if (existingMemoryId === undefined) {
       await addMemoryRecord(
         dependencies.sqlExecutor,
         intent.content,
+        dependencies.accountId,
         dependencies.nowMilliseconds,
         () => intent.memoryId,
       );
@@ -60,7 +62,7 @@ async function drainMemoryIndexIntents(
     await enqueueMemoryIndexJob(dependencies.environment, {
       memoryId: existingMemoryId ?? intent.memoryId,
       content: intent.content,
-      deviceId: dependencies.deviceId,
+      accountId: dependencies.accountId,
     });
   }
   await setSessionPreference(
@@ -74,7 +76,7 @@ export type OwnerMemoryConsolidationDependencies = {
   readonly sqlExecutor: MemorySqlExecutor;
   readonly session: Session;
   readonly environment: Env;
-  readonly deviceId: string;
+  readonly accountId: string;
   readonly nowMilliseconds: number;
   readonly createIdentifier: () => string;
   readonly gatherTranscriptSince: (
@@ -204,6 +206,7 @@ export async function runOwnerMemoryConsolidation(
     const existingMemoryId = await findMemoryRecordIdByContent(
       sqlExecutor,
       genuinelyNewFact.content,
+      dependencies.accountId,
     );
     if (existingMemoryId !== undefined) {
       continue;
@@ -222,13 +225,14 @@ export async function runOwnerMemoryConsolidation(
     await addMemoryRecord(
       sqlExecutor,
       genuinelyNewFact.content,
+      dependencies.accountId,
       nowMilliseconds,
       () => memoryId,
     );
     await enqueueMemoryIndexJob(dependencies.environment, {
       memoryId,
       content: genuinelyNewFact.content,
-      deviceId: dependencies.deviceId,
+      accountId: dependencies.accountId,
     });
     await setSessionPreference(
       sqlExecutor,

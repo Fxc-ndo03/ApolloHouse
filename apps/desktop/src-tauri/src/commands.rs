@@ -666,6 +666,136 @@ pub async fn update_settings(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// FASE 2.3 — cuenta multiusuario
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct AccountStatus {
+    pub authenticated: bool,
+    pub account_id: String,
+    pub session_valid: bool,
+}
+
+#[derive(Deserialize)]
+pub struct AccountCredentials {
+    pub email: String,
+    pub password: String,
+}
+
+fn account_settings_snapshot(settings: &State<'_, Mutex<AppSettings>>) -> AppSettings {
+    settings.lock().unwrap().clone()
+}
+
+/// Estado de la cuenta local: sesión viva en Credential Manager + accountId.
+#[tauri::command]
+pub async fn account_status(
+    settings: State<'_, Mutex<AppSettings>>,
+) -> Result<AccountStatus, String> {
+    let stored = account_settings_snapshot(&settings);
+    let has_token = crate::secret_store::read_session_token()
+        .map(|token| !token.is_empty())
+        .unwrap_or(false);
+    let account_id = stored.account_id.trim().to_string();
+    Ok(AccountStatus {
+        authenticated: has_token && !account_id.is_empty(),
+        session_valid: has_token,
+        account_id,
+    })
+}
+
+/// Registro + login (según el backend, ambos emiten sesión) y enrolamiento
+/// del dispositivo con la cuenta autenticada.
+async fn authenticate_and_enroll(
+    app: &AppHandle,
+    settings: &State<'_, Mutex<AppSettings>>,
+    credentials: &AccountCredentials,
+    is_registration: bool,
+) -> Result<AccountStatus, String> {
+    let stored = account_settings_snapshot(settings);
+    let client = crate::account::AccountAuthClient::from_worker_url(&stored.worker_url)
+        .ok_or_else(|| "la URL del Worker no es valida".to_string())?;
+    let issued = if is_registration {
+        client.register(&credentials.email, &credentials.password)
+    } else {
+        client.login(&credentials.email, &credentials.password)
+    }
+    .map_err(|error| format!("{error:?}"))?;
+    // El token se guarda primero en Credential Manager; el accountId en el
+    // JSON. Si la escritura segura falla, NO se finge sesión: se falla.
+    let store_outcome = crate::secret_store::store_session_token(&issued.session_token);
+    if store_outcome != crate::secret_store::SecretStoreOutcome::Ok {
+        return Err("el almacen seguro no esta disponible".to_string());
+    }
+    let device_id = if stored.installation_id.trim().is_empty() {
+        format!("desktop:{}", uuid::Uuid::new_v4())
+    } else {
+        stored.installation_id.clone()
+    };
+    let enrolled = client
+        .enroll_device(&issued.session_token, &device_id, "desktop", &device_id)
+        .unwrap_or(false);
+    let mut updated = stored;
+    updated.account_id = issued.account_id.clone();
+    if updated.installation_id.trim().is_empty() {
+        updated.installation_id = device_id;
+    }
+    updated.save(app).await.map_err(|e| e.to_string())?;
+    *settings.lock().unwrap() = updated;
+    let _ = enrolled;
+    Ok(AccountStatus {
+        authenticated: true,
+        account_id: issued.account_id,
+        session_valid: true,
+    })
+}
+
+#[tauri::command]
+pub async fn account_register(
+    app: AppHandle,
+    settings: State<'_, Mutex<AppSettings>>,
+    credentials: AccountCredentials,
+) -> Result<AccountStatus, String> {
+    authenticate_and_enroll(&app, &settings, &credentials, true).await
+}
+
+#[tauri::command]
+pub async fn account_login(
+    app: AppHandle,
+    settings: State<'_, Mutex<AppSettings>>,
+    credentials: AccountCredentials,
+) -> Result<AccountStatus, String> {
+    authenticate_and_enroll(&app, &settings, &credentials, false).await
+}
+
+/// Logout LOCAL: borra sesión y cuenta de este equipo. NO toca la cuenta del
+/// servidor, la memoria, ni otros dispositivos. La sesión del servidor se
+/// revoca además del lado remoto cuando es posible.
+#[tauri::command]
+pub async fn account_logout(
+    app: AppHandle,
+    settings: State<'_, Mutex<AppSettings>>,
+) -> Result<AccountStatus, String> {
+    let stored = account_settings_snapshot(&settings);
+    if let Ok(token) = crate::secret_store::read_session_token() {
+        if let Some(client) = crate::account::AccountAuthClient::from_worker_url(&stored.worker_url) {
+            // Revocar en el servidor es best-effort: el logout local no puede
+            // quedar bloqueado por un Worker inalcanzable.
+            let _ = client.logout(&token);
+        }
+    }
+    let _ = crate::secret_store::delete_session_token();
+    let mut updated = account_settings_snapshot(&settings);
+    updated.account_id = String::new();
+    updated.save(&app).await.map_err(|e| e.to_string())?;
+    *settings.lock().unwrap() = updated;
+    Ok(AccountStatus {
+        authenticated: false,
+        account_id: String::new(),
+        session_valid: false,
+    })
+}
+
 /// Obtiene las preferencias de dispositivo guardadas.
 #[tauri::command]
 pub async fn get_device_preferences(settings: State<'_, Mutex<AppSettings>>) -> Result<crate::state::DevicePreferences, String> {
@@ -816,14 +946,32 @@ pub async fn start_pcbridge(
     let config = settings.lock().unwrap().clone();
     let secret_diag = if config.device_shared_secret.is_empty() { "(vacio)" } else { "(ok)" };
     eprintln!("[apollo] pcbridge: start config worker={} secret={secret_diag}", !config.worker_url.is_empty());
-    if config.worker_url.is_empty() || config.device_shared_secret.is_empty() {
+    // FASE 2.4: con sesión de cuenta el bridge va autenticado con Bearer y
+    // declara su deviceId persistente en el hello; sin sesión, camino legacy.
+    let session_token = crate::secret_store::read_session_token().ok().filter(|t| !t.is_empty());
+    if config.worker_url.is_empty()
+        || config.device_shared_secret.is_empty() && session_token.is_none()
+    {
         return Err("Worker URL y Device Shared Secret son requeridos".into());
     }
+    let device_id = if config.account_id.trim().is_empty() {
+        None
+    } else {
+        Some(
+            if config.installation_id.trim().is_empty() {
+                format!("desktop:{}", uuid::Uuid::new_v4())
+            } else {
+                config.installation_id.clone()
+            },
+        )
+    };
     bridge
         .start(
             app.clone(),
             config.worker_url,
             config.device_shared_secret,
+            session_token,
+            device_id,
         )
         .await;
     Ok(())
@@ -867,7 +1015,7 @@ pub async fn start_cloud_core(
         .start(
             app.clone(),
             config.worker_url,
-            config.device_shared_secret,
+            crate::cloudcore::ConversationAuth::LegacyDeviceSecret(config.device_shared_secret),
             device_id,
         )
         .await;
