@@ -21,7 +21,6 @@ import {
   accountIdFromPathSegment,
 } from '@/accounts/identity';
 import {
-  createUsageTableStatement,
   recordUsageEvent,
 } from '@/usage/usage';
 import {
@@ -36,6 +35,7 @@ import {
   type AuthorizedConnectionRegistry,
 } from '@/agents/connection-authorization';
 import { createDeskToolEffects } from '@/agents/effects';
+import { initializeApolloSchema } from '@/agents/schema';
 import {
   deliverDeskDeviceNotification,
   parsePendingDeviceMessageAsNotification,
@@ -387,6 +387,9 @@ export class Apollo extends Agent<Env, ApolloState> {
   #audioChunkList: ArrayBuffer[] = [];
   #pendingConfirmation: PendingToolConfirmation | undefined;
   #didLoadPreferences = false;
+  // FASE 2.8 — el esquema se garantiza en el primer acceso al storage, no en
+  // onStart (el SDK instalado no invoca ese hook).
+  #isSchemaInitialized = false;
   #isSpeechAborted = false;
   #sessionManager: SessionManager | undefined;
   #activeThreadSessionId: string | undefined;
@@ -465,6 +468,7 @@ export class Apollo extends Agent<Env, ApolloState> {
 
   get storageBucket(): StorageBucket {
     if (this.#storageBucket === null) {
+      this.#ensureSchemaInitialized();
       this.#storageBucket = createStorageBucket(
         this.ctx.storage.sql as unknown as SqlStorage,
       );
@@ -478,91 +482,10 @@ export class Apollo extends Agent<Env, ApolloState> {
     this.mcp.configureOAuthCallback({
       customHandler: (callbackResult) => buildMcpOauthLandingResponse(callbackResult),
     });
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS memories (
-        id TEXT PRIMARY KEY,
-        content TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `;
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS session_prefs (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `;
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS pending_device_messages (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `;
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS list_items (
-        id TEXT PRIMARY KEY,
-        list_name TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `;
-    // The confirm window is idle by nature, so the agent routinely hibernates
-    // mid-wait and loses the in-memory copy before the user answers.
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS pending_confirmations (
-        id TEXT PRIMARY KEY,
-        tool_name TEXT NOT NULL,
-        args_json TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        expires_at INTEGER NOT NULL,
-        target_device_id TEXT,
-        target_device_type TEXT
-      )
-    `;
-    // BLOCK 6: la confirmación recuerda el device elegido. Las instalaciones
-    // existentes ya tienen la tabla sin estas columnas; add es idempotente por
-    // error de columna duplicada.
-    for (const addTargetColumnStatement of [
-      'ALTER TABLE pending_confirmations ADD COLUMN target_device_id TEXT',
-      'ALTER TABLE pending_confirmations ADD COLUMN target_device_type TEXT',
-      // FASE 2.2/2.4: columnas account_id (defensa en profundidad sobre el
-      // aislamiento por instancia). Las filas pre-fase quedan con NULL: sólo
-      // existen en instancias single-tenant, y las lecturas toleran NULL
-      // dentro de la MISMA instancia. Nunca cruzan instancias.
-      'ALTER TABLE memories ADD COLUMN account_id TEXT',
-      'ALTER TABLE thread_meta ADD COLUMN account_id TEXT',
-      'CREATE INDEX IF NOT EXISTS memories_account_idx ON memories (account_id, created_at)',
-      'CREATE INDEX IF NOT EXISTS thread_meta_account_idx ON thread_meta (account_id, last_turn_at)',
-    ]) {
-      try {
-        this.#sqlExecutor().execute(addTargetColumnStatement);
-      } catch {
-        // La columna/índice ya existe: la migración es idempotente.
-      }
-    }
-    this.#sqlExecutor().execute(createUsageTableStatement);
-    // The SDK owns the server rows in cf_agents_mcp_servers; which of their
-    // tools Apollo may actually call is ours.
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS mcp_tool_settings (
-        namespaced_name TEXT PRIMARY KEY,
-        server_id TEXT NOT NULL,
-        tool_name TEXT NOT NULL,
-        is_enabled INTEGER NOT NULL,
-        safety TEXT NOT NULL
-      )
-    `;
-    // Thread classification and summaries live outside the SDK's session
-    // tables so the SDK schema stays untouched by Apollo concerns.
-    void this.sql`
-      CREATE TABLE IF NOT EXISTS thread_meta (
-        session_id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        summary TEXT,
-        last_turn_at INTEGER NOT NULL
-      )
-    `;
+    // FASE 2.8 — el esquema ya no se crea acá: el hook onStart no lo invoca el
+    // SDK instalado, así que el DDL lived en código muerto y las tablas de
+    // Apollo nunca existían. Va por #ensureSchemaInitialized (primer acceso).
+    this.#ensureSchemaInitialized();
     this.#sessionManager = createApolloSessionManager(this, this.env);
     const storedActiveThreadSessionId = await getSessionPreference(
       this.#sqlExecutor(),
@@ -992,7 +915,8 @@ export class Apollo extends Agent<Env, ApolloState> {
       readonly createdAtMilliseconds: number;
     }[]
   > {
-    this.#sqlExecutor().execute(createUsageTableStatement);
+    // El embudo de esquema corre dentro de #sqlExecutor: una instancia vieja
+    // sin usage_events la obtiene acá, sin perder las filas que ya tuviera.
     const rows = this.#sqlExecutor().execute(
       'SELECT tokens, requests, created_at FROM usage_events WHERE account_id = ? ORDER BY created_at DESC LIMIT 50',
       accountId,
@@ -2584,7 +2508,22 @@ export class Apollo extends Agent<Env, ApolloState> {
   }
 
   #sqlExecutor(): MemorySqlExecutor {
+    this.#ensureSchemaInitialized();
     return createDurableObjectSqlExecutor(this.ctx.storage.sql);
+  }
+
+  /**
+   * FASE 2.8 — garantía de esquema antes de que cualquier operación dependa de
+   * él. Corre una sola vez por instancia en memoria y es idempotente, así que
+   * una instancia vieja sin `usage_events` (o sin la columna `account_id`) la
+   * obtiene en su primer acceso, sin perder las filas que ya tuviera.
+   */
+  #ensureSchemaInitialized(): void {
+    if (this.#isSchemaInitialized) {
+      return;
+    }
+    initializeApolloSchema(createDurableObjectSqlExecutor(this.ctx.storage.sql));
+    this.#isSchemaInitialized = true;
   }
 
   async #ensurePreferencesLoaded(): Promise<void> {
@@ -3228,17 +3167,10 @@ export class Apollo extends Agent<Env, ApolloState> {
           atMilliseconds: Date.now(),
         });
       }
-    } catch (error) {
-      // FASE 2.5: el intento fallido TAMBIÉN consumió request (el turno llegó
-      // a ejecutarse): se cuenta, si no un cliente en error podría reintentar
-      // sin límite.
-      recordUsageEvent(this.#sqlExecutor(), {
-        accountId: this.#accountId,
-        tokens: 0,
-        requests: 1,
-        voiceSeconds: 0,
-        atMilliseconds: Date.now(),
-      });
+} catch (error) {
+      // FASE 2.8 — el request ya se reservó antes del turno (reserva atómica),
+      // así que un fallo NO vuelve a contarse: hacerlo cobraba dos veces el mismo
+      // intento. Verificado en staging: el turno fallido dejaba 2 filas.
       console.error(
         JSON.stringify({
           level: 'error',
