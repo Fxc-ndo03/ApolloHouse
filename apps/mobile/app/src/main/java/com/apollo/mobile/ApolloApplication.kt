@@ -46,7 +46,10 @@ class ApolloApplication : Application() {
      * NUNCA va la credencial aca: esa vive en el Keystore.
      */
     var workerHost: String
-        get() = preferenceStore.getString(PREFERENCE_WORKER_HOST, "") ?: ""
+        get() = preferenceStore.getString(
+            PREFERENCE_WORKER_HOST,
+            com.apollo.mobile.BuildConfig.DEFAULT_WORKER_HOST
+        ) ?: ""
         set(newWorkerHost) {
             preferenceStore.edit().putString(PREFERENCE_WORKER_HOST, newWorkerHost).apply()
         }

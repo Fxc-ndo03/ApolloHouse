@@ -166,10 +166,31 @@ pub struct AppSettings {
     pub device_preferences: DevicePreferences,
 }
 
+/// Destino por defecto del cliente PC.
+///
+/// Es una **dirección**, no un secreto: el valor entra por `APOLLO_WORKER_URL` al
+/// compilar (así el mismo binario no puede cambiar de entorno en runtime, ni
+/// volver a producción por accidente). Sin esa variable el valor es el de
+/// producción, que es exactamente lo que pasaba antes de este cambio.
+///
+/// Un build de staging se compila con
+/// `APOLLO_WORKER_URL=wss://apollo-staging.facupapollo.workers.dev/agents/apollo/default`
+/// y en ese caso TODOS los derivados (HTTP y WebSocket) salen de ahí: no hay
+/// ruta de vuelta a producción.
+pub const PRODUCTION_WORKER_URL: &str =
+    "wss://apollo.facupapollo.workers.dev/agents/apollo/default";
+
+pub fn default_worker_url() -> String {
+    match option_env!("APOLLO_WORKER_URL") {
+        Some(compiledUrl) if !compiledUrl.trim().is_empty() => compiledUrl.trim().to_string(),
+        _ => PRODUCTION_WORKER_URL.to_string(),
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-        worker_url: "wss://apollo.facupapollo.workers.dev/agents/apollo/default".to_string(),
+            worker_url: default_worker_url(),
         installation_id: String::new(),
         device_shared_secret: String::new(),
         account_id: String::new(),
@@ -411,6 +432,33 @@ mod tests {
         assert!(s.device_shared_secret.is_empty());
     }
 
+    // FASE 2.11 — el destino del cliente se resuelve al compilar.
+    #[test]
+    fn default_worker_url_never_carries_a_secret() {
+        let url = default_worker_url();
+        assert!(url.starts_with("wss://"), "el destino es una URL de socket");
+        assert!(!url.contains("token="), "ningún secreto en la URL");
+        assert!(!url.contains("secret"), "ningún secreto en la URL");
+    }
+
+    #[test]
+    fn default_worker_url_matches_the_environment_this_binary_was_built_for() {
+        let url = default_worker_url();
+        match option_env!("APOLLO_WORKER_URL") {
+            Some(compiled) if !compiled.trim().is_empty() => {
+                assert_eq!(url, compiled.trim());
+            }
+            _ => assert_eq!(url, PRODUCTION_WORKER_URL),
+        }
+    }
+
+    #[test]
+    fn production_build_still_defaults_to_production() {
+        if option_env!("APOLLO_WORKER_URL").is_none() {
+            assert_eq!(default_worker_url(), PRODUCTION_WORKER_URL);
+        }
+    }
+
     #[test]
     fn default_settings_have_no_installation_id() {
         // El default NO trae un id fijo: si lo trajera, dos instalaciones
@@ -508,7 +556,11 @@ mod tests {
     #[test]
     fn default_settings_have_expected_fields() {
         let s = AppSettings::default();
-        assert_eq!(s.worker_url, "wss://apollo.facupapollo.workers.dev/agents/apollo/default");
+        // FASE 2.11: el destino viene del binario, así que el test afirma el
+        // contrato (wss + mismo valor que `default_worker_url`) en vez de un
+        // literal que rompería cualquier build de staging.
+        assert!(s.worker_url.starts_with("wss://"));
+        assert_eq!(s.worker_url, default_worker_url());
         assert!(s.wake_words.contains(&"apollo".to_string()));
         assert!(s.use_vosk_wake);
         assert_eq!(s.tts_provider, "cloudflare");

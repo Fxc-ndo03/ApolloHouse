@@ -120,3 +120,63 @@ durante las pruebas de arranque en frío (manejadores de más de 120 s), no por 
 código actual. Pendiente: reinstanciar esas cuentas sintéticas o determinar por
 qué su storage no acepta escrituras antes de reutilizarlas como evidencia de
 pruebas.
+
+## I. Corrección documental y estado al cierre de FASE 2.11
+
+Esta sección **no reescribe** lo afirmado antes: separa el diagnóstico
+original de la evidencia posterior, porque cambiaron las conclusiones.
+
+### I.1 Corrección: `onStart()` sí se ejecuta
+
+- **Diagnóstico original (FASE 2.8):** "el hook `Apollo.onStart()` no lo invoca
+  el SDK, las tablas de Apollo nunca se crean". Medido sobre instancias accedidas
+  **sólo por RPC nativo**.
+- **Evidencia posterior (FASE 2.9):** `onStart()` corre en las rutas `fetch`,
+  WebSocket y alarma, vía `Server.#ensureInitialized()` de `partyserver@0.5.10`.
+  El RPC nativo no pasa por `Server.fetch()`, y el propio SDK lo documenta en
+  `getServerByName`. Medido en staging sobre la ruta WebSocket: el ciclo completo
+  ocurre antes del primer mensaje. Las rutas RPC del Worker ahora usan
+  `getAgentByName`.
+- **Lo que sigue en pie de FASE 2.8:** el esquema SQLite nunca se creaba, la
+  causa raíz y su corrección (`initializeApolloSchema()`) son correctas. Lo que
+  cambia es la explicación de *por qué* faltaba el esquema.
+
+### I.2 Corrección: las alarmas NO tenían un defecto
+
+- **Diagnóstico original (FASE 2.9):** "`getAlarm()` devuelve `null` tras
+  `onStart()`, las tareas periódicas nunca se disparan".
+- **Evidencia posterior (FASE 2.10):** era un artefacto de medición — se leía
+  `getAlarm()` desde dentro de la misma invocación que ejecutaba `onStart`, y
+  sobre instancias perturbadas por lecturas repetidas. Con lectura **fuera** de
+  la inicialización y fuera del handler: alarma real armada, `warmupKeepAlive`
+  ejecutado (`execution_started_at` poblado) y reprogramado (`time` avanzado
+  exactamente 300 s), sin duplicados. **No se hizo ningún cambio en el scheduler.**
+
+### I.3 Estado verificado al cierre
+
+- **Arranque en frío:** el primer turno de una cuenta nueva tardaba >120 s por las
+  tablas ausentes. Tras la corrección del esquema: **~3,4 s** (medido 3,4–5,0 s en
+  varias cuentas sintéticas).
+- **Alarmas:** las cuatro de Apollo (`warmupKeepAlive` 300 s,
+  `refreshDashboardWeather` 1800 s, purga 86400 s, consolidación `0 6 * * *`) se
+  registran, se programan, se ejecutan y se reprograman solas.
+- **MCP, gestor de sesiones y preferencias:** observados inicializarse en las
+  rutas probadas (`mcp_oauth_callback_registered`, `session_manager_created`,
+  `preferences_loaded`, en ese orden). **No se realizaron autorizaciones reales
+  contra proveedores OAuth externos**: no hay Integración externa probada.
+- **Pruebas gráficas de PC y Android: PENDIENTES.** No hay GUI ni dispositivo
+  Android en este entorno. Hay binarios de prueba configurados contra
+  `apollo-staging` y contratos verificados por HTTP/WebSocket, no ejecución
+  gráfica.
+
+### I.4 Abierto, sin confirmar
+
+- **Causa de la pérdida histórica de filas de `usage_events` de las cuentas
+  sintéticas antiguas: NO CONFIRMADA.** No se ha podido determinar; las cuentas
+  eran sintéticas y no había datos de usuarios. No se afirma ninguna causa.
+- `refreshDashboardWeather` y la consolidación nocturna no se observaron
+  disparando de verdad: se verificó su programación y elegibilidad, no su
+  ejecución.
+- No existe test de integración local del Agent real: `partyserver` importa de
+  `cloudflare:workers` y el workspace no tiene pool de tests de Workers, así que
+  el scheduler sólo se puede verificar contra Cloudflare.

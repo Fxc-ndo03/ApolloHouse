@@ -45,7 +45,16 @@ android {
         versionCode 1
         versionName '0.1.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
-    }
+          // FASE 2.11: host por defecto del cliente, resuelto al compilar.
+          // Es una direccion, no un secreto: no lleva token ni clave. Un build
+          // de staging se compila con
+          //   ./gradlew assembleDebug -PapolloWorkerHost=apollo-staging.facupapollo.workers.dev
+          // y en ese caso no queda ninguna ruta de vuelta a produccion. Sin la
+          // propiedad, la app arranca sin host (el usuario lo escribe), que es
+          // exactamente el comportamiento previo: no hay fallback silencioso.
+          buildConfigField 'String', 'DEFAULT_WORKER_HOST',
+                  "\"${project.findProperty('apolloWorkerHost') ?: ''}\""
+      }
     buildTypes {
         release {
             minifyEnabled false
