@@ -1,4 +1,4 @@
-import { routeAgentRequest } from 'agents';
+import { getAgentByName, routeAgentRequest } from 'agents';
 import { Sandbox } from '@cloudflare/sandbox';
 
 import { authorizeApolloConnection, Apollo, PcBridge } from '@/agents/apollo';
@@ -75,9 +75,7 @@ export default {
         if (!debugAccountId.startsWith('acc_')) {
           return Response.json({ error: 'invalid_account' }, { status: 400 });
         }
-        const apollo = environment.Apollo.get(
-          environment.Apollo.idFromName(`acct-${debugAccountId}`),
-        );
+        const apollo = await getAgentByName(environment.Apollo, `acct-${debugAccountId}`);
         const rows = await apollo.debugListUsageEvents(debugAccountId);
         return Response.json({ accountId: debugAccountId, events: rows });
       }
@@ -150,7 +148,7 @@ export default {
         return new Response(null, { headers: CONSOLE_CORS_HEADER_MAP });
       }
       try {
-        const apollo = environment.Apollo.get(environment.Apollo.idFromName('default'));
+        const apollo = await getAgentByName(environment.Apollo, 'default');
         const models = await apollo.debugListTtsModels();
         return Response.json({ models }, { headers: CONSOLE_CORS_HEADER_MAP });
       } catch (error) {

@@ -35,6 +35,7 @@ import {
   type AuthorizedConnectionRegistry,
 } from '@/agents/connection-authorization';
 import { createDeskToolEffects } from '@/agents/effects';
+import { registerApolloAlarms } from '@/agents/alarms';
 import { initializeApolloSchema } from '@/agents/schema';
 import {
   deliverDeskDeviceNotification,
@@ -495,14 +496,7 @@ export class Apollo extends Agent<Env, ApolloState> {
       this.#activeThreadSessionId = storedActiveThreadSessionId;
     }
     await this.#ensurePreferencesLoaded();
-    await this.scheduleEvery(
-      DESK_DASHBOARD_REFRESH_INTERVAL_SECONDS,
-      'refreshDashboardWeather',
-    );
-    await this.schedule(OWNER_MEMORY_CONSOLIDATION_CRON, 'consolidateOwnerMemory');
-    await this.scheduleEvery(86_400, 'purgeExpiredCommandThreads');
-    // Warmup alarm: prevent DO hibernation by touching storage every 5 minutes
-    await this.scheduleEvery(300, 'warmupKeepAlive');
+    await registerApolloAlarms(this);
   }
 
   async warmupKeepAlive(): Promise<void> {
