@@ -13,7 +13,10 @@ const TAURI_AVAILABLE = typeof window !== 'undefined'
     // @ts-expect-error Tauri v2 internals
     || typeof window.__TAURI_INTERNALS__ !== 'undefined');
 
-const invoke: typeof tauriInvoke = async (cmd, args?) => {
+// FASE 2.12: el panel de cuenta lo importa. Se exporta el MISMO wrapper que usa
+// el resto del hook (mismo TAURI_AVAILABLE, mismo manejo de error): asi el
+// login nunca puede saltarse el camino seguro.
+export const invoke: typeof tauriInvoke = async (cmd, args?) => {
   if (!TAURI_AVAILABLE) return undefined as never;
   try {
     return await tauriInvoke(cmd, args);

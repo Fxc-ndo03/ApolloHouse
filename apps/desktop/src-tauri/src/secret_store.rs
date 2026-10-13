@@ -29,6 +29,28 @@
 pub const CREDENTIAL_TARGET_PREFIX: &str = "ApolloDesktop:device-shared-secret";
 pub const SESSION_TARGET_PREFIX: &str = "ApolloDesktop:account-session";
 
+/// Sufijo de namespace del almacen seguro, elegido AL COMPILAR.
+///
+/// Sin `APOLLO_CREDENTIAL_NAMESPACE` el nombre es exactamente el de siempre, asi
+/// que una instalacion normal no cambia de comportamiento. Un build de staging
+/// compila con `APOLLO_CREDENTIAL_NAMESPACE=":staging"` y entonces sus entradas
+/// en Credential Manager son `ApolloDesktop:staging:...`: no lee la sesion de
+/// produccion ni escribe sobre ella, y un logout de staging solo borra lo suyo.
+pub fn credential_namespace_suffix() -> &'static str {
+    match option_env!("APOLLO_CREDENTIAL_NAMESPACE") {
+        Some(suffix) if !suffix.trim().is_empty() => suffix,
+        _ => "",
+    }
+}
+
+pub fn credential_target_prefix() -> String {
+    format!("ApolloDesktop{}:device-shared-secret", credential_namespace_suffix())
+}
+
+pub fn session_target_prefix() -> String {
+    format!("ApolloDesktop{}:account-session", credential_namespace_suffix())
+}
+
 const CREDENTIAL_USER: &str = "apollo";
 
 /// Resultado de una operaciÃƒÂ³n sobre el almacÃƒÂ©n seguro.
@@ -56,7 +78,7 @@ fn to_wide(text: &str) -> Vec<u16> {
 
 #[cfg(target_os = "windows")]
 pub fn store_device_secret(secret: &str) -> SecretStoreOutcome {
-    write_credential(CREDENTIAL_TARGET_PREFIX, secret)
+    write_credential(&credential_target_prefix(), secret)
 }
 
 #[cfg(target_os = "windows")]
@@ -137,14 +159,14 @@ fn remove_credential(target: &str) -> SecretStoreOutcome {
 
 #[cfg(target_os = "windows")]
 pub fn read_device_secret() -> SecretStoreOutcomeResult<String> {
-    read_credential(CREDENTIAL_TARGET_PREFIX)
+    read_credential(&credential_target_prefix())
 }
 
 #[cfg(target_os = "windows")]
 pub fn delete_device_secret() -> SecretStoreOutcome {
     use windows::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
 
-    let mut target_wide = to_wide(CREDENTIAL_TARGET_PREFIX);
+    let mut target_wide = to_wide(&credential_target_prefix());
     let _ = unsafe {
         CredDeleteW(windows::core::PWSTR(target_wide.as_mut_ptr()), CRED_TYPE_GENERIC, None)
     };
@@ -174,17 +196,17 @@ pub fn delete_device_secret() -> SecretStoreOutcome {
 
 #[cfg(target_os = "windows")]
 pub fn store_session_token(token: &str) -> SecretStoreOutcome {
-    write_credential(SESSION_TARGET_PREFIX, token)
+    write_credential(&session_target_prefix(), token)
 }
 
 #[cfg(target_os = "windows")]
 pub fn read_session_token() -> SecretStoreOutcomeResult<String> {
-    read_credential(SESSION_TARGET_PREFIX)
+    read_credential(&session_target_prefix())
 }
 
 #[cfg(target_os = "windows")]
 pub fn delete_session_token() -> SecretStoreOutcome {
-    remove_credential(SESSION_TARGET_PREFIX)
+    remove_credential(&session_target_prefix())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -243,8 +265,37 @@ mod tests {
 
     #[test]
     fn el_nombre_de_entrada_no_colisiona_con_otras_apps() {
-        assert!(CREDENTIAL_TARGET_PREFIX.starts_with("Apollo"));
-        assert!(CREDENTIAL_TARGET_PREFIX.contains(':'));
+        assert!(credential_target_prefix().starts_with("Apollo"));
+        assert!(credential_target_prefix().contains(':'));
+    }
+
+    // FASE 2.12: el namespace del almacen seguro se resuelve al compilar.
+    #[test]
+    fn el_namespace_es_el_de_la_build_actual() {
+        let expected = match option_env!("APOLLO_CREDENTIAL_NAMESPACE") {
+            Some(suffix) if !suffix.trim().is_empty() => suffix,
+            _ => "",
+        };
+        assert_eq!(credential_namespace_suffix(), expected);
+        if expected.is_empty() {
+            // Build normal: los nombres son los de siempre, byte a byte.
+            assert_eq!(credential_target_prefix(), CREDENTIAL_TARGET_PREFIX);
+            assert_eq!(session_target_prefix(), SESSION_TARGET_PREFIX);
+        } else {
+            // Build de staging: nunca toca las entradas de produccion.
+            assert_ne!(credential_target_prefix(), CREDENTIAL_TARGET_PREFIX);
+            assert_ne!(session_target_prefix(), SESSION_TARGET_PREFIX);
+            assert!(session_target_prefix().contains("staging"));
+        }
+    }
+
+    #[test]
+    fn los_targets_nunca_llevan_un_secreto() {
+        for target in [credential_target_prefix(), session_target_prefix()] {
+            let lowered = target.to_lowercase();
+            assert!(!lowered.contains("token="));
+            assert!(!lowered.contains("bearer"));
+        }
     }
 
     #[test]

@@ -61,6 +61,23 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+      // FASE 2.12: staging como APLICACION SEPARADA. El suffix cambia el
+      // applicationId final, asi que convive con la app normal, tiene su propio
+      // paquete de datos (SharedPreferences y Keystore incluidos) y no puede
+      // pisar ni borrar lo de produccion. El host sale de la misma propiedad de
+      // antes; si no se pasa, el build de staging NO cae a produccion: queda
+      // vacio y la app pide el host.
+      flavorDimensions 'environment'
+      productFlavors {
+          staging {
+              dimension 'environment'
+              applicationIdSuffix '.staging'
+              versionNameSuffix '-staging'
+              resValue 'string', 'app_name', 'Apollo (STAGING)'
+              buildConfigField 'String', 'DEFAULT_WORKER_HOST',
+                      "\"${project.findProperty('apolloWorkerHost') ?: 'apollo-staging.facupapollo.workers.dev'}\""
+          }
+      }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
