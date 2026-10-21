@@ -780,9 +780,12 @@ def _try_open_input(
                 )
                 return rate, ch
             except Exception as e:
+                err_detail = ""
+                if isinstance(e, OSError):
+                    err_detail = f" errno={getattr(e, 'errno', 'N/A')}"
                 print(
                     f"[voice-debug] input-open-fail index={idx} rate={rate} ch={ch} "
-                    f"err={type(e).__name__}({str(e)[:120]})",
+                    f"err={type(e).__name__}({str(e)[:120]}){err_detail}",
                     flush=True,
                 )
                 continue
@@ -884,9 +887,12 @@ def _try_open_output(
                 test_stream.close()
                 return r, ch
             except Exception as e:
+                err_detail = ""
+                if isinstance(e, OSError):
+                    err_detail = f" errno={getattr(e, 'errno', 'N/A')}"
                 print(
                     f"[tts-debug] output-open-fail index={idx} rate={r} ch={ch} "
-                    f"err={type(e).__name__}({str(e)[:120]})",
+                    f"err={type(e).__name__}({str(e)[:120]}){err_detail}",
                     flush=True,
                 )
                 continue

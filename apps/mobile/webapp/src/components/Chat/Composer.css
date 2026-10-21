@@ -1,0 +1,70 @@
+.apollo-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 20px;
+  border-radius: 99px;
+  background: var(--apollo-glass);
+  backdrop-filter: blur(18px);
+  border: 1px solid var(--apollo-line);
+  box-shadow: var(--apollo-shadow);
+}
+
+.apollo-composer-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  border: 0;
+  outline: 0;
+  background: none;
+  font: inherit;
+  color: var(--apollo-text);
+}
+
+.apollo-composer:focus-within {
+  border-color: var(--apollo-primary);
+}
+
+.apollo-composer-input:focus,
+.apollo-composer-input:focus-visible {
+  outline: none;
+}
+
+.apollo-composer-input::placeholder {
+  color: var(--apollo-text-muted);
+}
+
+.apollo-composer-btn {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 50%;
+  color: #04181d;
+  background: linear-gradient(135deg, var(--apollo-primary), var(--apollo-primary-2));
+  box-shadow: 0 6px 16px var(--apollo-glow);
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+
+.apollo-composer-btn:active {
+  transform: scale(0.92);
+}
+
+.apollo-composer-btn span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transform: scale(0.4) rotate(-45deg);
+  transition:
+    opacity 0.25s,
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.apollo-composer-btn span.on {
+  opacity: 1;
+  transform: none;
+}

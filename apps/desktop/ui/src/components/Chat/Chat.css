@@ -26,6 +26,22 @@
   text-align: center;
 }
 
+/* Boton de Ajustes de la cabecera del chat.
+   El area tactil sube a 44px (minimo recomendado en Android) sin agrandar el
+   resto de los controles ni alterar el alto de la cabecera: los mensajes, el
+   compositor y los controles de voz quedan exactamente donde estaban. */
+.apollo-chat-head .apollo-chat-settings {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+@media (max-width: 420px) {
+  .apollo-chat-head {
+    gap: 8px;
+    padding: 10px 12px 8px;
+  }
+}
+
 .apollo-chat-title b {
   display: block;
   font-weight: 600;

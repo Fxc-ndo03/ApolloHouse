@@ -826,7 +826,7 @@ describe('B10 §16: el esqueleto es el stack que fija el proyecto', () => {
       'utf8',
     );
 
-    expect(appBuildGradle).toContain('minSdkVersion 25');
+    expect(appBuildGradle).toContain('minSdkVersion 33');
     expect(appBuildGradle).toContain('com.squareup.okhttp3:okhttp:3.14.9');
     expect(appBuildGradle).not.toContain('compose');
     expect(rootBuildGradle).toContain('kotlin_version');

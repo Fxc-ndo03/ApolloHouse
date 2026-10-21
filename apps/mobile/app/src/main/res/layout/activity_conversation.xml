@@ -1,27 +1,55 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Pantalla de conversación.
+  Pantalla de conversacion.
 
-  Es un LinearLayout y no algo más rico a propósito: no depende de librerías
-  externas, se infla sin inflater, y las partes que sí dependen del estado
-  (estado de conexión, lista de turnos, campo de texto) son las que hay que
-  poder observar desde Kotlin.
+  Antes era un LinearLayout pelado con los colores por defecto de Android: se
+  veía blanca, sin acento y como una pantalla de diagnostico, no como Apollo.
+  Ahora usa la misma identidad que el resto (fondo casi negro, acento cian,
+  superficies oscuras) manteniendo EXACTAMENTE los mismos ids, porque
+  `ConversationActivity` los observa y no se toca su logica.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/conversation_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/apollo_bg"
     android:orientation="vertical"
     android:fitsSystemWindows="true">
 
-    <TextView
-        android:id="@+id/conversation_status"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="12dp"
-        android:text="Sin conexion"
-        android:textSize="13sp" />
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp">
+
+        <View
+            android:id="@+id/conversation_status_dot"
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:background="@drawable/apollo_orb" />
+
+        <TextView
+            android:id="@+id/conversation_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:text="Sin conexión"
+            android:textColor="@color/apollo_muted"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/apollo_line" />
 
     <ScrollView
+        android:id="@+id/conversation_scroll"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
@@ -31,36 +59,68 @@
             android:id="@+id/conversation_turn_list"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical" />
+            android:orientation="vertical"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp"
+            android:paddingTop="16dp"
+            android:paddingBottom="16dp" />
     </ScrollView>
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="8dp">
+        android:background="@color/apollo_surface"
+        android:orientation="vertical"
+        android:padding="12dp">
 
-        <EditText
-            android:id="@+id/conversation_input"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:hint="Escribile a Apollo"
-            android:importantForAutofill="no"
-            android:inputType="textMultiLine|textCapSentences"
-            android:maxLines="4" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/conversation_input"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/apollo_input"
+                android:hint="Escribile a Apollo"
+                android:importantForAutofill="no"
+                android:inputType="textMultiLine|textCapSentences"
+                android:maxLines="4"
+                android:minHeight="52dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:textColor="@color/apollo_text"
+                android:textColorHint="@color/apollo_muted" />
+
+            <Button
+                android:id="@+id/conversation_send"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:enabled="false"
+                android:minHeight="52dp"
+                android:background="@drawable/apollo_button_primary"
+                android:stateListAnimator="@null"
+                android:text="Enviar"
+                android:textColor="#04201F"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+        </LinearLayout>
 
         <Button
-            android:id="@+id/conversation_send"
-            android:layout_width="wrap_content"
+            android:id="@+id/conversation_abort"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:enabled="false"
-            android:text="Enviar" />
+            android:layout_marginTop="10dp"
+            android:minHeight="48dp"
+            android:background="@drawable/apollo_button_ghost"
+            android:stateListAnimator="@null"
+            android:text="Cancelar respuesta"
+            android:textColor="@color/apollo_accent"
+            android:textSize="14sp"
+            android:textStyle="bold" />
     </LinearLayout>
-
-    <Button
-        android:id="@+id/conversation_abort"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Cancelar respuesta" />
 </LinearLayout>

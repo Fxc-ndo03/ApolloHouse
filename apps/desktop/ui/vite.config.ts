@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
+  // apps/desktop/ui is exposed through a Windows junction; align Vite's root
+  // with __dirname so Rollup keeps index.html inside the UI root.
+  root: __dirname,
   plugins: [react()],
   resolve: {
     alias: {
@@ -12,11 +15,6 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    rollupOptions: {
-      input: {
-        main: path.resolve(__dirname, 'index.html'),
-      },
-    },
   },
   server: {
     port: 1420,

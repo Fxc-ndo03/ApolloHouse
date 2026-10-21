@@ -23,6 +23,7 @@ const PCBRIDGE_PROTOCOL_VERSION: i64 = 1;
 #[derive(Clone)]
 pub struct PcBridgeManager {
     task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
     running: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
 }
@@ -31,6 +32,7 @@ impl PcBridgeManager {
     pub fn new() -> Self {
         Self {
             task: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             running: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(false)),
         }
@@ -44,10 +46,13 @@ impl PcBridgeManager {
         session_token: Option<String>,
         device_id: Option<String>,
     ) {
+        // El arranque nativo y la UI pueden coincidir durante la transición de
+        // sesión. Serializar el ciclo de vida evita abrir dos WebSockets.
+        let _lifecycle = self.lifecycle.lock().await;
         if self.is_running() {
             return;
         }
-        self.stop().await;
+        self.stop_current();
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
         let connected = self.connected.clone();
@@ -59,6 +64,11 @@ impl PcBridgeManager {
     }
 
     pub async fn stop(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.stop_current();
+    }
+
+    fn stop_current(&self) {
         self.running.store(false, Ordering::SeqCst);
         self.connected.store(false, Ordering::SeqCst);
         if let Some(task_handle) = self.task.lock().unwrap().take() {
@@ -110,6 +120,37 @@ fn local_hostname() -> String {
         .unwrap_or_else(|_| "pc".to_string())
 }
 
+/// Un 401/403 o un cierre WS 1008 NO es transitorio: la autorización o el
+/// binding fueron rechazados. Repetirlo con la misma credencial no lo corrige.
+///
+/// `true` = el loop debe detenerse hasta que cambie la sesion/configuracion.
+pub fn is_authorization_failure(message: &str) -> bool {
+    let lowered = message.to_lowercase();
+    lowered.contains("401")
+        || lowered.contains("403")
+        || lowered.contains("1008")
+        || lowered.contains("unauthorized")
+        || lowered.contains("forbidden")
+        || lowered.contains("session_invalid")
+        || lowered.contains("credential_invalid")
+        || lowered.contains("device_revoked")
+        || lowered.contains("device_of_other_account")
+        || lowered.contains("device_id_invalid")
+}
+
+/// El servidor no envía un `hello_ack` para el cliente desktop: el primer
+/// marco de protocolo llega solamente después de aceptar el hello. No marcar
+/// connected al escribir el hello evita falsos positivos en cierres 1008.
+fn mark_connected_after_server_frame(frame: &serde_json::Value, connected: &AtomicBool) -> bool {
+    let Some(frame_type) = frame.get("type").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if frame_type.is_empty() {
+        return false;
+    }
+    !connected.swap(true, Ordering::SeqCst)
+}
+
 async fn run_reconnect_loop(
     worker_url: String,
     device_secret: String,
@@ -126,6 +167,21 @@ async fn run_reconnect_loop(
                 backoff_seconds = 1;
             }
             Err(error) => {
+                if is_authorization_failure(&error) {
+                    // El Worker staging actual admite sesión de cuenta en esta
+                    // ruta y valida el binding del dispositivo dentro del DO.
+                    // Un rechazo puede indicar sesión inválida, PC no enrolada
+                    // o una versión remota incompatible. No registrar secretos.
+                    connected.store(false, Ordering::SeqCst);
+                    running.store(false, Ordering::SeqCst);
+                    eprintln!(
+                        "[apollo] pcbridge: NO DISPONIBLE (rechazo de autorización). \
+                         Iniciá sesión nuevamente y confirmá que esta PC esté enrolada \
+                         en staging. No se reintentará hasta corregir la autorización."
+                    );
+                    log::warn!("pcbridge: detenido por rechazo de autorizacion: {error}");
+                    return;
+                }
                 log::warn!("pcbridge: {error} (reintento en {backoff_seconds}s)");
                 eprintln!("[apollo] pcbridge: {error} (reintento en {backoff_seconds}s)");
                 backoff_seconds = (backoff_seconds * 2).min(60);
@@ -179,9 +235,6 @@ async fn serve_once(
         .send(Message::Text(hello.to_string().into()))
         .await
         .map_err(|e| format!("hello fallo: {e}"))?;
-    connected.store(true, Ordering::SeqCst);
-    log::info!("pcbridge: conectado");
-    eprintln!("[apollo] pcbridge: conectado");
 
     while running.load(Ordering::SeqCst) {
         let incoming = reader
@@ -189,11 +242,20 @@ async fn serve_once(
             .await
             .ok_or_else(|| "stream cerrado".to_string())?
             .map_err(|e| format!("read fallo: {e}"))?;
-        let Message::Text(frame_text) = incoming else {
-            continue;
+        let frame_text = match incoming {
+            Message::Close(Some(frame)) => {
+                return Err(format!("websocket close {}: {}", frame.code, frame.reason));
+            }
+            Message::Close(None) => return Err("websocket close sin código".to_string()),
+            Message::Text(frame_text) => frame_text,
+            _ => continue,
         };
         let frame: serde_json::Value = serde_json::from_str(&frame_text)
             .map_err(|e| format!("frame invalido: {e}"))?;
+        if mark_connected_after_server_frame(&frame, connected) {
+            log::info!("pcbridge: conectado");
+            eprintln!("[apollo] pcbridge: conectado");
+        }
         handle_frame(&mut writer, &frame).await?;
     }
     Ok(())
@@ -274,6 +336,12 @@ async fn dispatch_command(
         "apps_close" => normalize(crate::commands::execute_pc_close_app(app_name).await),
         "lock_screen" => normalize(crate::commands::execute_pc_lock_screen().await),
         "apps_list" => normalize(native_apps_list().await),
+        "volume_up" | "volume_down" => {
+            let Some(virtual_key) = volume_virtual_key(frame_type) else {
+                return (false, None, Some(format!("comando no soportado: {frame_type}")));
+            };
+            normalize(native_media_key(virtual_key).await)
+        }
         "spotify_play" => normalize(native_media_key(0xB3).await),
         "spotify_pause" => normalize(native_media_key(0xB3).await),
         "spotify_next" => normalize(native_media_key(0xB0).await),
@@ -288,6 +356,14 @@ async fn dispatch_command(
             None,
             Some(format!("comando no soportado: {frame_type}")),
         ),
+    }
+}
+
+fn volume_virtual_key(command_type: &str) -> Option<u8> {
+    match command_type {
+        "volume_up" => Some(0xAF),
+        "volume_down" => Some(0xAE),
+        _ => None,
     }
 }
 
@@ -387,4 +463,70 @@ async fn native_media_key(virtual_key: u8) -> Result<serde_json::Value, String> 
         let _ = virtual_key;
         Ok(serde_json::json!({ "ok": false, "error": "Solo soportado en Windows" }))
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_401_es_autorizacion_y_no_una_caida_de_red() {
+        assert!(is_authorization_failure("connect fallo: HTTP error: 401 Unauthorized"));
+        assert!(is_authorization_failure("connect fallo: HTTP error: 403 Forbidden"));
+        assert!(is_authorization_failure("websocket close 1008: session_invalid"));
+    }
+
+    #[test]
+    fn un_500_o_un_timeout_sigue_siendo_reintentable() {
+        assert!(!is_authorization_failure("connect fallo: HTTP error: 500 Internal Server Error"));
+        assert!(!is_authorization_failure("connect fallo: timeout"));
+        assert!(!is_authorization_failure("handshake fallo de red"));
+    }
+
+    #[test]
+    fn el_hello_no_marca_conectado_hasta_recibir_un_marco_del_servidor() {
+        let connected = AtomicBool::new(false);
+        assert!(!mark_connected_after_server_frame(
+            &serde_json::json!({}),
+            &connected
+        ));
+        assert!(!connected.load(Ordering::SeqCst));
+
+        assert!(mark_connected_after_server_frame(
+            &serde_json::json!({ "type": "ping", "ts": 1 }),
+            &connected
+        ));
+        assert!(connected.load(Ordering::SeqCst));
+        assert!(!mark_connected_after_server_frame(
+            &serde_json::json!({ "type": "ping", "ts": 2 }),
+            &connected
+        ));
+    }
+
+    #[test]
+    fn la_instancia_autenticada_del_bridge_coincide_con_el_device_id() {
+        assert_eq!(
+            pcbridge_url(
+                "wss://apollo-staging.facupapollo.workers.dev/agents/apollo/default",
+                Some("desktop:installation-123"),
+            ),
+            "wss://apollo-staging.facupapollo.workers.dev/agents/pc-bridge/desktop:installation-123"
+        );
+    }
+
+    #[test]
+    fn el_cliente_legacy_conserva_la_instancia_compartida() {
+        assert_eq!(
+            pcbridge_url("wss://worker.example/agents/apollo/default", None),
+            "wss://worker.example/agents/pc-bridge/pc-bridge"
+        );
+    }
+
+    #[test]
+    fn asigna_teclas_multimedia_para_subir_y_bajar_volumen() {
+        assert_eq!(volume_virtual_key("volume_up"), Some(0xAF));
+        assert_eq!(volume_virtual_key("volume_down"), Some(0xAE));
+        assert_eq!(volume_virtual_key("unknown"), None);
+    }
+
 }

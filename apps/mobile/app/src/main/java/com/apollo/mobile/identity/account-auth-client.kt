@@ -96,6 +96,13 @@ sealed class AccountAuthOutcome {
     data class Rejected(val reason: String) : AccountAuthOutcome()
 }
 
+/** Result of checking a stored account session against `/api/auth/session`. */
+sealed class AccountSessionValidation {
+    data class Authenticated(val accountId: String) : AccountSessionValidation()
+    object Invalid : AccountSessionValidation()
+    object Unavailable : AccountSessionValidation()
+}
+
 class AccountAuthClient(
     private val workerHost: String,
     private val httpPort: AccountAuthHttpPort = UrlConnectionAccountAuthHttpPort(),
@@ -138,13 +145,31 @@ class AccountAuthClient(
 
     /** Devuelve el `accountId` de la sesión viva, o null si expiró/revocó. */
     fun resolveSessionAccount(sessionToken: String): String? {
+        return (validateSession(sessionToken) as? AccountSessionValidation.Authenticated)?.accountId
+    }
+
+    /** Distinguishes an expired/revoked token from a network or server failure. */
+    fun validateSession(sessionToken: String): AccountSessionValidation {
         val url = AccountAuthContract.buildAuthUrl(workerHost, AccountAuthContract.SESSION_PATH)
-        val answer = httpPort.getJson(url, bearerToken = sessionToken)
-        if (answer.statusCode != 200) return null
+        val answer = try {
+            httpPort.getJson(url, bearerToken = sessionToken)
+        } catch (_: Exception) {
+            return AccountSessionValidation.Unavailable
+        }
+        if (answer.statusCode == 401) return AccountSessionValidation.Invalid
+        if (answer.statusCode != 200) return AccountSessionValidation.Unavailable
+
         return runCatching {
             val parsed = JSONObject(answer.body)
-            if (parsed.optBoolean("authenticated", false)) parsed.optString("accountId") else null
-        }.getOrNull()?.takeIf { it.isNotEmpty() }
+            if (!parsed.optBoolean("authenticated", false)) {
+                AccountSessionValidation.Invalid
+            } else {
+                parsed.optString("accountId")
+                    .takeIf { it.isNotBlank() }
+                    ?.let { AccountSessionValidation.Authenticated(it) }
+                    ?: AccountSessionValidation.Invalid
+            }
+        }.getOrElse { AccountSessionValidation.Unavailable }
     }
 
     fun enrollDevice(sessionToken: String, deviceId: String, deviceType: String, deviceName: String): Boolean {
@@ -161,8 +186,9 @@ class AccountAuthClient(
         val parsed = JSONObject(body)
         val accountId = parsed.optString("accountId")
         val token = parsed.optString("sessionToken")
-        val expiresAt = parsed.optLong("expiresAt")
-        if (accountId.isEmpty() || token.isEmpty()) null else Triple(accountId, token, expiresAt)
+        val expiresAt = parsed.optLong("expiresAt", 0L)
+        if (accountId.isBlank() || token.isBlank() || expiresAt <= 0L) null
+        else Triple(accountId, token, expiresAt)
     }.getOrNull()
 
     private fun resolveRejectionReason(answer: AccountAuthAnswer): String = when {

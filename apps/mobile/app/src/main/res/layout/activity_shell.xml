@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Contenedor principal del producto movil: pantalla actual + barra inferior.
+
+  La barra inferior es la navegacion real del telefono. Antes no habia
+  navegacion: todo estaba apilado en un unico scroll de diagnostico.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/shell_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true">
+
+    <FrameLayout
+        android:id="@+id/shell_content"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <View
+        android:id="@+id/shell_separator"
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/apollo_line" />
+
+    <LinearLayout
+        android:id="@+id/shell_nav"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/apollo_surface"
+        android:orientation="horizontal"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/nav_home"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/apollo_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_home"
+            android:textColor="@color/apollo_muted"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/nav_chat"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/apollo_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_chat"
+            android:textColor="@color/apollo_muted"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/nav_settings"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/apollo_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_settings"
+            android:textColor="@color/apollo_muted"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/nav_profile"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="@drawable/apollo_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_profile"
+            android:textColor="@color/apollo_muted"
+            android:textSize="13sp" />
+    </LinearLayout>
+</LinearLayout>

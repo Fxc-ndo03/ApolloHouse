@@ -1,25 +1,25 @@
 //! Almacenamiento del secreto global en Windows Credential Manager.
 //!
-//! Antes el secreto vivÃƒÂ­a en el JSON de preferencias, en texto plano. Eso lo
-//! dejaba legible para cualquier proceso del usuario y lo exponÃƒÂ­a en copias de
-//! seguridad, en logs de diagnÃƒÂ³stico y en un archivo que se sube sin querer.
+//! Antes el secreto vivÃƒ­a en el JSON de preferencias, en texto plano. Eso lo
+//! dejaba legible para cualquier proceso del usuario y lo exponÃƒ­a en copias de
+//! seguridad, en logs de diagnÃƒ³stico y en un archivo que se sube sin querer.
 //!
 //! Credential Manager lo cifra con la DPAPI del usuario de Windows: solo este
-//! usuario, en esta mÃƒÂ¡quina, puede leerlo. Es la API nativa del sistema para
+//! usuario, en esta mÃƒ¡quina, puede leerlo. Es la API nativa del sistema para
 //! esto, y ya estaba disponible en la crate `windows` que el proyecto usa: solo
 //! faltaba activar el feature `Win32_Security_Credentials`.
 //!
 //! ## Identidad no es secreto
 //!
 //! `installation_id` sigue en el JSON de preferencias. Es un identificador
-//! pÃƒÂºblico que el dueÃƒÂ±o necesita leer para autorizar esta instalaciÃƒÂ³n, y meterlo
-//! en un almacÃƒÂ©n cifrado harÃƒÂ­a imposible mostrarlo en la interfaz de vinculaciÃƒÂ³n.
+//! pÃƒºblico que el dueÃƒ±o necesita leer para autorizar esta instalaciÃƒ³n, y meterlo
+//! en un almacÃƒ©n cifrado harÃƒ­a imposible mostrarlo en la interfaz de vinculaciÃƒ³n.
 //!
-//! ## MigraciÃƒÂ³n sin cortar la conexiÃƒÂ³n
+//! ## MigraciÃƒ³n sin cortar la conexiÃƒ³n
 //!
-//! Al cargar: si Credential Manager no tiene nada pero el JSON sÃƒÂ­, se copia el
-//! JSON al almacÃƒÂ©n. El secreto **no se borra del JSON** hasta que se confirme la
-//! escritura, y ni siquiera despuÃƒÂ©s de forma automÃƒÂ¡tica: se conserva para que un
+//! Al cargar: si Credential Manager no tiene nada pero el JSON sÃƒ­, se copia el
+//! JSON al almacÃƒ©n. El secreto **no se borra del JSON** hasta que se confirme la
+//! escritura, y ni siquiera despuÃƒ©s de forma automÃƒ¡tica: se conserva para que un
 //! rollback manual sea posible.
 
 /// Nombre de la entrada en Credential Manager.
@@ -43,6 +43,34 @@ pub fn credential_namespace_suffix() -> &'static str {
     }
 }
 
+/// Sufijo de namespace para una variante concreta.
+///
+/// Es la misma regla que `credential_namespace_suffix`, pero con la variante
+/// como parametro: asi la suite puede comprobar el aislamiento de las DOS
+/// variantes en una sola corrida, sin depender de con que se compilo.
+pub const fn namespace_suffix_for(variant: crate::state::Variant) -> &'static str {
+    match variant {
+        crate::state::Variant::Staging => ":staging",
+        crate::state::Variant::Stable => "",
+    }
+}
+
+/// Nombre de la entrada de credenciales para una variante concreta.
+pub fn credential_target_prefix_for(variant: crate::state::Variant) -> String {
+    format!(
+        "ApolloDesktop{}:device-shared-secret",
+        namespace_suffix_for(variant)
+    )
+}
+
+/// Nombre de la entrada de sesion para una variante concreta.
+pub fn session_target_prefix_for(variant: crate::state::Variant) -> String {
+    format!(
+        "ApolloDesktop{}:account-session",
+        namespace_suffix_for(variant)
+    )
+}
+
 pub fn credential_target_prefix() -> String {
     format!("ApolloDesktop{}:device-shared-secret", credential_namespace_suffix())
 }
@@ -53,18 +81,18 @@ pub fn session_target_prefix() -> String {
 
 const CREDENTIAL_USER: &str = "apollo";
 
-/// Resultado de una operaciÃƒÂ³n sobre el almacÃƒÂ©n seguro.
+/// Resultado de una operaciÃƒ³n sobre el almacÃƒ©n seguro.
 ///
 /// Se distingue "ausente" de "error" porque significan cosas distintas para
-/// quien migra: ausente es el caso normal de una instalaciÃƒÂ³n nueva, y error
-/// puede ser que Credential Manager no estÃƒÂ© disponible.
+/// quien migra: ausente es el caso normal de una instalaciÃƒ³n nueva, y error
+/// puede ser que Credential Manager no estÃƒ© disponible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretStoreOutcome {
-    /// La operaciÃƒÂ³n terminÃƒÂ³ bien.
+    /// La operaciÃƒ³n terminÃƒ³ bien.
     Ok,
-    /// No hay nada guardado todavÃƒÂ­a.
+    /// No hay nada guardado todavÃƒ­a.
     Absent,
-    /// El almacÃƒÂ©n no respondiÃƒÂ³. Se conserva el valor anterior.
+    /// El almacÃƒ©n no respondiÃƒ³. Se conserva el valor anterior.
     Unavailable(String),
 }
 
@@ -174,11 +202,11 @@ pub fn delete_device_secret() -> SecretStoreOutcome {
     SecretStoreOutcome::Ok
 }
 
-/// En plataformas sin Credential Manager no hay almacÃƒÂ©n seguro.
+/// En plataformas sin Credential Manager no hay almacÃƒ©n seguro.
 ///
-/// No se degrada a texto plano a propÃƒÂ³sito: si el almacÃƒÂ©n no existe, el secreto
-/// no tiene dÃƒÂ³nde ir y el cliente debe fallar cerrado en vez de escribirlo en un
-/// archivo que nadie eligiÃƒÂ³ proteger.
+/// No se degrada a texto plano a propÃƒ³sito: si el almacÃƒ©n no existe, el secreto
+/// no tiene dÃƒ³nde ir y el cliente debe fallar cerrado en vez de escribirlo en un
+/// archivo que nadie eligiÃƒ³ proteger.
 #[cfg(not(target_os = "windows"))]
 pub fn store_device_secret(_secret: &str) -> SecretStoreOutcome {
     SecretStoreOutcome::Unavailable("Credential Manager solo existe en Windows".to_string())
@@ -226,32 +254,32 @@ pub fn delete_session_token() -> SecretStoreOutcome {
 
 /// Traduce un resultado de escritura al valor que queda vigente.
 ///
-/// La regla de migraciÃƒÂ³n es una sola y no es negociable: **el secreto anterior
-/// no se borra hasta que el nuevo estÃƒÂ© confirmado como escrito**. Si la
+/// La regla de migraciÃƒ³n es una sola y no es negociable: **el secreto anterior
+/// no se borra hasta que el nuevo estÃƒ© confirmado como escrito**. Si la
 /// escritura falla, el valor antiguo sigue siendo la fuente y el cliente puede
-/// seguir conectÃƒÂ¡ndose.
+/// seguir conectÃƒ¡ndose.
 pub fn resolve_migration(json_secret: &str, store_outcome: &SecretStoreOutcome) -> String {
     match store_outcome {
         SecretStoreOutcome::Ok | SecretStoreOutcome::Absent | SecretStoreOutcome::Unavailable(_) => {
             // En los tres casos el valor vigente es el del JSON. Cambiarlo sin
-            // confirmar la escritura dejarÃƒÂ­a al usuario sin conexiÃƒÂ³n.
+            // confirmar la escritura dejarÃƒ­a al usuario sin conexiÃƒ³n.
             json_secret.to_string()
         }
     }
 }
 
-/// Decide de dÃƒÂ³nde leer el secreto al arrancar.
+/// Decide de dÃƒ³nde leer el secreto al arrancar.
 ///
-/// El almacÃƒÂ©n seguro es la fuente preferida. Si estÃƒÂ¡ vacÃƒÂ­o y el JSON tiene algo,
-/// se migra: se escribe en el almacÃƒÂ©n y se conserva el JSON como respaldo para
+/// El almacÃƒ©n seguro es la fuente preferida. Si estÃƒ¡ vacÃƒ­o y el JSON tiene algo,
+/// se migra: se escribe en el almacÃƒ©n y se conserva el JSON como respaldo para
 /// que un rollback sea posible.
 pub fn load_effective_secret(json_secret: &str) -> String {
     match read_device_secret() {
         Ok(stored) if !stored.is_empty() => stored,
         _ => {
             if !json_secret.is_empty() {
-                // MigraciÃƒÂ³n. El resultado se ignora a propÃƒÂ³sito: si la escritura
-                // falla, el JSON sigue siendo vÃƒÂ¡lido y el cliente conecta igual.
+                // MigraciÃƒ³n. El resultado se ignora a propÃƒ³sito: si la escritura
+                // falla, el JSON sigue siendo vÃƒ¡lido y el cliente conecta igual.
                 let _ = store_device_secret(json_secret);
             }
             json_secret.to_string()
@@ -262,6 +290,7 @@ pub fn load_effective_secret(json_secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::Variant;
 
     #[test]
     fn el_nombre_de_entrada_no_colisiona_con_otras_apps() {
@@ -300,8 +329,8 @@ mod tests {
 
     #[test]
     fn una_escritura_fallida_conserva_el_secreto_anterior() {
-        // El criterio de aceptaciÃƒÂ³n: si el almacÃƒÂ©n no responde, el usuario no
-        // debe quedarse sin conexiÃƒÂ³n por una reparaciÃƒÂ³n mal hecha.
+        // El criterio de aceptaciÃƒ³n: si el almacÃƒ©n no responde, el usuario no
+        // debe quedarse sin conexiÃƒ³n por una reparaciÃƒ³n mal hecha.
         let previous = "secreto-que-funcionaba";
         let outcome = SecretStoreOutcome::Unavailable("CredWriteW fallo".to_string());
         assert_eq!(resolve_migration(previous, &outcome), previous);
@@ -315,8 +344,8 @@ mod tests {
 
     #[test]
     fn un_secreto_ausente_no_inventa_uno_nuevo() {
-        // Nunca se genera un secreto: serÃƒÂ­a una credencial que el Worker no
-        // conoce y dejarÃƒÂ­a al cliente sin poder conectar.
+        // Nunca se genera un secreto: serÃƒ­a una credencial que el Worker no
+        // conoce y dejarÃƒ­a al cliente sin poder conectar.
         assert_eq!(resolve_migration("", &SecretStoreOutcome::Absent), "");
     }
 
@@ -335,4 +364,75 @@ mod tests {
             ));
         }
     }
+
+
+    // ----------------------------------------------------------------
+    // Aislamiento de credenciales entre variantes.
+    //
+    // La pregunta que estos tests contestan: staging y produccion
+    // comparten la MISMA credencial activa? La respuesta es que no, y
+    // estos tests lo fijan para que no se rompa por accidente.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn staging_y_produccion_no_comparten_el_secreto_de_dispositivo() {
+        let estable = credential_target_prefix_for(Variant::Stable);
+        let staging = credential_target_prefix_for(Variant::Staging);
+        assert_ne!(estable, staging);
+        assert_eq!(estable, CREDENTIAL_TARGET_PREFIX);
+        assert!(staging.contains("staging"));
+        // La entrada de staging no puede ser la de produccion: si lo fuera,
+        // un build de staging escribiria y leeria el secreto de produccion.
+        assert_ne!(staging, CREDENTIAL_TARGET_PREFIX);
+    }
+
+    #[test]
+    fn staging_y_produccion_no_comparten_la_sesion_de_cuenta() {
+        let estable = session_target_prefix_for(Variant::Stable);
+        let staging = session_target_prefix_for(Variant::Staging);
+        assert_ne!(estable, staging);
+        assert_eq!(estable, SESSION_TARGET_PREFIX);
+        assert_ne!(staging, SESSION_TARGET_PREFIX);
+        assert!(staging.contains("staging"));
+    }
+
+    #[test]
+    fn el_nombre_de_esta_build_coincide_con_su_variante() {
+        // El namespace que usa ESTE binario es el de su variante: no hay
+        // una bandera independiente que pueda desincronizarse.
+        let esperado = namespace_suffix_for(Variant::current());
+        assert_eq!(credential_namespace_suffix(), esperado);
+        assert_eq!(
+            credential_target_prefix(),
+            credential_target_prefix_for(Variant::current())
+        );
+        assert_eq!(
+            session_target_prefix(),
+            session_target_prefix_for(Variant::current())
+        );
+    }
+
+    #[test]
+    fn una_build_de_staging_nunca_toca_las_entradas_de_produccion() {
+        if !crate::state::is_staging_build() {
+            return;
+        }
+        assert_ne!(credential_target_prefix(), CREDENTIAL_TARGET_PREFIX);
+        assert_ne!(session_target_prefix(), SESSION_TARGET_PREFIX);
+    }
+
+    #[test]
+    fn los_targets_aislados_no_llevan_un_secreto() {
+        for variant in [Variant::Stable, Variant::Staging] {
+            for target in [
+                credential_target_prefix_for(variant),
+                session_target_prefix_for(variant),
+            ] {
+                let lowered = target.to_lowercase();
+                assert!(!lowered.contains("token="));
+                assert!(!lowered.contains("bearer"));
+            }
+        }
+    }
+
 }

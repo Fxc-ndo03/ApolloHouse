@@ -5,6 +5,7 @@ import com.apollo.mobile.identity.AccountAuthAnswer
 import com.apollo.mobile.identity.AccountAuthClient
 import com.apollo.mobile.identity.AccountAuthHttpPort
 import com.apollo.mobile.identity.AccountAuthOutcome
+import com.apollo.mobile.identity.AccountSessionValidation
 import com.apollo.mobile.transport.DeviceCredential
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -129,6 +130,59 @@ class AccountAuthTest {
         // El puerto real (UrlConnection) convierte esto en el header
         // `Authorization: Bearer ...`; el fake ve el token crudo.
         assertEquals("token-sesion-1234567890", httpForA.requestTokens.single())
+    }
+
+    @Test
+    fun laValidacionDistingueSesionInvalidaDeWorkerNoDisponible() {
+        val invalidClient = AccountAuthClient(
+            "worker.example",
+            FakeAccountHttp(statusCodeByPath = mapOf("api/auth/session" to 401)),
+        )
+        val unavailableClient = AccountAuthClient(
+            "worker.example",
+            object : AccountAuthHttpPort {
+                override fun postJson(url: String, jsonBody: String, bearerToken: String?) =
+                    AccountAuthAnswer(500, "{}")
+                override fun getJson(url: String, bearerToken: String?): AccountAuthAnswer =
+                    AccountAuthAnswer(503, "{}")
+            },
+        )
+        val validClient = AccountAuthClient(
+            "worker.example",
+            FakeAccountHttp(
+                statusCodeByPath = mapOf("api/auth/session" to 200),
+                bodyByPath = mapOf(
+                    "api/auth/session" to JSONObject()
+                        .put("authenticated", true)
+                        .put("accountId", accountIdA)
+                        .toString(),
+                ),
+            ),
+        )
+
+        assertEquals(AccountSessionValidation.Invalid, invalidClient.validateSession("fake-token"))
+        assertEquals(AccountSessionValidation.Unavailable, unavailableClient.validateSession("fake-token"))
+        assertEquals(AccountSessionValidation.Authenticated(accountIdA), validClient.validateSession("fake-token"))
+    }
+
+    @Test
+    fun unaRespuestaDeLoginSinExpiracionNoCumpleElContrato() {
+        val http = FakeAccountHttp(
+            statusCodeByPath = mapOf("api/auth/login" to 200),
+            bodyByPath = mapOf(
+                "api/auth/login" to JSONObject()
+                    .put("accountId", accountIdA)
+                    .put("sessionToken", "synthetic-session-token")
+                    .toString(),
+            ),
+        )
+
+        val outcome = AccountAuthClient("worker.example", http).login("a@example.com", "synthetic-password")
+
+        assertEquals(
+            AccountAuthClient.REASON_RESPONSE_INVALID,
+            (outcome as AccountAuthOutcome.Rejected).reason,
+        )
     }
 
     @Test

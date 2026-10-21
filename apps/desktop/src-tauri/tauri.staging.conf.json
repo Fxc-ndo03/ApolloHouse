@@ -2,11 +2,45 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Apollo Desktop (STAGING)",
   "identifier": "com.apollo.desktop.staging",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Apollo",
+        "url": "/",
+        "width": 1000,
+        "height": 650,
+        "minWidth": 750,
+        "minHeight": 520,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": true,
+        "visible": true,
+        "center": true,
+        "dataDirectory": "webview2-staging"
+      }
+    ]
+  },
   "bundle": {
     "targets": ["nsis"],
     "windows": {
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1ODk2RUY2OEVBMUYwMjYKUldRbThLR085bTZKUlZaRkpRaTY4QmpFZWY1QmF1ZGZwOFg3S3Zoa1F0b2pPY2Q5aWhGWkE4Tm0K",
+      "endpoints": [
+        "https://github.com/Fxc-ndo03/ApolloHouse/releases/download/staging/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

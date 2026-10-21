@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FASE 6.1 · Etapa 2 — contenedor del host WebView.
+
+  Solo un `WebView`. No hay barra, ni menus, ni nada que dependant de la
+  interfaz nativa: el contenido llega de `assets/webapp/` y se sirve con
+  `WebViewAssetLoader`. El fondo usa la identidad de Apollo para que el corte
+  entre la app nativa y la web no se vea como dos productos distintos.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/web_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/apollo_bg"
+    android:fitsSystemWindows="true">
+
+    <WebView
+        android:id="@+id/web_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</FrameLayout>

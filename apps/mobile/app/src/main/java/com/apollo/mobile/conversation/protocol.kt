@@ -69,7 +69,10 @@ data class ConversationInbound(
     val uiState: String? = null,
     val confirmId: String? = null,
     val confirmSummary: String? = null,
-    val turnId: String? = null
+    val turnId: String? = null,
+    val audioFormat: String? = null,
+    val sampleRate: Int? = null,
+    val channels: Int? = null,
 ) {
     val getIsError: Boolean get() = type == ConversationContract.INBOUND_ERROR
 
@@ -85,7 +88,10 @@ data class ConversationInbound(
                 uiState = json.optStringOrNull("state"),
                 confirmId = json.optStringOrNull("confirmId") ?: json.optStringOrNull("id"),
                 confirmSummary = json.optStringOrNull("summary"),
-                turnId = json.optStringOrNull("turnId") ?: json.optStringOrNull("request_id")
+                turnId = json.optStringOrNull("turnId") ?: json.optStringOrNull("request_id"),
+                audioFormat = json.optStringOrNull("format"),
+                sampleRate = json.optInt("sampleRate").takeIf { it > 0 },
+                channels = json.optInt("channels").takeIf { it > 0 },
             )
         }
 

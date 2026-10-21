@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Inicio: la identidad de Apollo y el acceso a las funciones principales. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp"
+        android:paddingTop="28dp"
+        android:paddingBottom="24dp">
+
+        <com.apollo.mobile.ui.ApolloOrbView
+            android:id="@+id/home_orb"
+            android:layout_width="190dp"
+            android:layout_height="190dp"
+            android:layout_gravity="center_horizontal" />
+
+        <TextView
+            android:id="@+id/home_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="18dp"
+            android:text="Sin conexión"
+            android:textColor="@color/apollo_muted"
+            android:textSize="15sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="center"
+            android:text="Tu asistente personal"
+            android:textColor="@color/apollo_text"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:text="¿En qué puedo ayudarte?"
+            android:textColor="@color/apollo_muted"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/home_chat"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:minHeight="52dp"
+            android:background="@drawable/apollo_button_primary"
+            android:stateListAnimator="@null"
+            android:text="Conversar con Apollo"
+            android:textColor="#04201F"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="ATAJOS"
+            android:textColor="@color/apollo_muted"
+            android:textSize="12sp"
+            android:letterSpacing="0.12"
+            android:textAllCaps="true" />
+
+        <LinearLayout
+            android:id="@+id/home_shortcuts"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="vertical" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="ESTADO"
+            android:textColor="@color/apollo_muted"
+            android:textSize="12sp"
+            android:letterSpacing="0.12"
+            android:textAllCaps="true" />
+
+        <LinearLayout
+            android:id="@+id/home_status_card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/apollo_card"
+            android:orientation="vertical"
+            android:padding="16dp" />
+    </LinearLayout>
+</ScrollView>

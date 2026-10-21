@@ -202,7 +202,10 @@ class VoskWakeWordDetector:
                 _vlog(f"wake-detector=start-noop reason=already-running state={self._state}")
                 return
             self._state = self._STATE_RUNNING
-            self._callback_done.clear()
+            # The callback is quiescent until PortAudio enters it. Clearing
+            # this here made stop() wait for a callback that might not exist.
+            self._callback_done.set()
+            self._callback_ack.set()
 
         self._total_bytes = 0
         self._callback_count = 0
@@ -361,6 +364,24 @@ class VoskWakeWordDetector:
                 _vlog(f"wake-callback-exit id={self._wake_id} thread={threading.get_ident()} state={self._state}")
                 return (in_data, pyaudio.paContinue)
 
+            self._callback_done.clear()
+            self._callback_ack.clear()
+
+        try:
+            return self._process_audio_callback(in_data, frame_count, time_info, status)
+        finally:
+            # stop() waits for this barrier before closing the native stream.
+            self._callback_ack.set()
+            self._callback_done.set()
+
+    def _process_audio_callback(
+        self,
+        in_data: bytes,
+        frame_count: int,
+        time_info: dict,
+        status: int,
+    ) -> tuple:
+
         self._total_bytes += len(in_data)
         self._callback_count += 1
 
@@ -441,8 +462,6 @@ class VoskWakeWordDetector:
         except Exception as e:
             _vlog(f"vosk-error ({e})")
 
-        # Ack de quiescence: el callback terminó, stop() puede proceder
-        self._callback_ack.set()
         return (in_data, pyaudio.paContinue)
 
     def _fuzzy_match(self, token: str, target: str) -> bool:
@@ -451,6 +470,34 @@ class VoskWakeWordDetector:
         if abs(len(token) - len(target)) > 1:
             return False
         return difflib.SequenceMatcher(None, token, target).ratio() >= 0.82
+
+    def _dispatch_detected(self, wake_word: str) -> None:
+        """Run client work outside PortAudio's native callback thread.
+
+        The client stops this detector when a wake word is recognized. Calling
+        it inline made stop_stream/close re-enter PortAudio from its callback
+        and wait for an acknowledgement that only that callback could send.
+        """
+        callback = self.on_detected
+        if callback is None:
+            return
+
+        def invoke() -> None:
+            try:
+                callback(wake_word)
+            except Exception as e:
+                _vlog(f"wake-detection-handler-error type={type(e).__name__}")
+
+        try:
+            threading.Thread(
+                target=invoke,
+                name="apollo-wake-detection",
+                daemon=True,
+            ).start()
+        except Exception as e:
+            # Never fall back to the native callback thread: that would restore
+            # the unsafe stop-from-callback path.
+            _vlog(f"wake-detection-dispatch-error type={type(e).__name__}")
 
     def _check_wake_word(self, text: str) -> None:
         now = time.time()
@@ -470,30 +517,21 @@ class VoskWakeWordDetector:
                     self._last_detection_time = now
                     _vlog(f"Wake word coincide: {wake_word} (texto: '{text}')")
                     if self.on_detected:
-                        try:
-                            self.on_detected(wake_word)
-                        except Exception:
-                            pass
+                        self._dispatch_detected(wake_word)
                     return
             else:
                 if re.search(r'\b' + re.escape(wake_word) + r'\b', norm):
                     self._last_detection_time = now
                     _vlog(f"Wake word coincide: {wake_word} (texto: '{text}')")
                     if self.on_detected:
-                        try:
-                            self.on_detected(wake_word)
-                        except Exception:
-                            pass
+                        self._dispatch_detected(wake_word)
                     return
                 for tok in tokens:
                     if self._fuzzy_match(tok, wake_word):
                         self._last_detection_time = now
                         _vlog(f"Wake word difuso: '{tok}' ~ '{wake_word}' (texto: '{text}')")
                         if self.on_detected:
-                            try:
-                                self.on_detected(wake_word)
-                            except Exception:
-                                pass
+                            self._dispatch_detected(wake_word)
                         return
 
     def stop(self) -> None:
@@ -510,20 +548,22 @@ class VoskWakeWordDetector:
 
         _vlog(f"wake-stop-requested id={self._wake_id} thread={threading.get_ident()} state=STOPPING")
 
-        # Stop the stream (only once due to state lock above)
-        if self._stream:
-            self._stream.stop_stream()
-            self._stream.close()
-            self._stream = None
-            _vlog(f"wake-stream-close id={self._wake_id} thread={threading.get_ident()}")
+        # Stop from a control thread, then wait for the callback's finally
+        # barrier before releasing the native stream it may still be using.
+        stream = self._stream
+        if stream:
+            stream.stop_stream()
 
-        # Wait for any in-flight callback to finish
-        self._callback_done.wait(timeout=2.0)
+        self._callback_done.wait()
         _vlog(f"wake-callback-quiesced id={self._wake_id} thread={threading.get_ident()}")
-
-        # Barrera real: esperar el ack del callback (no solo el done)
-        self._callback_ack.wait(timeout=5.0)
+        self._callback_ack.wait()
         _vlog(f"wake-callback-ack id={self._wake_id} thread={threading.get_ident()}")
+
+        if stream:
+            stream.close()
+            if self._stream is stream:
+                self._stream = None
+            _vlog(f"wake-stream-close id={self._wake_id} thread={threading.get_ident()}")
 
         # Transition: STOPPING → STOPPED
         with self._state_lock:

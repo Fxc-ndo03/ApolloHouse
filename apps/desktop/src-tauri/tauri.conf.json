@@ -25,8 +25,6 @@
         "height": 650,
         "minWidth": 750,
         "minHeight": 520,
-        "maxWidth": 1400,
-        "maxHeight": 900,
         "decorations": false,
         "transparent": false,
         "alwaysOnTop": false,
@@ -65,5 +63,17 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1ODk2RUY2OEVBMUYwMjYKUldRbThLR085bTZKUlZaRkpRaTY4QmpFZWY1QmF1ZGZwOFg3S3Zoa1F0b2pPY2Q5aWhGWkE4Tm0K",
+      "endpoints": [
+        "https://github.com/Fxc-ndo03/ApolloHouse/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

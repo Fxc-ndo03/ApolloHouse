@@ -1,13 +1,34 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useTauriCommands } from '@/hooks/useTauri';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { invoke, listen, useTauriCommands } from '@/hooks/useTauri';
+import {
+  ALLOWED_POSTPONE_HOURS,
+  describeUpdateState,
+  isRetryableFailure,
+  normalizeUpdateStatus,
+  postponeDeadline,
+  readProgressPercent,
+  shouldOfferInstall,
+  type UpdateStatus,
+} from '@/components/Settings/updateState';
 import { useAppStore } from '@/store';
 import type { Appearance } from '@/store';
 import { applyAppearance } from '@/components/ui/applyAppearance';
 import { Icon } from '@/components/ui/Icon';
-import type { IconName } from '@/components/ui/Icon';
+import { Page } from '@/components/Settings/Page';
+import { Field, Group, Label, Row, Toggle } from '@/components/Settings/controls';
+import { ProfilePage } from '@/components/Settings/ProfilePage';
 import './Settings.css';
 
-type Route = 'home' | 'appearance' | 'language' | 'voice' | 'audio' | 'connection' | 'system';
+type Route =
+  | 'home'
+  | 'profile'
+  | 'appearance'
+  | 'language'
+  | 'voice'
+  | 'audio'
+  | 'connection'
+  | 'system'
+  | 'updates';
 
 interface Draft {
   workerUrl: string;
@@ -105,7 +126,9 @@ function showValue(key: string, v: unknown): string {
   if (key === 'appearance.accent') return ACCENTS.find((a) => a.k === v)?.name ?? String(v);
   if (key === 'appearance.textSize') return TEXT_SIZES.find((a) => a.k === v)?.name ?? String(v);
   if (key === 'appearance.uiStyle') return UI_STYLES.find((a) => a.k === v)?.name ?? String(v);
-  if (key === 'appearance.mode') return v === 'dark' ? 'Oscuro' : 'Claro';
+  if (key === 'appearance.mode') {
+    return v === 'dark' ? 'Oscuro' : v === 'light' ? 'Claro' : 'Sistema';
+  }
   const s = String(v ?? '');
   return s.length > 42 ? s.slice(0, 42) + '…' : s || '(vacío)';
 }
@@ -318,6 +341,12 @@ export function SettingsWindow() {
     <div className="apollo-settings">
       <div key={route} className={'apollo-settings-anim ' + dir}>
         {route === 'home' && <SettingsHome go={go} draft={draft} />}
+        {route === 'profile' && (
+          <ProfilePage
+            onBack={back}
+            onSignedOut={() => setStack(['home'])}
+          />
+        )}
         {route === 'appearance' && (
           <AppearancePage draft={draft} patchAppearance={patchAppearance} onBack={back} />
         )}
@@ -352,6 +381,7 @@ export function SettingsWindow() {
         {route === 'system' && (
           <SystemPage draft={draft} patch={patch} onBack={back} onReload={() => void loadAll()} />
         )}
+        {route === 'updates' && <UpdatePage onBack={back} />}
       </div>
 
       {result && <p className="apollo-settings-toast" role="status">{result}</p>}
@@ -410,104 +440,25 @@ function getVal(o: Draft, k: string): unknown {
 
 /* ---------------- componentes de página ---------------- */
 
-function Page(props: { title: string; subtitle?: string; onBack: () => void; children: React.ReactNode }) {
-  return (
-    <div className="apollo-page">
-      <div className="apollo-page-top">
-        <button type="button" className="apollo-icon-btn" onClick={props.onBack} aria-label="Volver">
-          <Icon n="back" size={18} />
-        </button>
-        <span className="apollo-page-small">{props.title}</span>
-      </div>
-      <div className="apollo-page-scroll">
-        <div className="apollo-page-big">
-          <h1>{props.title}</h1>
-          {props.subtitle && <p>{props.subtitle}</p>}
-        </div>
-        {props.children}
-      </div>
-    </div>
-  );
-}
-
-function Label({ children, value }: { children: React.ReactNode; value?: string }) {
-  return (
-    <div className="apollo-label">
-      <span>{children}</span>
-      {value && <b key={value}>{value}</b>}
-    </div>
-  );
-}
-
-function Group({ children }: { children: React.ReactNode }) {
-  return <div className="apollo-group">{children}</div>;
-}
-
-function Row(p: {
-  icon: IconName;
-  title: string;
-  sub?: string;
-  onClick?: () => void;
-  right?: React.ReactNode;
-  dim?: boolean;
-}) {
-  return (
-    <div
-      className={'apollo-row' + (p.dim ? ' dim' : '') + (p.onClick ? ' tap' : '')}
-      onClick={p.onClick}
-      role={p.onClick ? 'button' : undefined}
-      tabIndex={p.onClick ? 0 : undefined}
-      onKeyDown={p.onClick ? (e) => e.key === 'Enter' && p.onClick?.() : undefined}
-    >
-      <span className="apollo-row-ico">
-        <Icon n={p.icon} size={18} />
-      </span>
-      <span className="apollo-row-t">
-        <b>{p.title}</b>
-        {p.sub && <small>{p.sub}</small>}
-      </span>
-      {p.right ?? (p.onClick && (
-        <span className="apollo-row-chev">
-          <Icon n="chev" size={18} />
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <button
-      type="button"
-      className="apollo-toggle"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={(e) => {
-        e.stopPropagation();
-        onChange(!on);
-      }}
-    >
-      <i>
-        <Icon n="check" size={14} />
-      </i>
-    </button>
-  );
-}
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div className="apollo-field">
-      <label>{label}</label>
-      <div className="apollo-field-box">{children}</div>
-      {hint && <p className="apollo-hint">{hint}</p>}
-    </div>
-  );
-}
-
-function SettingsHome({ go, draft }: { go: (r: 'appearance' | 'language' | 'voice' | 'audio' | 'connection' | 'system') => void; draft: Draft }) {
+function SettingsHome({ go, draft }: { go: (r: 'profile' | 'appearance' | 'language' | 'voice' | 'audio' | 'connection' | 'system' | 'updates') => void; draft: Draft }) {
+  const account = useAppStore((s) => s.account);
   return (
     <Page title="Configuración" subtitle="Personalizá Apollo a tu manera." onBack={() => {}}>
+      <Label>Cuenta</Label>
+      <Group>
+        <Row
+          icon="shield"
+          title="Perfil"
+          sub={
+            account === null
+              ? 'Comprobando sesión…'
+              : account.authenticated
+                ? `Sesión activa · ${account.account_id}`
+                : 'Sin sesión · iniciá sesión'
+          }
+          onClick={() => go('profile')}
+        />
+      </Group>
       <Label>Personalización</Label>
       <Group>
         <Row icon="pen" title="Apariencia" sub="Tema, color, texto y estilo" onClick={() => go('appearance')} />
@@ -522,9 +473,10 @@ function SettingsHome({ go, draft }: { go: (r: 'appearance' | 'language' | 'voic
       <Group>
         <Row icon="zap" title="Worker y dispositivos" sub={draft.workerUrl ? 'Configurado' : 'Falta Worker URL'} onClick={() => go('connection')} />
       </Group>
-      <Label>Sistema</Label>
-      <Group>
-        <Row icon="shield" title="Sistema" sub="Autostart y atajos" onClick={() => go('system')} />
+<Label>Sistema</Label>
+        <Group>
+          <Row icon="shield" title="Sistema" sub="Autostart y atajos" onClick={() => go('system')} />
+          <Row icon="up" title="Actualizaciones" sub="Version, canal y descargas" onClick={() => go('updates')} />
       </Group>
     </Page>
   );
@@ -548,8 +500,8 @@ function AppearancePage({ draft, patchAppearance, onBack }: {
       </div>
 
       <Label>Tema</Label>
-      <div className="apollo-opts cols2">
-        {(['dark', 'light'] as const).map((m) => (
+      <div className="apollo-opts cols3">
+        {(['system', 'dark', 'light'] as const).map((m) => (
           <button
             key={m}
             type="button"
@@ -557,8 +509,8 @@ function AppearancePage({ draft, patchAppearance, onBack }: {
             aria-pressed={a.mode === m}
             onClick={() => patchAppearance({ mode: m })}
           >
-            <Icon n={m === 'dark' ? 'moon' : 'sun'} size={20} />
-            <span>{m === 'dark' ? 'Oscuro' : 'Claro'}</span>
+            <Icon n={m === 'system' ? 'monitor' : m === 'dark' ? 'moon' : 'sun'} size={20} />
+            <span>{m === 'system' ? 'Sistema' : m === 'dark' ? 'Oscuro' : 'Claro'}</span>
           </button>
         ))}
       </div>
@@ -880,6 +832,230 @@ function SystemPage({ draft, patch, onBack, onReload }: {
       <button type="button" className="apollo-btn ghost" onClick={onReload}>
         Recargar valores
       </button>
+    </Page>
+  );
+}
+
+/**
+ * FASE 3.1 — pagina de actualizaciones dentro de Ajustes.
+ *
+ * Usa las mismas primitivas que el resto (Page/Group/Row) y la logica pura de
+ * updateState.ts. No crea un camino de actualizacion paralelo.
+ */
+function UpdatePage({ onBack }: { onBack: () => void }) {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const statusRef = useRef<UpdateStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [deferredUntil, setDeferredUntil] = useState<number | null>(null);
+
+  const apply = useCallback((next: UpdateStatus) => {
+    // Android's bridge first replies "checking" and later emits the final
+    // status. Do not let a delayed initial reply overwrite that final event.
+    if (next.status.kind === 'checking' && statusRef.current && statusRef.current.status.kind !== 'checking') {
+      return;
+    }
+    statusRef.current = next;
+    setStatus(next);
+    setProgress(next.status.kind === 'downloading' ? next.status.percent : null);
+  }, []);
+
+  const check = useCallback(async () => {
+    setBusy(true);
+    // FASE 3.4: se declara "comprobando" antes de salir a la red, para que el
+    // panel no siga diciendo "Aun no se comprobo" mientras espera.
+    if (status) {
+      apply({ ...status, status: { kind: 'checking' } });
+    }
+    try {
+      const next = normalizeUpdateStatus(await invoke('check_for_update'));
+      apply(next);
+      setLastChecked(new Date().toLocaleTimeString());
+    } catch (error) {
+      apply({
+        channel: status?.channel ?? 'stable',
+        installedVersion: status?.installedVersion ?? '?',
+        status: { kind: 'failed', reason: String(error) },
+        latestVersion: null,
+        notes: null,
+        publishedAt: null,
+        message: null,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [apply, status?.channel, status?.installedVersion]);
+
+  const install = useCallback(async () => {
+    setBusy(true);
+    setProgress(0);
+    // FASE 3.4: el progreso real llega por el evento `update://progress` de
+    // Rust. No se marca "descargando" con un porcentaje inventado.
+    apply({
+      channel: status?.channel ?? 'stable',
+      installedVersion: status?.installedVersion ?? '?',
+      status: { kind: 'checking' },
+      latestVersion: status?.latestVersion ?? null,
+      notes: null,
+      publishedAt: null,
+      message: null,
+    });
+    try {
+      const next = normalizeUpdateStatus(await invoke('download_and_install_update'));
+      apply(next);
+    } catch (error) {
+      apply({
+        channel: status?.channel ?? 'stable',
+        installedVersion: status?.installedVersion ?? '?',
+        status: { kind: 'failed', reason: String(error) },
+        latestVersion: status?.latestVersion ?? null,
+        notes: null,
+        publishedAt: null,
+        message: null,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [apply, status]);
+
+  const restart = useCallback(async () => {
+    await invoke('restart_after_update');
+  }, []);
+
+  // FASE 3.4: Rust emite el progreso real de la descarga. Sin este listener el
+  // panel se quedaba en "comprobando" durante toda la descarga.
+  useEffect(() => {
+    const unlistenProgress = listen<number>('update://progress', (event) => {
+      const percent = readProgressPercent(event.payload);
+      if (percent === null) return;
+      setProgress(percent);
+      setStatus((previous) =>
+        previous === null
+          ? previous
+          : { ...previous, status: { kind: 'downloading', percent } },
+      );
+    });
+    const unlistenReady = listen('update://ready', () => {
+      setProgress(100);
+      setStatus((previous) =>
+        previous === null ? previous : { ...previous, status: { kind: 'ready' } },
+      );
+    });
+    const unlistenStatus = listen<unknown>('update://status', (event) => {
+      const next = normalizeUpdateStatus(event.payload);
+      apply(next);
+      if (['upToDate', 'available', 'failed'].includes(next.status.kind)) {
+        setLastChecked(new Date().toLocaleTimeString());
+      }
+    });
+
+    return () => {
+      void unlistenProgress.then((stop) => stop());
+      void unlistenReady.then((stop) => stop());
+      void unlistenStatus.then((stop) => stop());
+    };
+  }, [apply]);
+
+  useEffect(() => {
+    void check();
+    // Solo al abrir la pagina. El usuario manda desde el boton.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const kind = status?.status.kind ?? 'idle';
+  const canInstall = status ? shouldOfferInstall(status.status) : false;
+  const failureReason = status?.status.kind === 'failed' ? status.status.reason : '';
+  const retryable = failureReason !== '' && isRetryableFailure(failureReason);
+
+  const postpone = useCallback((hours: number) => {
+    const deadline = postponeDeadline(Math.floor(Date.now() / 1000), hours);
+    if (!deadline.ok) return;
+    setDeferredUntil(deadline.untilEpochSeconds);
+    apply({
+      channel: status?.channel ?? 'stable',
+      installedVersion: status?.installedVersion ?? '?',
+      status: { kind: 'deferred', untilEpochSeconds: deadline.untilEpochSeconds },
+      latestVersion: status?.latestVersion ?? null,
+      notes: status?.notes ?? null,
+      publishedAt: status?.publishedAt ?? null,
+      message: `Se comprobara de nuevo en ${hours} h.`,
+    });
+  }, [apply, status]);
+
+  return (
+    <Page
+      title="Actualizaciones"
+      subtitle={status ? describeUpdateState(status) : 'Comprobando...'}
+      onBack={onBack}
+    >
+      <Label>Estado</Label>
+      <Group>
+        <Row icon="check" title="Version instalada" sub={status?.installedVersion ?? '-'} />
+        <Row icon="shield" title="Canal" sub={status?.channel === 'staging' ? 'STAGING (pruebas)' : 'Estable'} />
+        <Row icon="clock" title="Ultima comprobacion" sub={lastChecked ?? 'Sin comprobar'} />
+        {deferredUntil !== null && (
+          <Row icon="msg" title="Pospuesta hasta" sub={new Date(deferredUntil * 1000).toLocaleString()} />
+        )}
+      </Group>
+
+      {kind === 'available' && status?.latestVersion && (
+        <>
+          <Label>Disponible</Label>
+          <Group>
+            <Row icon="up" title={`Version ${status.latestVersion}`} sub={status.publishedAt ?? ''} />
+            {status.notes ? <Row icon="msg" title="Notas" sub={status.notes} /> : null}
+          </Group>
+        </>
+      )}
+
+      {progress !== null && (
+        <Group>
+          <Row icon="down" title="Descargando" sub={`${progress}%`} />
+        </Group>
+      )}
+
+      <Label>Acciones</Label>
+      <Group>
+        <Row
+          icon="bell"
+          title={busy ? 'Un momento...' : 'Comprobar ahora'}
+          sub={retryable ? 'El ultimo intento fallo; puedes reintentar' : 'Consulta el canal de esta app'}
+          onClick={busy ? undefined : () => void check()}
+        />
+        {canInstall && (
+          <Row
+            icon="down"
+            title="Descargar e instalar"
+            sub="La firma se verifica antes de instalar"
+            onClick={() => void install()}
+          />
+        )}
+        {kind === 'pendingRestart' && (
+          <Row
+            icon="gear"
+            title="Reiniciar Apollo"
+            sub="Hazlo cuando no estes hablando"
+            onClick={() => void restart()}
+          />
+        )}
+        {kind === 'available' &&
+          ALLOWED_POSTPONE_HOURS.map((hours) => (
+            <Row
+              key={`postpone-${hours}`}
+              icon="clock"
+              title={`Posponer ${hours} h`}
+              sub="Sigue instalada la version actual"
+              onClick={() => postpone(hours)}
+            />
+          ))}
+      </Group>
+
+      {status?.message && kind !== 'failed' && (
+        <Group>
+          <Row icon="msg" title={status.message} sub="" />
+        </Group>
+      )}
     </Page>
   );
 }

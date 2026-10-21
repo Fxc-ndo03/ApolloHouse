@@ -1,0 +1,90 @@
+/* ---------- Login (pantalla completa, tema oscuro Apollo) ---------- */
+.ac {
+  --ac-accent: #42E8E0; --ac-text: #E6F7FF; --ac-muted: #8BA9BB; --ac-line: rgba(66, 232, 224, .22); --ac-card: #151920; --ac-bad: #ff6a6a; --ac-ok: #63F2B0;
+  position: relative; height: 100%; max-width: 460px; margin: 0 auto; overflow: hidden; color: var(--ac-text);
+  background: linear-gradient(180deg, #0B0D10, #10161D 50%, #0B0D10);
+  font: 15px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+.ac *, .ac *::before, .ac *::after { box-sizing: border-box; }
+.ac-splash { display: grid; place-items: center; }
+.ac-splash .ac-spark { animation: acPulse 1.4s ease-in-out infinite; }
+@keyframes acPulse { 50% { transform: scale(1.08); opacity: .8; } }
+
+/* Dentro de Configuracion: hereda las variables del modulo de ajustes */
+.ac-in { --ac-accent: var(--accent, #7c4dff); --ac-text: var(--text, #15132b); --ac-muted: var(--muted, #7d7a99); --ac-line: var(--line, rgba(60, 50, 120, .14)); --ac-card: var(--card, #fff); --ac-bad: #e5467c; --ac-ok: #1fb37c; color: var(--ac-text); }
+
+.ac-blobs { position: absolute; inset: 0 0 auto 0; height: 55%; overflow: hidden; filter: blur(34px); pointer-events: none; }
+.ac-blobs i { position: absolute; border-radius: 50%; animation: acDrift 14s ease-in-out infinite alternate; }
+.ac-blobs i:nth-child(1) { width: 62%; height: 62%; left: 6%; top: 8%; background: #1a4d4f; }
+.ac-blobs i:nth-child(2) { width: 55%; height: 55%; right: 0; top: 22%; background: #1a3d5a; animation-duration: 18s; animation-delay: -4s; }
+.ac-blobs i:nth-child(3) { width: 45%; height: 45%; left: 28%; top: 40%; background: #2a2a4f; animation-duration: 16s; animation-delay: -8s; }
+@keyframes acDrift { from { transform: translate(-6%, -4%) scale(1); } to { transform: translate(8%, 6%) scale(1.15); } }
+
+.ac-screen { position: absolute; inset: 0; display: flex; flex-direction: column; animation: acIn .5s cubic-bezier(.22, 1, .36, 1) both; }
+@keyframes acIn { from { opacity: 0; transform: translateY(10px); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+
+.ac-spark { display: inline-grid; place-items: center; border-radius: 50%; background: linear-gradient(135deg, #42E8E0, #5B8CFF); box-shadow: 0 10px 26px rgba(66, 232, 224, .4); }
+
+.ac-welcome { flex: 1; display: flex; flex-direction: column; }
+.ac-welcome-top { flex: 1; display: grid; place-items: center; }
+.ac-welcome-body { padding: 0 22px 26px; display: flex; flex-direction: column; gap: 12px; }
+.ac-big { margin: 0; font-size: 2.2em; font-weight: 700; letter-spacing: -.03em; line-height: 1.1; text-align: center; }
+.ac-big span { background: linear-gradient(90deg, #42E8E0, #5B8CFF); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.ac-h { margin: 18px 0 0; font-size: 1.7em; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; }
+.ac-sub { margin: 8px 0 18px; color: var(--ac-muted); font-size: .92em; }
+.center { text-align: center; }
+
+/* Formulario */
+.ac-form { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 14px 22px 22px; overflow-y: auto; scrollbar-width: none; }
+.ac-form.center-col { align-items: center; justify-content: center; text-align: center; gap: 6px; }
+.ac-back { width: 38px; height: 38px; border: 0; border-radius: 50%; display: grid; place-items: center; background: rgba(255, 255, 255, .7); color: inherit; cursor: pointer; }
+.ac-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.ac-field label { font-size: .82em; font-weight: 600; }
+.ac-input { display: flex; align-items: center; height: 52px; padding: 0 14px; background: var(--ac-card); border: 1.5px solid var(--ac-line); border-radius: 14px; transition: border-color .2s, box-shadow .2s; }
+.ac-input:focus-within { border-color: var(--ac-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ac-accent) 14%, transparent); }
+.ac-input.bad { border-color: var(--ac-bad); }
+.ac-input input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; font: inherit; color: var(--ac-text); }
+.ac-eye { border: 0; background: none; color: var(--ac-accent); font: inherit; font-size: .82em; font-weight: 600; cursor: pointer; padding: 6px; }
+.ac-hint { color: var(--ac-muted); font-size: .78em; }
+.ac-input.bad + .ac-hint { color: var(--ac-bad); }
+.ac-error { margin: 4px 0 10px; padding: 10px 12px; border-radius: 12px; font-size: .85em; color: var(--ac-bad); background: color-mix(in srgb, var(--ac-bad) 10%, transparent); animation: acIn .3s both; }
+.ac-ok { margin: 4px 0 10px; padding: 10px 12px; border-radius: 12px; font-size: .85em; color: var(--ac-ok); background: color-mix(in srgb, var(--ac-ok) 12%, transparent); }
+.ac-warn { margin: 0 0 14px; padding: 12px; border-radius: 12px; font-size: .88em; color: var(--ac-bad); background: color-mix(in srgb, var(--ac-bad) 10%, transparent); }
+.ac-link { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: var(--ac-accent); cursor: pointer; }
+.ac-link.right { align-self: flex-end; margin: -4px 0 10px; font-size: .85em; }
+.ac-switch { margin: 14px 0 0; text-align: center; font-size: .88em; color: var(--ac-muted); }
+.ac-foot { margin-top: auto; padding-top: 12px; }
+
+.ac-check { display: flex; align-items: flex-start; gap: 10px; margin: 4px 0 12px; font-size: .85em; cursor: pointer; }
+.ac-check input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--ac-accent); flex: none; }
+
+.ac-strength { display: flex; align-items: center; gap: 10px; margin: -6px 0 12px; }
+.ac-strength .bars { flex: 1; display: flex; gap: 5px; }
+.ac-strength i { flex: 1; height: 4px; border-radius: 9px; background: var(--ac-line); transition: background-color .25s; }
+.ac-strength i.on.s1 { background: #e5467c; } .ac-strength i.on.s2 { background: #f59e0b; }
+.ac-strength i.on.s3 { background: #84cc16; } .ac-strength i.on.s4 { background: #1fb37c; }
+.ac-strength small { width: 60px; text-align: right; color: var(--ac-muted); font-size: .75em; }
+
+.ac-btn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; height: 54px; border: 0; border-radius: 99px; cursor: pointer;
+  background: var(--ac-accent); color: #fff; font: inherit; font-weight: 600; box-shadow: 0 10px 24px color-mix(in srgb, var(--ac-accent) 35%, transparent); transition: transform .15s, opacity .25s; }
+.ac-btn:active:not(:disabled) { transform: scale(.97); }
+.ac-btn:disabled { opacity: .4; cursor: default; box-shadow: none; }
+.ac-btn.ghost { background: rgba(255, 255, 255, .75); color: var(--ac-text); box-shadow: none; }
+.ac-btn.danger { background: var(--ac-bad); box-shadow: 0 10px 24px color-mix(in srgb, var(--ac-bad) 30%, transparent); }
+.ac-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .4); border-top-color: #fff; animation: acSpin .8s linear infinite; }
+@keyframes acSpin { to { transform: rotate(360deg); } }
+
+/* Pagina de cuenta en Configuracion */
+.ac-ident { display: flex; align-items: center; gap: 14px; padding: 16px; margin-bottom: 4px; }
+.ac-avatar { flex: none; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 1.2em; color: #fff; background: linear-gradient(135deg, #42E8E0, #5B8CFF); }
+.ac-ident-t { min-width: 0; display: block; }
+.ac-ident-t b { display: block; font-size: 1.05em; }
+.ac-ident-t small { display: block; color: var(--muted, #7d7a99); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-sform { display: flex; flex-direction: column; }
+.ac-sform .ac-btn { margin-top: 6px; }
+.ac-in .ac-field label { color: var(--ac-text); }
+
+@media (prefers-reduced-motion: reduce) { .ac *, .ac-screen { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+
+/* Onboarding: el nombre es un dato local de este equipo, y la pantalla lo dice. */
+.ac-onboarding-note { display: block; margin: 2px 0 16px; padding: 10px 12px; border-radius: 12px; font-size: .78em; color: var(--ac-muted); background: color-mix(in srgb, var(--ac-accent) 8%, transparent); }

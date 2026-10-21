@@ -207,6 +207,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
             .unwrap_or_default();
 
         let mut cmd = TokioCommand::new(&python_exe);
+        cmd.kill_on_drop(true);
         cmd.current_dir(&client_root)
             .arg("-m")
             .arg("juana_client.client")
@@ -313,7 +314,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
                                 // Voice transcript from Python STT → forward to CloudCoreManager + emit to frontend
                                 if msg_type == "voice_transcript" {
                                     if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
-                                        eprintln!("[sidecar] voice_transcript: {}", text);
+                                        eprintln!("[sidecar] voice_transcript received chars={}", text.chars().count());
                                         // FASE 26: reemitir la identidad del turno (turn_id/generation/ts)
                                         // para correlacion end-to-end. La UI ignora campos extra.
                                         let turn_id_json = msg.get("turn_id").cloned().unwrap_or(serde_json::Value::Null);
@@ -349,7 +350,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object {
                                                 match cc.send_text(&text_owned, None, turn_owned, generation_for_text).await {
                                                     Ok(request_id) => {
                                                         eprintln!("[tts-debug] dispatch=text_input request_id={}", request_id);
-                                                        eprintln!("[tts-debug] transport=cloudcore text=\"{}\"", text_owned);
+                                                        eprintln!("[tts-debug] transport=cloudcore request_id={}", request_id);
                                                     }
                                                     Err(e) => {
                                                         eprintln!("[sidecar] cloudcore send_text failed: {e}");

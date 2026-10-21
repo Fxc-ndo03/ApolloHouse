@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Dimensiones de Apollo. Los numeros magicos de espaciado vivian repetidos en
+  cada layout; aqui hay una sola fuente. Sin <style>: el merger de recursos de
+  este proyecto no resuelve atributos `android:` dentro de un <style>.
+-->
+<resources>
+    <dimen name="apollo_gutter">16dp</dimen>
+    <dimen name="apollo_radius">18dp</dimen>
+    <dimen name="apollo_touch">52dp</dimen>
+</resources>

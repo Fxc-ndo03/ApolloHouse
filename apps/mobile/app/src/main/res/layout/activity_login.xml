@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pantalla de acceso de Apollo. Es el equivalente movil del AuthGate de
+  escritorio: si no hay sesion valida, NO se entra al producto.
+
+  Antes esta pantalla no existia: el login vivia mezclado en el scroll tecnico
+  de la portada, junto con el id del dispositivo y el boton de enrolar.
+
+  Nota de estilo: los atributos van INLINE, no en <style>. El merger de recursos
+  de este proyecto no resuelve `android:*` dentro de un <style>, y una pantalla
+  que no compila no es una pantalla.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/login_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp"
+        android:paddingTop="48dp"
+        android:paddingBottom="32dp">
+
+        <com.apollo.mobile.ui.ApolloOrbView
+            android:id="@+id/login_orb"
+            android:layout_width="140dp"
+            android:layout_height="140dp" />
+
+        <TextView
+            android:id="@+id/login_brand"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Apollo"
+            android:textColor="@color/apollo_text"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/login_subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="Iniciá sesión para conversar con tu asistente."
+            android:textColor="@color/apollo_muted"
+            android:textSize="15sp" />
+
+        <EditText
+            android:id="@+id/login_email"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:minHeight="52dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:background="@drawable/apollo_input"
+            android:hint="Email"
+            android:textColor="@color/apollo_text"
+            android:textColorHint="@color/apollo_muted"
+            android:importantForAutofill="no"
+            android:inputType="textEmailAddress"
+            android:maxLines="1" />
+
+        <EditText
+            android:id="@+id/login_password"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:minHeight="52dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:background="@drawable/apollo_input"
+            android:hint="Contraseña"
+            android:textColor="@color/apollo_text"
+            android:textColorHint="@color/apollo_muted"
+            android:importantForAutofill="no"
+            android:inputType="textPassword"
+            android:maxLines="1" />
+
+        <TextView
+            android:id="@+id/login_error"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textColor="@color/apollo_error"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/login_submit"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:minHeight="52dp"
+            android:background="@drawable/apollo_button_primary"
+            android:stateListAnimator="@null"
+            android:text="Ingresar"
+            android:textColor="#04201F"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/login_switch_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:minHeight="52dp"
+            android:background="@drawable/apollo_button_ghost"
+            android:stateListAnimator="@null"
+            android:text="Crear cuenta"
+            android:textColor="@color/apollo_accent"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/login_worker"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:gravity="center"
+            android:textColor="@color/apollo_muted"
+            android:textSize="12sp" />
+    </LinearLayout>
+</ScrollView>

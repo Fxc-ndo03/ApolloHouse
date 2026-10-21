@@ -279,3 +279,111 @@
   background: var(--apollo-line-soft);
   margin: 0 6px;
 }
+
+/* FASE 3.7B — el panel de cuenta no tenia NINGUNA regla CSS.
+ *
+ * El componente existia y se montaba en Inicio, pero `.apollo-home` es un
+ * flex column con `overflow: hidden`, asi que sin dimension ni `flex-shrink` el
+ * panel quedaba aplastado a altura cero: la pantalla de login era invisible y
+ * no habia forma de iniciar sesion desde Windows. Sin sesion no hay credencial,
+ * el Worker responde 401 y el WebSocket del PcBridge nunca conecta.
+ */
+
+.account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Sin esto el flex padre lo encoge a cero y desaparece. */
+  flex-shrink: 0;
+  /* Necesario para estar por encima del fondo apollo-home-bg (position: absolute) */
+  position: relative;
+  z-index: 1;
+  padding: 16px 16px;
+  margin: 10px 14px 0;
+  background: var(--apollo-surface);
+  border: 1px solid var(--apollo-border-soft);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.account-panel__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: calc(13px * var(--apollo-fs, 1));
+  font-weight: 600;
+  color: #D0D8E0;
+  margin-bottom: 6px;
+}
+
+.account-panel__label input {
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  font-size: calc(15px * var(--apollo-fs, 1));
+  font-weight: 500;
+  color: var(--apollo-text);
+  background: var(--apollo-surface2);
+  border: 2px solid var(--apollo-border-soft);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.account-panel__label input::placeholder {
+  color: #6A7A8A;
+  opacity: 0.7;
+}
+
+.account-panel__label input:focus {
+  border-color: #4DB8FF;
+  box-shadow: 0 0 0 3px rgba(58, 126, 191, 0.25);
+  outline: none;
+}
+
+
+.account-panel__hint strong {
+  color: var(--apollo-text);
+}
+
+.account-panel__error {
+  margin: 0;
+  font-size: calc(12px * var(--apollo-fs, 1));
+  color: var(--apollo-danger-ghost, #ff8080);
+}
+
+.account-panel__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.account-panel__button {
+  padding: 7px 14px;
+  font-size: calc(12px * var(--apollo-fs, 1));
+  color: var(--apollo-text);
+  background: transparent;
+  border: 1px solid var(--apollo-border-soft);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.account-panel__button:hover:not(:disabled) {
+  border-color: var(--apollo-cyan);
+  color: var(--apollo-cyan);
+}
+
+.account-panel__button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* PRUEBA TEMPORAL DE DIAGNOSTICO - se quita despues */
+.account-panel__hint {
+  margin: 12px 0 0;
+  font-size: calc(13px * var(--apollo-fs, 1));
+  color: #8A93B8;
+  line-height: 1.5;
+}

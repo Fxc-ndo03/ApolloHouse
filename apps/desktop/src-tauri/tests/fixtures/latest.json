@@ -1,0 +1,13 @@
+{
+  "version": "1.4.1",
+  "notes": "",
+  "pub_date": "2026-10-14T02:45:14.336Z",
+  "channel": "stable",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "sig",
+      "url": "https://github.com/Fxc-ndo03/ApolloHouse/releases/download/v1.4.1/Apollo_Desktop_1.4.1_x64-setup.exe",
+      "hash": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    }
+  }
+}

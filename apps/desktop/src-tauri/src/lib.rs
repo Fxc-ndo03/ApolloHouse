@@ -7,6 +7,8 @@
     pub mod secret_store;
     pub mod sidecar;
     pub mod state;
+    pub mod update_commands;
+    pub mod updates;
     pub mod wallpaper;
 
 use rustls::crypto::ring::default_provider;
@@ -29,6 +31,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        // FASE 3.1 — actualizador oficial de Tauri. El endpoint, el canal y la
+        // clave publica salen de tauri.conf.json / tauri.staging.conf.json; aqui
+        // solo se registra el plugin y el reinicio controlado tras instalar.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -45,8 +52,23 @@ pub fn run() {
             let app_handle = app.handle().clone();
 
             // Load persisted settings (fall back to defaults)
-            let settings =
+            let mut settings =
                 tauri::async_runtime::block_on(AppSettings::load(&app_handle)).unwrap_or_default();
+            // El destino del Worker se valida ANTES de tocar la red: si no
+            // es valido para esta variante, Apollo no conecta a ningun
+            // Worker y la UI muestra el motivo. Un destino invalido nunca
+            // se degrada al host de la otra variante.
+            let worker_url_error = match state::resolve_worker_url(&settings.worker_url) {
+                state::WorkerUrlResolution::Valid(url) => {
+                    settings.worker_url = url;
+                    None
+                }
+                state::WorkerUrlResolution::Invalid(reason) => {
+                    eprintln!("[apollo] no se conectara a ningun Worker: {reason}");
+                    settings.worker_url = String::new();
+                    Some(reason)
+                }
+            };
             if settings.autostart_enabled {
                 if let Err(error) = app_handle.autolaunch().enable() {
                     log::warn!("autostart: no se pudo habilitar al arrancar: {error}");
@@ -97,35 +119,10 @@ pub fn run() {
             }
             app.manage(sidecar_manager);
 
-            // Companion del PcBridge DO (auto-start si hay settings)
+            // El PC Bridge se inicia desde la UI cuando AuthGate confirma la
+            // sesión. Esto evita una conexión anónima/legacy en paralelo al
+            // arranque y usa siempre las credenciales de la sesión validada.
             let pcbridge_manager = PcBridgeManager::new();
-            let pcbridge_manager_for_start = pcbridge_manager.clone();
-            let app_handle_for_pcbridge = app_handle.clone();
-            let worker_url_pc = settings.worker_url.clone();
-            let device_secret_pc = settings.device_shared_secret.clone();
-            // FASE 2.4: la sesión de cuenta (si existe) autentica el bridge de
-            // capacidades y binding del deviceId persistente.
-            let pcbridge_session_token = crate::secret_store::read_session_token()
-                .ok()
-                .filter(|token| !token.is_empty());
-            let pcbridge_device_id = if settings.account_id.trim().is_empty() {
-                None
-            } else if settings.installation_id.trim().is_empty() {
-                Some(format!("desktop:{}", uuid::Uuid::new_v4()))
-            } else {
-                Some(settings.installation_id.clone())
-            };
-            tauri::async_runtime::spawn(async move {
-                pcbridge_manager_for_start
-                    .start(
-                        app_handle_for_pcbridge,
-                        worker_url_pc,
-                        device_secret_pc,
-                        pcbridge_session_token,
-                        pcbridge_device_id,
-                    )
-                    .await;
-            });
             app.manage(pcbridge_manager);
 
             // Cloud Core: direct WebSocket to Worker (replaces Python sidecar for cloud path)
@@ -158,19 +155,25 @@ pub fn run() {
                 } else {
                     settings.installation_id.clone()
                 };
+            // Mismo criterio que el PC Bridge: sin destino valido no se
+            // abre ningun socket contra el Worker.
+            if let Some(reason) = worker_url_error.clone() {
+                eprintln!("[apollo] cloudcore: no se arranca ({reason})");
+            } else {
                 tauri::async_runtime::spawn(async move {
                     cloudcore_for_start
                         .start(app_handle_for_cloudcore, account_url, auth, device_id_cc)
                         .await;
                 });
+            }
             } else if !settings.worker_url.is_empty() && !settings.device_shared_secret.is_empty() {
                 let cloudcore_for_start = cloudcore_manager.clone();
                 let app_handle_for_cloudcore = app_handle.clone();
                 let worker_url_cc = settings.worker_url.clone();
     let device_secret_cc = settings.device_shared_secret.clone();
-    // La identidad viene de la configuraci��n persistida, no del nombre de la]
+    // La identidad viene de la configuración persistida, no del nombre de la]
     // mǭquina: renombrar el PC no debe cambiarle el `deviceId`, y un]
-    // `COMPUTERNAME` reutilizado en otra mǭquina s�� habr��a colicionado.]
+    // `COMPUTERNAME` reutilizado en otra máquina sí habría colicionado.]
     let device_id_cc = if settings.installation_id.trim().is_empty() {
         local_device_id()
     } else {
@@ -192,6 +195,29 @@ pub fn run() {
             // Pivote de diseno: main es ventana flotante, no wallpaper.
             // El modulo wallpaper.rs queda sin invocar para reusarlo despues.
 
+            // Si el destino del Worker no era valido, la UI lo muestra con
+            // un mensaje claro: el usuario sabe que corregir, y mientras tanto
+            // Apollo no ha abierto ningun socket contra ningun Worker.
+            if let Some(reason) = worker_url_error {
+                let _ = app_handle.emit(
+                    "error",
+                    serde_json::json!({
+                        "code": "worker_url_invalido",
+                        "message": reason,
+                    }),
+                );
+                let app_handle_for_status = app_handle.clone();
+                let reason_for_status = reason.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Some(state) = app_handle_for_status.try_state::<AppState>() {
+                        state
+                            .set_connection_status(crate::state::ConnectionStatus::Error(format!(
+                                "destino del Worker invalido: {reason_for_status}",
+                            )))
+                            .await;
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -201,9 +227,14 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            // Window management
-            show_orb_window,
+.invoke_handler(tauri::generate_handler![
+  // FASE 3.1 — actualizaciones
+  update_commands::check_for_update,
+  update_commands::download_and_install_update,
+  update_commands::update_channel,
+  update_commands::restart_after_update,
+  // Window management
+  show_orb_window,
             hide_orb_window,
             show_chat_window,
             hide_chat_window,
@@ -372,7 +403,15 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         }
         "quit" => {
-            app.exit(0);
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(sidecar_manager) = app_handle.try_state::<SidecarManager>() {
+                    if let Err(error) = sidecar_manager.stop().await {
+                        log::warn!("sidecar: no se pudo detener al salir: {error}");
+                    }
+                }
+                app_handle.exit(0);
+            });
         }
         _ => {}
     });

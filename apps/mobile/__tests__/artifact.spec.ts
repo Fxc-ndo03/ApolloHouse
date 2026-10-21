@@ -151,8 +151,9 @@ describe('B10.1 §3: el APK generado no lleva ningun secret', () => {
     }
     const appBuildGradle = readFileSync(join(MOBILE_ROOT, 'app', 'build.gradle'), 'utf8');
     expect(appBuildGradle).toContain("applicationId 'com.apollo.mobile'");
-    // minSdk no se toca: Android 7.1 sigue siendo el piso del proyecto.
-    expect(appBuildGradle).toContain('minSdkVersion 25');
+    // D2 confirmada: minSdk sube a 33 (Android 13+). El piso anterior (25) queda
+    // superado; el Moto G35 5G requiere API 33 como mínimo.
+    expect(appBuildGradle).toContain('minSdkVersion 33');
     // BLOCK 12.4: el target sube a 36. Antes era 25, lo que dejaba sin aplicar
     // las reglas de PendingIntent (31), del permiso de notificaciones (33) y de
     // edge-to-edge (35). Las tres quedaron resueltas antes de mover este numero:

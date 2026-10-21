@@ -1,0 +1,53 @@
+{
+  "description": "Contrato de serializacion de UpdateStatusKind. Debe coincidir exactamente con lo que emite apps/desktop/src-tauri/src/update_commands.rs. Lo consumen las dos suites: Rust serializa cada variante y compara contra esta cadena; TypeScript la parsea y la alimenta a updateState.ts.",
+  "generatedFrom": "serde(tag = \"kind\", rename_all = \"camelCase\", rename_all_fields = \"camelCase\")",
+  "statusKind": [
+    { "variant": "Idle", "json": "{\"kind\":\"idle\"}" },
+    { "variant": "Checking", "json": "{\"kind\":\"checking\"}" },
+    { "variant": "UpToDate", "json": "{\"kind\":\"upToDate\"}" },
+    { "variant": "Available", "json": "{\"kind\":\"available\"}" },
+    { "variant": "Downloading", "json": "{\"kind\":\"downloading\",\"percent\":42}" },
+    { "variant": "Ready", "json": "{\"kind\":\"ready\"}" },
+    { "variant": "PendingRestart", "json": "{\"kind\":\"pendingRestart\"}" },
+    { "variant": "Deferred", "json": "{\"kind\":\"deferred\",\"untilEpochSeconds\":1800000000}" },
+    { "variant": "Failed", "json": "{\"kind\":\"failed\",\"reason\":\"motivo\"}" }
+  ],
+  "statusEnvelope": [
+    {
+      "variant": "Idle",
+      "json": {
+        "channel": "stable",
+        "installedVersion": "0.1.1",
+        "status": { "kind": "idle" },
+        "latestVersion": null,
+        "notes": null,
+        "publishedAt": null,
+        "message": null
+      }
+    },
+    {
+      "variant": "Available",
+      "json": {
+        "channel": "staging",
+        "installedVersion": "0.1.1",
+        "status": { "kind": "available" },
+        "latestVersion": "1.4.1",
+        "notes": "notas",
+        "publishedAt": "2026-10-14T00:00:00Z",
+        "message": null
+      }
+    },
+    {
+      "variant": "Failed",
+      "json": {
+        "channel": "stable",
+        "installedVersion": "0.1.1",
+        "status": { "kind": "failed", "reason": "No se pudo verificar el manifiesto. Reintenta la comprobacion." },
+        "latestVersion": null,
+        "notes": null,
+        "publishedAt": null,
+        "message": null
+      }
+    }
+  ]
+}

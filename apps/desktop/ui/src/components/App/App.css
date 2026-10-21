@@ -1,4 +1,5 @@
 .app-root {
+  position: relative;
   width: 100%;
   height: 100%;
   display: flex;
@@ -8,30 +9,50 @@
   overflow: hidden;
 }
 
-.app-topbar {
+.app-update-notice {
+  position: fixed;
+  z-index: 1000;
+  top: 16px;
+  right: 16px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  height: 36px;
-  padding: 0 12px;
+  gap: 14px;
+  max-width: min(460px, calc(100vw - 32px));
+  padding: 14px 44px 14px 16px;
+  border: 1px solid var(--apollo-border-soft);
+  border-left: 3px solid var(--apollo-cyan);
+  border-radius: 10px;
   background: var(--apollo-surface);
-  border-bottom: 1px solid var(--apollo-border-soft);
-  flex-shrink: 0;
-  user-select: none;
+  color: var(--apollo-text);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.32);
 }
 
-.app-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.app-update-notice > div {
+  display: grid;
+  gap: 4px;
 }
 
-.app-brand-name {
+.app-update-notice strong { font-size: 13px; }
+.app-update-notice span { color: var(--apollo-text-muted); font-size: 12px; }
+.app-update-notice button {
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--apollo-cyan);
+  color: var(--apollo-bg);
+  font: inherit;
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--apollo-blue);
+  cursor: pointer;
+}
+.app-update-notice .app-update-dismiss {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--apollo-text-muted);
+  font-size: 18px;
 }
 
 .app-window-controls {
@@ -106,6 +127,18 @@
   color: var(--apollo-text-muted);
 }
 
+.app-sidebar-window-controls {
+  justify-content: space-between;
+  gap: 4px;
+  padding: 8px 4px 0;
+  border-top: 1px solid var(--apollo-border-soft);
+  margin-top: 8px;
+}
+
+.app-sidebar-window-controls .app-win-btn {
+  flex: 1;
+}
+
 .app-side-dot {
   width: 7px;
   height: 7px;
@@ -158,6 +191,16 @@
   background: var(--apollo-cyan);
   border-radius: 1px;
   box-shadow: 0 0 8px rgba(66, 232, 224, 0.4);
+}
+
+.app-nav-update-dot {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--apollo-danger);
 }
 
 .app-nav-icon {

@@ -1,0 +1,63 @@
+/* Capa de Android. Solo se carga en el build de Android (platform/android/entry.ts).
+   Todas las reglas van prefijadas con html[data-platform="android"] para ganarle a App.css,
+   que se carga despues. El build de Windows no importa este archivo. */
+
+:root {
+  --android-safe-top: env(safe-area-inset-top, 0px);
+  --android-safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html[data-platform="android"], html[data-platform="android"] body, html[data-platform="android"] #root { height: 100%; }
+html[data-platform="android"] .app-root { height: 100vh; height: 100dvh; padding-top: 0; box-sizing: border-box; }
+
+html[data-platform="android"] button,
+html[data-platform="android"] [role="button"] { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+
+/* Android usa toda el area disponible para la app; la cabecera de escritorio
+   (la franja gris que muestra Apollo) no aporta controles moviles. */
+html[data-platform="android"] .app-topbar { display: none !important; }
+html[data-platform="android"] .app-win-btn { display: none !important; }
+
+/* Navegacion inferior en el lugar de la barra lateral de 168 px. */
+html[data-platform="android"] .app-body { flex-direction: column; }
+html[data-platform="android"] .app-body > .app-content { order: 1; flex: 1; min-height: 0; overflow-y: auto; }
+html[data-platform="android"] .app-body > .app-sidebar {
+  order: 2;
+  width: 100% !important;
+  height: calc(64px + var(--android-safe-bottom));
+  padding: 0 0 var(--android-safe-bottom);
+  flex-direction: row;
+  border-right: none;
+  border-top: 1px solid var(--apollo-line);
+  overflow: hidden;
+}
+html[data-platform="android"] .app-body > .app-sidebar .app-nav-list {
+  flex-direction: row;
+  justify-content: space-around;
+  align-items: center;
+  width: 100%;
+  height: 64px;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+html[data-platform="android"] .app-body > .app-sidebar .app-nav-btn {
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-height: 52px;
+  min-width: 72px;
+  font-size: 11px;
+}
+html[data-platform="android"] .app-body > .app-sidebar .app-side-foot { display: none !important; }
+
+/* Indicador de la pestaña activa: en la barra inferior va arriba y centrado (no a la izquierda). */
+html[data-platform="android"] .app-body > .app-sidebar .app-nav-btn.active::before {
+  top: 0;
+  bottom: auto;
+  left: 50%;
+  right: auto;
+  width: 28px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 0 0 3px 3px;
+}

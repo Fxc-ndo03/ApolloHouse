@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Tokens de color de Apollo. Son la identidad visual del producto y viven
+  aqui, no repetidos en cada layout: por eso el tema claro/oscuro se decide
+  en un solo lugar y ningun componente se contradice con otro.
+
+  `values-night/` no se usa a proposito: el seguimiento del tema lo hace el
+  propio codigo (ver ApolloTheme) porque hay que responder al cambio DEL
+  SISTEMA en vivo, no solo al reinicio de la app.
+-->
+<resources>
+    <color name="apollo_bg">#0B0D10</color>
+    <color name="apollo_surface">#14181F</color>
+    <color name="apollo_surface_alt">#1B2028</color>
+    <color name="apollo_line">#242B35</color>
+    <color name="apollo_text">#E6F7FF</color>
+    <color name="apollo_muted">#8BA9BB</color>
+    <color name="apollo_accent">#42E8E0</color>
+    <color name="apollo_accent_dim">#2AA9A4</color>
+    <color name="apollo_accent_soft">#1F3A3C</color>
+    <color name="apollo_ok">#63F2B0</color>
+    <color name="apollo_warn">#FFC23C</color>
+    <color name="apollo_error">#FF6A4A</color>
+
+    <color name="apollo_bubble_user">#2AA9A4</color>
+    <color name="apollo_bubble_apollo">#1B2028</color>
+</resources>

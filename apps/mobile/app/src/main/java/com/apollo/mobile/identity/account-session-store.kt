@@ -5,6 +5,21 @@ import android.content.SharedPreferences
 import com.apollo.mobile.transport.CredentialCipher
 import com.apollo.mobile.transport.KeystoreCredentialCipher
 
+/** Native-only persistence boundary used by the WebView bridge and unit fakes. */
+interface AccountSessionPersistence {
+    fun readSessionToken(): String?
+    fun readAccountId(): String?
+    fun readEmail(): String
+    fun hasSession(): Boolean
+    fun writeSession(
+        accountId: String,
+        sessionToken: String,
+        email: String = "",
+        expiresAtMilliseconds: Long? = null,
+    ): Boolean
+    fun clearSession(): Boolean
+}
+
 /**
  * Sesión de CUENTA (no credencial de dispositivo).
  *
@@ -18,35 +33,89 @@ import com.apollo.mobile.transport.KeystoreCredentialCipher
 class AccountSessionStore(
     context: Context,
     private val cipher: CredentialCipher = KeystoreCredentialCipher(),
-) {
+    private val nowMillisecondsPort: () -> Long = { System.currentTimeMillis() },
+) : AccountSessionPersistence {
 
     private val preferences: SharedPreferences =
         context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
-    fun readSessionToken(): String? {
+    override fun readSessionToken(): String? {
         val stored = preferences.getString(SESSION_TOKEN_KEY, null) ?: return null
-        return runCatching { cipher.decrypt(stored) }.getOrNull()
+        val expiresAt = preferences.getLong(SESSION_EXPIRY_KEY, 0L)
+        if (expiresAt > 0L && nowMillisecondsPort() >= expiresAt) {
+            clearSession()
+            return null
+        }
+        val token = runCatching { cipher.decrypt(stored) }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+        if (token == null) clearSession()
+        return token
     }
 
-    fun writeSession(accountId: String, sessionToken: String) {
-        preferences.edit()
-            .putString(SESSION_TOKEN_KEY, cipher.encrypt(sessionToken))
+    override fun writeSession(
+        accountId: String,
+        sessionToken: String,
+        email: String,
+        expiresAtMilliseconds: Long?,
+    ): Boolean {
+        if (accountId.isBlank() || sessionToken.isBlank() ||
+            (expiresAtMilliseconds != null && expiresAtMilliseconds <= nowMillisecondsPort())
+        ) {
+            clearSession()
+            return false
+        }
+
+        val encryptedToken = runCatching { cipher.encrypt(sessionToken) }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+        if (encryptedToken == null) {
+            clearSession()
+            return false
+        }
+
+        val editor = preferences.edit()
+            .remove(SESSION_TOKEN_KEY)
+            .remove(ACCOUNT_ID_KEY)
+            .remove(EMAIL_KEY)
+            .remove(SESSION_EXPIRY_KEY)
+            .putString(SESSION_TOKEN_KEY, encryptedToken)
             .putString(ACCOUNT_ID_KEY, accountId)
-            .apply()
+        if (email.isNotBlank()) editor.putString(EMAIL_KEY, email.trim().lowercase())
+        if (expiresAtMilliseconds != null) editor.putLong(SESSION_EXPIRY_KEY, expiresAtMilliseconds)
+
+        val committed = runCatching { editor.commit() }.getOrDefault(false)
+        if (!committed) clearSession()
+        return committed
     }
 
-    fun readAccountId(): String? = preferences.getString(ACCOUNT_ID_KEY, null)
+    override fun readAccountId(): String? = preferences.getString(ACCOUNT_ID_KEY, null)
 
-    fun hasSession(): Boolean = readSessionToken() != null
+    override fun readEmail(): String = preferences.getString(EMAIL_KEY, "").orEmpty()
+
+    override fun hasSession(): Boolean {
+        val token = readSessionToken()
+        if (token == null) return false
+        if (readAccountId().isNullOrBlank()) {
+            clearSession()
+            return false
+        }
+        return true
+    }
 
     /** Cambio de usuario / logout: cero trazas de la sesión anterior. */
-    fun clearSession() {
-        preferences.edit().remove(SESSION_TOKEN_KEY).remove(ACCOUNT_ID_KEY).apply()
-    }
+    override fun clearSession(): Boolean = runCatching {
+        preferences.edit()
+            .remove(SESSION_TOKEN_KEY)
+            .remove(ACCOUNT_ID_KEY)
+            .remove(EMAIL_KEY)
+            .remove(SESSION_EXPIRY_KEY)
+            .commit()
+    }.getOrDefault(false)
 
     private companion object {
         const val PREFERENCES_NAME = "apollo_mobile_account"
         const val SESSION_TOKEN_KEY = "session_token"
         const val ACCOUNT_ID_KEY = "account_id"
+        const val EMAIL_KEY = "account_email"
+        const val SESSION_EXPIRY_KEY = "session_expires_at"
     }
 }

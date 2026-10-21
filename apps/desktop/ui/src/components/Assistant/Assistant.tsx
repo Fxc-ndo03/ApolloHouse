@@ -4,7 +4,6 @@ import { useAppStore } from '@/store';
 import { Icon, ApolloMark } from '@/components/ui/Icon';
 import { Orb, toOrbVoiceState } from '@/components/Orb/Orb';
 import { Composer } from '@/components/Chat/Composer';
-import { AccountPanel } from '@/components/Account/AccountPanel';
 import '../Chat/Composer.css';
 import './Assistant.css';
 
@@ -68,10 +67,11 @@ export function Assistant() {
     sidecarRunning ||
     connectionStatus.status === 'connected' ||
     connectionStatus.status === 'authenticated';
+  // Ver ChatView: `speaking` es salida de audio y no debe bloquear el envio
+  // cuando el dispositivo de salida no puede abrirse.
   const busy =
     orbState.state === 'listening' ||
     orbState.state === 'responding' ||
-    orbState.state === 'speaking' ||
     orbState.state === 'thinking';
 
   const statusLabel =
@@ -188,8 +188,6 @@ export function Assistant() {
   return (
     <div className="apollo-home">
       <div className="apollo-home-bg" />
-
-      <AccountPanel />
 
       <header className="apollo-home-head">
         <span className="apollo-home-brand">

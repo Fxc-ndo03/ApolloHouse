@@ -8,6 +8,17 @@
 //
 // Idempotent: skips work when .runtime-marker.json matches the pinned Python
 // version + requirements.txt hash. Run via beforeBuildCommand in tauri.conf.json.
+//
+// Two modes, decided by whether the juana-client source tree is reachable:
+//   1. Source present  -> unchanged: hash requirements.txt, honour the marker
+//      and (re)build the runtime from the pinned CPython embeddable zip.
+//   2. Source missing/incomplete -> reuse the already staged runtime only when
+//      every mandatory file is present (resources/juana-client/requirements.txt,
+//      resources/juana-client/juana_client/client.py, and
+//      resources/python-runtime/python.exe). Nothing is downloaded or deleted;
+//      the relative '../juana-client' entry of the ._pth is corrected if needed. If the staged
+//      runtime is incomplete the build fails: a rebuild would need network
+//      access, which the reuse mode exists to avoid.
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -30,11 +41,23 @@ const EMBED_URL = `https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${
 const GET_PIP_URL = 'https://bootstrap.pypa.io/get-pip.py';
 
 const srcTauriDir = path.dirname(fileURLToPath(import.meta.url));
-const repoJuanaDir = path.resolve(srcTauriDir, '..', '..', '..', 'juana-client');
-const requirementsFile = path.join(repoJuanaDir, 'requirements.txt');
-const stagingDir = path.resolve(srcTauriDir, 'resources', 'python-runtime');
+const sourceCandidates = [
+  path.resolve(srcTauriDir, '..', '..', '..', 'juana-client'),
+  path.resolve(srcTauriDir, '..', '..', '..', 'ApolloHouse', 'juana-client'),
+];
+const sourceIsComplete = (candidate) =>
+  existsSync(path.join(candidate, 'requirements.txt')) &&
+  existsSync(path.join(candidate, 'juana_client', 'client.py'));
+const repoJuanaDir = sourceCandidates.find(sourceIsComplete);
+const sourceLocation = repoJuanaDir ?? sourceCandidates.join(' or ');
+const requirementsFile = repoJuanaDir
+  ? path.join(repoJuanaDir, 'requirements.txt')
+  : path.join(sourceCandidates[0], 'requirements.txt');
+const resourcesDir = path.resolve(srcTauriDir, 'resources');
+const stagingDir = path.resolve(resourcesDir, 'python-runtime');
+const stagedJuanaDir = path.resolve(resourcesDir, 'juana-client');
 const markerFile = path.join(stagingDir, '.runtime-marker.json');
-const tmpDir = path.resolve(srcTauriDir, 'resources', '.tmp-python-runtime');
+const tmpDir = path.resolve(resourcesDir, '.tmp-python-runtime');
 
 function fail(message) {
   console.error(`[bundle-python-runtime] ERROR: ${message}`);
@@ -139,6 +162,55 @@ function dirSize(dir) {
 
 if (process.platform !== 'win32') {
   fail(`unsupported build platform ${process.platform}: extend this script for ${process.platform} before bundling`);
+}
+
+/**
+ * Modo reutilizacion: la fuente juana-client no vive en este arbol (solo el
+ * paquete instalado). Se acepta reutilizar el runtime YA staged solo si estan
+ * todos los archivos obligatorios; si falta alguno el build falla, porque
+ * reconstruir exigiria descargar Python y dependencias.
+ * No borra, no descarga y no reescribe los recursos staged.
+ */
+function reuseStagedRuntime() {
+  const missing = [
+    [path.join(stagedJuanaDir, 'requirements.txt'), 'resources/juana-client/requirements.txt'],
+    [path.join(stagedJuanaDir, 'juana_client', 'client.py'), 'resources/juana-client/juana_client/client.py'],
+    [path.join(stagingDir, 'python.exe'), 'resources/python-runtime/python.exe'],
+    [path.join(stagingDir, `python${PYTHON_MAJOR_MINOR.replace('.', '')}._pth`), 'resources/python-runtime/python311._pth'],
+  ].filter(([target]) => !existsSync(target)).map(([, label]) => label);
+
+  if (missing.length > 0) {
+    console.error(`[bundle-python-runtime] ERROR: juana-client source not found at ${sourceLocation}`);
+    console.error('[bundle-python-runtime] ERROR: cannot reuse the staged runtime, missing:');
+    for (const label of missing) console.error(`  - ${label}`);
+    console.error('[bundle-python-runtime] ERROR: restore the juana-client source tree or stage resources/ by hand before building.');
+    process.exit(1);
+  }
+
+  // El runtime embeddable ignora PYTHONPATH (modo ._pth aislado): el paquete de
+  // la app tiene que estar en el ._pth. Se exige el mismo path relativo que
+  // escribe el modo de build, y solo se agrega si un runtime viejo no lo tiene.
+  const pthPath = path.join(stagingDir, `python${PYTHON_MAJOR_MINOR.replace('.', '')}._pth`);
+  const pthLines = readFileSync(pthPath, 'utf8').split(/\r?\n/);
+  const correctedPthLines = pthLines.filter((line) => line.trim() !== '../juna-client');
+  if (!correctedPthLines.some((line) => line.trim() === '../juana-client')) {
+    correctedPthLines.push('../juana-client');
+  }
+  if (correctedPthLines.length !== pthLines.length || correctedPthLines.some((line, index) => line !== pthLines[index])) {
+    writeFileSync(pthPath, correctedPthLines.join('\r\n'));
+    console.log('[bundle-python-runtime] corrected the juana-client path in the staged runtime ._pth');
+  }
+
+  console.warn(`[bundle-python-runtime] WARNING: juana-client source not found at ${sourceLocation}`);
+  console.warn('[bundle-python-runtime] WARNING: reusing the ALREADY STAGED runtime, nothing downloaded, nothing deleted:');
+  console.warn(`  - ${stagingDir}`);
+  console.warn(`  - ${stagedJuanaDir}`);
+  console.warn('[bundle-python-runtime] WARNING: it is reused as-is; verify it matches requirements.txt before shipping.');
+  process.exit(0);
+}
+
+if (!repoJuanaDir) {
+  reuseStagedRuntime();
 }
 if (!existsSync(requirementsFile)) fail(`requirements.txt not found at ${requirementsFile}`);
 

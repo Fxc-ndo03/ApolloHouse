@@ -37,6 +37,11 @@ pub fn build_secret_request(
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
     tokio_tungstenite::tungstenite::http::Request::builder()
         .uri(worker_url)
+        .header("Host", host_from_url(worker_url))
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+        .header("Sec-WebSocket-Version", "13")
         .header(DEVICE_SECRET_HEADER, device_secret)
         .body(())
         .map_err(|build_error| format!("no se pudo armar el request: {build_error}"))
@@ -68,9 +73,19 @@ pub fn build_account_request(
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
     tokio_tungstenite::tungstenite::http::Request::builder()
         .uri(worker_url)
+        .header("Host", host_from_url(worker_url))
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+        .header("Sec-WebSocket-Version", "13")
         .header("Authorization", format!("Bearer {session_token}"))
         .body(())
         .map_err(|build_error| format!("no se pudo armar el request: {build_error}"))
+}
+
+fn host_from_url(worker_url: &str) -> String {
+    let without_scheme = worker_url.split("://").nth(1).unwrap_or(worker_url);
+    without_scheme.split('/').next().unwrap_or("").to_string()
 }
 
 use crate::state::{AppState, ConnectionStatus, OrbState};
@@ -383,13 +398,12 @@ impl CloudCoreManager {
         client_turn: Option<String>,
         generation: Option<i64>,
     ) -> Result<String, String> {
-        let request_id = format!("turn-{}", chrono::Utc::now().timestamp_millis());
+        let request_id = format!("turn-{}", uuid::Uuid::new_v4());
         let send_start = chrono::Utc::now().timestamp_millis();
-        eprintln!("[text-debug] cloudcore-send text=\"{}\"", text);
         if let Some(turn) = client_turn.clone() {
             eprintln!("[text-debug] turn-link client_turn={} request_id={}", turn, request_id);
         }
-        eprintln!("[text-debug] send-text-start request_id={} text=\"{}\"", request_id, text);
+        eprintln!("[text-debug] send-text-start request_id={}", request_id);
         eprintln!("[text-debug] server-request-start request_id={}", request_id);
         if let Ok(mut metrics) = self.metrics.lock() {
             metrics.on_send(client_turn.clone(), request_id.clone());
@@ -755,6 +769,13 @@ async fn handle_frame(
                 .and_then(|v| v.as_str())
                 .unwrap_or("idle");
             let orb_state = OrbState::from_ui_state(state_str);
+            // El caption del servidor es la respuesta visible del turno cuando el
+            // Worker no emite `text_response_chunk`. Sin esto no hay forma de
+            // distinguir "respondio" de "no respondio" en un log.
+            vlog!(
+                "[text-debug] ui_state caption=\"{}\"",
+                frame.get("caption").and_then(|c| c.as_str()).unwrap_or("")
+            );
             if let Some(app_state) = app_handle.try_state::<AppState>() {
                 app_state.set_orb_state(orb_state).await;
             }

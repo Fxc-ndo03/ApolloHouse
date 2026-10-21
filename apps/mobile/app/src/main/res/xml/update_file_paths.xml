@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FASE 3.1 — el APK actualizado se comparte con el instalador del sistema a
+  través de un FileProvider. Sin esto, `file://` no puede pasarse a otra app
+  (FileUriExposedException desde Android 7) y Android pediría Broadcaster la
+  app que expone el archivo.
+
+  El directorio `updates` es el subdirectorio de cache que usa UpdateDownloader,
+  y `cache-path` es relativo a getCacheDir(), así que coincide exactamente.
+-->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

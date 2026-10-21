@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useTauriCommands } from '@/hooks/useTauri';
 import { useAppStore } from '@/store';
+import { Icon } from '@/components/ui/Icon';
 import { Composer } from './Composer';
 import { UserBubble, BotBubble, SystemBubble } from './MessageBubble';
 import './Composer.css';
@@ -23,6 +24,7 @@ export function ChatView() {
   const clearMessages = useAppStore((s) => s.clearMessages);
   const setActiveSection = useAppStore((s) => s.setActiveSection);
   const setVoiceOpen = useAppStore((s) => s.setVoiceOpen);
+  const setOrbState = useAppStore((s) => s.setOrbState);
   const orbState = useAppStore((s) => s.orbState);
   const sidecarRunning = useAppStore((s) => s.sidecarRunning);
   const connectionStatus = useAppStore((s) => s.connectionStatus);
@@ -34,6 +36,7 @@ export function ChatView() {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout>>();
+  const submitInFlightRef = useRef(false);
 
   useEffect(() => () => clearTimeout(copyTimer.current), []);
 
@@ -61,11 +64,27 @@ export function ChatView() {
     connectionStatus.status === 'connected' ||
     connectionStatus.status === 'authenticated';
 
+  // `speaking` NO bloquea el envio: es salida de audio, no trabajo en curso.
+  // Si el dispositivo de salida no abre (Realtek -9999 en este equipo) nunca
+  // llega `tts_end` y el orbe se queda en "hablando" para siempre, dejando el
+  // compositor en modo "detener" y sin poder mandar un segundo mensaje.
   const busy =
     orbState.state === 'listening' ||
     orbState.state === 'responding' ||
-    orbState.state === 'speaking' ||
     orbState.state === 'thinking';
+
+  // El ref cubre el pequeño intervalo entre el primer submit y el cambio de
+  // estado del Worker; cuando empieza el turno, `busy` pasa a ser el guard.
+  useEffect(() => {
+    if (
+      busy ||
+      orbState.state === 'speaking' ||
+      orbState.state === 'idle' ||
+      orbState.state === 'error'
+    ) {
+      submitInFlightRef.current = false;
+    }
+  }, [busy, orbState.state]);
 
   const last = messages[messages.length - 1];
   const firstUser = messages.find((m) => m.role === 'user');
@@ -84,7 +103,7 @@ export function ChatView() {
 
   const submitText = async (raw: string) => {
     const text = raw.trim();
-    if (!text) return;
+    if (!text || busy || submitInFlightRef.current) return;
     setInput('');
     addMessage({ role: 'user', content: text });
 
@@ -101,10 +120,14 @@ export function ChatView() {
       return;
     }
 
+    submitInFlightRef.current = true;
+    setOrbState({ state: 'thinking' });
     try {
       addMessage({ role: 'assistant', content: '' });
       await sendText(text);
     } catch (err) {
+      submitInFlightRef.current = false;
+      setOrbState({ state: 'idle', caption: undefined });
       useAppStore.getState().dropTrailingEmptyAssistant();
       addMessage({
         role: 'system',
@@ -115,6 +138,7 @@ export function ChatView() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (busy || submitInFlightRef.current) return;
     void submitText(input);
   };
 
@@ -173,7 +197,9 @@ export function ChatView() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      handleSubmit(e as unknown as React.FormEvent);
+      if (!busy && !submitInFlightRef.current) {
+        handleSubmit(e as unknown as React.FormEvent);
+      }
     }
     if (e.key === '/' && input === '') {
       e.preventDefault();
@@ -208,6 +234,18 @@ export function ChatView() {
             <i /> {status}
           </small>
         </div>
+        {/* Ajustes queda visible siempre dentro del chat: es la unica via
+            directa desde una conversacion, y la barra lateral no es alcanzable
+            con una mano en pantallas angostas. */}
+        <button
+          type="button"
+          className="apollo-icon-btn soft apollo-chat-settings"
+          onClick={() => setActiveSection('settings')}
+          aria-label="Abrir Ajustes"
+          title="Ajustes"
+        >
+          <Icon n="gear" size={18} />
+        </button>
         <button
           type="button"
           className="apollo-icon-btn"

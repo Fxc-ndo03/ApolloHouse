@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@tauri-apps/api/core": ["src/platform/shim/core.ts"],
+      "@tauri-apps/api/event": ["src/platform/shim/event.ts"],
+      "@tauri-apps/api/window": ["src/platform/shim/window.ts"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

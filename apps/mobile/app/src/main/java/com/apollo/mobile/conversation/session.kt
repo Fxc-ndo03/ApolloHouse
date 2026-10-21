@@ -45,6 +45,7 @@ class ConversationSession(
 
     var stateListener: ((ConversationState) -> Unit)? = null
     var inboundListener: ((ConversationInbound) -> Unit)? = null
+    var audioChunkListener: ((ByteArray) -> Unit)? = null
 
     /** Por qué se cerró, para mostrarlo. Nunca contiene el secreto. */
     var rejectionReason: String? = null
@@ -150,6 +151,10 @@ class ConversationSession(
                     rejectionReason = inbound.errorMessage ?: inbound.errorCode ?: "error_desconocido"
                 }
                 inboundListener?.invoke(inbound)
+            }
+
+            override fun onBinaryMessage(payload: ByteArray) {
+                audioChunkListener?.invoke(payload)
             }
 
             override fun onServerClose(code: Int, reason: String) {

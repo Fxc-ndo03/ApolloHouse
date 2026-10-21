@@ -6,6 +6,7 @@ import {
 import { useEffect, useCallback } from 'react';
 import { useAppStore } from '@/store';
 import type { OrbState as StoreOrbState } from '@/store';
+import { describeTurnError } from '@/components/Chat/turnError';
 
 const TAURI_AVAILABLE = typeof window !== 'undefined'
   // @ts-expect-error __TAURI__ injected at runtime by Tauri
@@ -25,7 +26,24 @@ export const invoke: typeof tauriInvoke = async (cmd, args?) => {
   }
 };
 
-const listen: typeof tauriListen = async (evt, cb?) => {
+/**
+ * Igual que `invoke`, pero PROPAGA el error en vez de tragárselo.
+ *
+ * El wrapper laxo existe para que un comando opcional que falle no rompa la
+ * app. En autenticación eso es exactamente lo contrario de lo que se quiere:
+ * `account_status` y `account_login` tienen que poder decir "el servidor
+ * rechazó la contraseña", y con el wrapper laxo un rechazo se convierte en
+ * `undefined`, que la UI lee como "sin cambios" y nunca muestra el motivo.
+ */
+export const invokeStrict: typeof tauriInvoke = async (cmd, args?) => {
+  if (!TAURI_AVAILABLE) throw new Error('Tauri no está disponible en este entorno');
+  return await tauriInvoke(cmd, args);
+};
+
+// FASE 3.4: se exporta para que el panel de actualizaciones pueda escuchar
+// `update://progress` y `update://ready` con el MISMO manejo de Tauri ausente
+// que el resto de la app, en vez de importar la API cruda en un componente.
+export const listen: typeof tauriListen = async (evt, cb?) => {
   if (!TAURI_AVAILABLE) return () => {};
   try {
     return await tauriListen(evt, cb as any);
@@ -205,7 +223,7 @@ async function setupTauriListeners(deps: TauriListenerDeps): Promise<UnlistenFn[
         break;
       case 'error':
         resetTurnState();
-        setOrbState({ state: 'error', caption: msg.message });
+        setOrbState({ state: 'error', caption: describeTurnError(msg.code ?? 'unknown', msg.message ?? '').title });
         break;
       case 'text_response':
         upsertAssistantMessage(msg.text);
@@ -265,13 +283,22 @@ async function setupTauriListeners(deps: TauriListenerDeps): Promise<UnlistenFn[
 
   unlisteners.push(
     await listen('error', (event: TauriEvent<any>) => {
+      const rawCode = typeof event.payload?.code === 'string' ? event.payload.code : 'unknown';
+      const rawMessage =
+        typeof event.payload?.message === 'string' ? event.payload.message : '';
+      const described = describeTurnError(rawCode, rawMessage);
       resetTurnState();
-      setOrbState({ state: 'error', caption: event.payload?.message });
+      setOrbState({ state: 'error', caption: described.title });
       addMessage({
         role: 'system',
-        content: `Error: ${event.payload?.message}`,
+        content: `${described.title}: ${described.detail}`,
       });
-      setConnectionStatus({ status: 'error', error: event.payload?.message });
+      // Un rechazo por cuota NO es una caída del WebSocket: marcar la conexión
+      // como 'error' hacía que Apollo quedara en rojo aunque el siguiente turno
+      // funcionara. Solo los fallos de transporte tocan el estado.
+      if (described.isConnectionFailure) {
+        setConnectionStatus({ status: 'error', error: described.detail });
+      }
     }),
   );
 

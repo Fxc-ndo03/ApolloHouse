@@ -1,0 +1,389 @@
+.apollo-home {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--apollo-text);
+  font-size: calc(15px * var(--apollo-fs, 1));
+}
+
+.apollo-home-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(700px 340px at 50% -60px, rgba(103, 217, 255, 0.09), transparent 70%),
+    radial-gradient(500px 300px at 12% 110%, rgba(66, 232, 224, 0.05), transparent 70%),
+    var(--apollo-bg);
+}
+
+.apollo-home-head {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 22px;
+  animation: apollo-rise-in 0.6s var(--apollo-ease) both;
+}
+
+.apollo-home-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 16px 6px 6px;
+  border-radius: 99px;
+  background: var(--apollo-glass);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--apollo-line-soft);
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.apollo-home-round {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--apollo-line-soft);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--apollo-glass);
+  backdrop-filter: blur(14px);
+  color: var(--apollo-text-secondary);
+  cursor: pointer;
+  transition: transform 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.apollo-home-round:hover {
+  color: var(--apollo-text);
+  border-color: var(--apollo-line);
+}
+
+.apollo-home-round:active {
+  transform: scale(0.92);
+}
+
+.apollo-home-mid {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 22px;
+  overflow: hidden;
+}
+
+.apollo-home-orb {
+  filter: drop-shadow(0 0 34px var(--apollo-glow));
+  animation: apollo-fade-in 0.8s var(--apollo-ease) both;
+}
+
+.apollo-orb canvas {
+  display: block;
+}
+
+.apollo-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 16px;
+  border-radius: 99px;
+  background: var(--apollo-glass);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--apollo-line-soft);
+  font-size: 0.75em;
+  font-weight: 600;
+  color: var(--apollo-text-muted);
+  animation: apollo-rise-in 0.7s 0.15s var(--apollo-ease) both;
+}
+
+.apollo-status-pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--apollo-text-muted);
+}
+
+.apollo-status-pill.on {
+  color: var(--apollo-text-secondary);
+}
+
+.apollo-status-pill.on i {
+  background: var(--apollo-success);
+  box-shadow: 0 0 8px var(--apollo-success);
+  animation: apollo-pulse 2s ease-in-out infinite;
+}
+
+.apollo-hello {
+  margin: 0;
+  text-align: center;
+  font-size: 1.75em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.18;
+  animation: apollo-rise-in 0.7s 0.3s var(--apollo-ease) both;
+}
+
+.apollo-hello b {
+  background: linear-gradient(90deg, var(--apollo-primary), var(--apollo-primary-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.apollo-sub {
+  margin: 0;
+  color: var(--apollo-text-muted);
+  font-size: 0.95em;
+  animation: apollo-rise-in 0.7s 0.4s var(--apollo-ease) both;
+}
+
+.apollo-marq {
+  width: 100%;
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  overflow: hidden;
+  animation: apollo-rise-in 0.7s 0.5s var(--apollo-ease) both;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+}
+
+.apollo-track {
+  display: flex;
+  gap: 10px;
+  width: max-content;
+  animation: apollo-marq 38s linear infinite;
+}
+
+.apollo-track.t1 {
+  animation-direction: reverse;
+  animation-duration: 44s;
+}
+
+.apollo-track.t2 {
+  animation-duration: 50s;
+}
+
+.apollo-marq:hover .apollo-track {
+  animation-play-state: paused;
+}
+
+@keyframes apollo-marq {
+  to { transform: translateX(-50%); }
+}
+
+.apollo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 8px 8px;
+  border: 1px solid var(--apollo-line-soft);
+  border-radius: 99px;
+  background: var(--apollo-glass);
+  backdrop-filter: blur(10px);
+  font-size: 0.82em;
+  white-space: nowrap;
+  color: var(--apollo-text-secondary);
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.apollo-chip:active {
+  transform: scale(0.96);
+}
+
+.apollo-chip:hover {
+  border-color: var(--apollo-line);
+}
+
+.apollo-chip b {
+  font-weight: 500;
+  color: var(--apollo-primary);
+}
+
+.apollo-chip-ico {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 16%, transparent);
+}
+
+.apollo-home-foot {
+  position: relative;
+  padding: 12px 26px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: apollo-rise-in 0.7s 0.65s var(--apollo-ease) both;
+}
+
+.apollo-home-foot .apollo-composer {
+  max-width: 640px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.apollo-home-tools {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.apollo-tool {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--apollo-text-muted);
+  cursor: pointer;
+  transition: transform 0.15s, color 0.15s, background-color 0.15s;
+}
+
+.apollo-tool:hover {
+  color: var(--apollo-text);
+  background: rgba(103, 217, 255, 0.07);
+}
+
+.apollo-tool:active {
+  transform: scale(0.9);
+}
+
+.apollo-tool.off {
+  color: var(--apollo-danger);
+  background: var(--apollo-danger-ghost);
+}
+
+.apollo-tool.live {
+  color: var(--apollo-primary-2);
+  background: rgba(66, 232, 224, 0.12);
+}
+
+.apollo-tools-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--apollo-line-soft);
+  margin: 0 6px;
+}
+
+/* FASE 3.7B — el panel de cuenta no tenia NINGUNA regla CSS.
+ *
+ * El componente existia y se montaba en Inicio, pero `.apollo-home` es un
+ * flex column con `overflow: hidden`, asi que sin dimension ni `flex-shrink` el
+ * panel quedaba aplastado a altura cero: la pantalla de login era invisible y
+ * no habia forma de iniciar sesion desde Windows. Sin sesion no hay credencial,
+ * el Worker responde 401 y el WebSocket del PcBridge nunca conecta.
+ */
+
+.account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Sin esto el flex padre lo encoge a cero y desaparece. */
+  flex-shrink: 0;
+  /* Necesario para estar por encima del fondo apollo-home-bg (position: absolute) */
+  position: relative;
+  z-index: 1;
+  padding: 16px 16px;
+  margin: 10px 14px 0;
+  background: var(--apollo-surface);
+  border: 1px solid var(--apollo-border-soft);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.account-panel__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: calc(13px * var(--apollo-fs, 1));
+  font-weight: 600;
+  color: #D0D8E0;
+  margin-bottom: 6px;
+}
+
+.account-panel__label input {
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  font-size: calc(15px * var(--apollo-fs, 1));
+  font-weight: 500;
+  color: var(--apollo-text);
+  background: var(--apollo-surface2);
+  border: 2px solid var(--apollo-border-soft);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.account-panel__label input::placeholder {
+  color: #6A7A8A;
+  opacity: 0.7;
+}
+
+.account-panel__label input:focus {
+  border-color: #4DB8FF;
+  box-shadow: 0 0 0 3px rgba(58, 126, 191, 0.25);
+  outline: none;
+}
+
+
+.account-panel__hint strong {
+  color: var(--apollo-text);
+}
+
+.account-panel__error {
+  margin: 0;
+  font-size: calc(12px * var(--apollo-fs, 1));
+  color: var(--apollo-danger-ghost, #ff8080);
+}
+
+.account-panel__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.account-panel__button {
+  padding: 7px 14px;
+  font-size: calc(12px * var(--apollo-fs, 1));
+  color: var(--apollo-text);
+  background: transparent;
+  border: 1px solid var(--apollo-border-soft);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.account-panel__button:hover:not(:disabled) {
+  border-color: var(--apollo-cyan);
+  color: var(--apollo-cyan);
+}
+
+.account-panel__button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* PRUEBA TEMPORAL DE DIAGNOSTICO - se quita despues */
+.account-panel__hint {
+  margin: 12px 0 0;
+  font-size: calc(13px * var(--apollo-fs, 1));
+  color: #8A93B8;
+  line-height: 1.5;
+}

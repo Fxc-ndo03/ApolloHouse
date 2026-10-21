@@ -5,6 +5,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import java.util.concurrent.TimeUnit
 
 /** Transporte real sobre OkHttp: Android 7.1 no tiene WebSocket en el framework. */
@@ -38,6 +39,10 @@ class OkHttpSocketFactory(
                 listener.onMessage(text)
             }
 
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                listener.onBinaryMessage(bytes.toByteArray())
+            }
+
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 // BLOCK 12: el code y el reason se reponen al listener. Antes se
                 // tragaban y se repondia 1000, que hacia que una revocacion fuera
@@ -58,7 +63,18 @@ class OkHttpSocketFactory(
             }
 
             override fun onFailure(webSocket: WebSocket, throwable: Throwable, response: Response?) {
-                listener.onFailure(throwable.javaClass.simpleName)
+                // Solo la clase era insuficiente: un fallo de TLS, un 401 o un
+                // host mal escrito llegaban al usuario como "IOException" y no
+                // habia forma de distinguirlos. El mensaje del cliente no
+                // contiene el Bearer (va en header), asi que es seguro mostrarlo.
+                val reasonDetail = throwable.message?.takeIf { it.isNotBlank() }
+                listener.onFailure(
+                    if (reasonDetail == null) {
+                        throwable.javaClass.simpleName
+                    } else {
+                        "${throwable.javaClass.simpleName}: $reasonDetail"
+                    }
+                )
             }
         })
         return OkHttpSocket(webSocket)

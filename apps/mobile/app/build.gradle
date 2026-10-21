@@ -1,6 +1,16 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+// El workflow inyecta estos dos valores para que el APK y el manifiesto
+// describan la misma build. Sin las propiedades quedan los valores locales.
+// Se resuelven aqui porque dentro de defaultConfig una llamada con parentesis
+// la interpreta Groovy como metodo y AGP la rechaza.
+def apolloVersionCodeValue = (project.findProperty('apolloVersionCode') ?: '1').toString()
+def apolloVersionNameValue = (project.findProperty('apolloVersionName') ?: '0.1.0').toString()
+if (!(apolloVersionCodeValue ==~ /[0-9]+/)) {
+    throw new GradleException("apolloVersionCode debe ser un entero positivo; recibio '${apolloVersionCodeValue}'")
+}
+
 android {
     // AGP 8 toma el namespace de acá, no del atributo `package` del manifiesto:
     // con el AGP viejo el `package` del manifiesto era obligatorio y ahora es un
@@ -20,9 +30,9 @@ android {
 
     defaultConfig {
         applicationId 'com.apollo.mobile'
-        // Sin cambio: Android 7.1 sigue siendo el piso, y el Moto G35 5G entra
-        // por acá sin problema porque 25 <= cualquier API actual.
-        minSdkVersion 25
+        // D2 confirmada: minSdk 33 (Android 13+), Moto G35 5G. El piso anterior
+        // (25) queda superado: el dispositivo objetivo requiere API 33 como mínimo.
+        minSdkVersion 33
         // BLOCK 12.4: 25 -> 36. Lo que desbloquea y lo que costó:
         //
         //   31  PendingIntent debe declarar mutabilidad. Crash sin el flag.
@@ -42,8 +52,8 @@ android {
         //   - `android:exported` ya estaba en todos los componentes, y el
         //     receptor de la alarma que se agrega lo declara en false.
         targetSdkVersion 36
-        versionCode 1
-        versionName '0.1.0'
+        versionCode = apolloVersionCodeValue.toInteger()
+        versionName = apolloVersionNameValue
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
           // FASE 2.11: host por defecto del cliente, resuelto al compilar.
           // Es una direccion, no un secreto: no lleva token ni clave. Un build
@@ -52,28 +62,144 @@ android {
           // y en ese caso no queda ninguna ruta de vuelta a produccion. Sin la
           // propiedad, la app arranca sin host (el usuario lo escribe), que es
           // exactamente el comportamiento previo: no hay fallback silencioso.
-          buildConfigField 'String', 'DEFAULT_WORKER_HOST',
-                  "\"${project.findProperty('apolloWorkerHost') ?: ''}\""
-      }
+        buildConfigField 'String', 'DEFAULT_WORKER_HOST',
+                "\"${project.findProperty('apolloWorkerHost') ?: ''}\""
+        // FASE 3.5: el canal de actualizacion es EXPLICITO y sale del flavor.
+        // Antes se deducía buscando 'staging' dentro del host del Worker, lo
+        // que hacia que un host mal escrito cambiara de canal en silencio. Aquí
+        // no hay nada que interpretar: el flavor decide y el valor se compila.
+        buildConfigField 'String', 'UPDATE_CHANNEL', '"stable"'
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // FASE 3.6 — aquí NO se asigna ninguna firma.
+            //
+            // Antes este buildType usaba `signingConfigs.release`, es decir, la
+            // clave de PRODUCCIÓN, para TODAS las variantes release. Con un solo
+            // flavor eso no se notaba; al agregar `stable` habría firmado también
+            // las releases de staging con el certificado de producción, que es
+            // justo lo que impide que un canal toque el otro.
+            //
+            // Ahora la firma se resuelve por variante en el bloque
+            // `androidComponents` de más abajo: cada release usa la clave de su
+            // canal y las variantes debug no necesitan ningún secreto.
+        }
+        debug {
+            // La debug key local. Solo para desarrollo y para las pruebas del
+            // emulador: NUNCA para publicar, porque es efímera y distinto runner
+            // genera otra.
+            signingConfig = signingConfigs.debug
         }
     }
-      // FASE 2.12: staging como APLICACION SEPARADA. El suffix cambia el
-      // applicationId final, asi que convive con la app normal, tiene su propio
-      // paquete de datos (SharedPreferences y Keystore incluidos) y no puede
-      // pisar ni borrar lo de produccion. El host sale de la misma propiedad de
-      // antes; si no se pasa, el build de staging NO cae a produccion: queda
-      // vacio y la app pide el host.
+    signingConfigs {
+        production {
+            // Identidad de PRODUCCIÓN. Conservar esta clave a toda costa: si se
+            // pierde, las instalaciones ya instaladas rechazan cualquier APK
+            // nuevo y no hay forma de que vuelvan a actualizarse.
+            def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
+            def keystoreBase64 = System.getenv('ANDROID_KEYSTORE_BASE64')
+            if (keystoreBase64 != null && !keystoreBase64.trim().isEmpty()) {
+                def keystoreFile = new File(project.buildDir, 'ci-production.keystore')
+                keystoreFile.parentFile.mkdirs()
+                keystoreFile.bytes = Base64.decoder.decode(keystoreBase64)
+                storeFile keystoreFile
+            } else if (keystorePath != null && !keystorePath.trim().isEmpty()) {
+                storeFile file(keystorePath)
+            }
+            storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD') ?: ''
+            keyAlias System.getenv('ANDROID_KEY_ALIAS') ?: ''
+            keyPassword System.getenv('ANDROID_KEY_PASSWORD') ?: ''
+        }
+        staging {
+            // Staging tiene su PROPIA clave: un APK de staging firmado con el
+            // certificado de debug que Windows genera en cada runner efimero no
+            // podria instalarse encima del staging anterior, y el actualizador
+            // fallaria en cada publicacion.
+            def keystorePath = System.getenv('STAGING_KEYSTORE_PATH')
+            def keystoreBase64 = System.getenv('STAGING_KEYSTORE_BASE64')
+            if (keystoreBase64 != null && !keystoreBase64.trim().isEmpty()) {
+                def keystoreFile = new File(project.buildDir, 'ci-staging.keystore')
+                keystoreFile.parentFile.mkdirs()
+                keystoreFile.bytes = Base64.decoder.decode(keystoreBase64)
+                storeFile keystoreFile
+            } else if (keystorePath != null && !keystorePath.trim().isEmpty()) {
+                storeFile file(keystorePath)
+            }
+            storePassword System.getenv('STAGING_KEYSTORE_PASSWORD') ?: ''
+            keyAlias System.getenv('STAGING_KEY_ALIAS') ?: ''
+            keyPassword System.getenv('STAGING_KEY_PASSWORD') ?: ''
+        }
+    }
+    // FASE 3.6 — cada release exige la credencial de SU canal, y solo la suya.
+    //
+    // Antes el guardia miraba `:app:assembleRelease`, un nombre genérico que
+    // con varios flavors es ambiguo: pedía material de producción para una tarea
+    // que en realidad construía staging, y hacía falta material de producción
+    // para una release de staging.
+    def credentialVariablesFor = { String flavorName ->
+        flavorName == 'staging'
+                ? ['STAGING_KEYSTORE_BASE64', 'STAGING_KEYSTORE_PASSWORD',
+                   'STAGING_KEY_ALIAS', 'STAGING_KEY_PASSWORD']
+                : ['ANDROID_KEYSTORE_BASE64', 'ANDROID_KEYSTORE_PASSWORD',
+                   'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD']
+    }
+    gradle.taskGraph.whenReady { graph ->
+        def releaseFlavors = ['stable', 'staging'].findAll { flavorName ->
+            graph.hasTask(":app:assemble${flavorName.capitalize()}Release") ||
+                    graph.hasTask(":app:bundle${flavorName.capitalize()}Release")
+        }
+        if (releaseFlavors.isEmpty()) {
+            return
+        }
+        def problems = []
+        releaseFlavors.each { flavorName ->
+            def missing = credentialVariablesFor(flavorName)
+                    .findAll { !String.valueOf(System.getenv(it) ?: '').trim() }
+            if (!missing.isEmpty()) {
+                problems << "la release de ${flavorName} necesita ${missing.join(', ')}"
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new GradleException(
+                "Falta material de firma: ${problems.join('; ')}. " +
+                "Cada canal se firma con su propio certificado y no se sustituyen entre sí: " +
+                "sin la clave de un canal, ese canal queda bloqueado para publicar. " +
+                "Para desarrollo sin secretos usá assembleStagingDebug o assembleStableDebug."
+            )
+        }
+    }
+      // FASE 3.6 — dos flavors, dos aplicaciones y dos canales.
+      //
+      // Antes sólo existía `staging`, así que la "producción" no tenía variante
+      // propia: el build de release firmaba con la clave de producción el APK de
+      // staging. Con `stable` explícito, cada canal tiene su aplicación, su clave
+      // y su manifiesto.
       flavorDimensions 'environment'
       productFlavors {
+          stable {
+              dimension 'environment'
+              // SIN applicationIdSuffix a propósito: este es el paquete de
+              // producción, `com.apollo.mobile`, y tiene que coincidir con las
+              // instalaciones ya existentes para que puedan actualizarse.
+              resValue 'string', 'app_name', 'Apollo'
+              // El canal se declara aquí y no se infiere de ninguna URL: un
+              // build de pruebas no puede acabar pidiendo el manifiesto de
+              // producción.
+              buildConfigField 'String', 'UPDATE_CHANNEL', '"stable"'
+          }
           staging {
               dimension 'environment'
               applicationIdSuffix '.staging'
               versionNameSuffix '-staging'
               resValue 'string', 'app_name', 'Apollo (STAGING)'
+              // El canal de staging es explícito: esta build consulta el
+              // manifiesto de staging y jamás el de producción.
+              buildConfigField 'String', 'UPDATE_CHANNEL', '"staging"'
+              // El host sale de la misma propiedad de antes; si no se pasa, el
+              // build de staging NO cae a producción: queda vacío y la app pide
+              // el host.
               buildConfigField 'String', 'DEFAULT_WORKER_HOST',
                       "\"${project.findProperty('apolloWorkerHost') ?: 'apollo-staging.facupapollo.workers.dev'}\""
           }
@@ -84,6 +210,39 @@ android {
     }
     testOptions {
         unitTests.returnDefaultValues = true
+    }
+}
+
+/**
+ * FASE 3.6 — la firma se resuelve POR VARIANTE de release.
+ *
+ * Por qué no en `productFlavors`: un `signingConfig` de flavor aplica a TODOS los
+ * buildTypes de ese flavor, así que `stagingDebug` acabaría firmado con la clave
+ * de producción y `stableDebug` con la de staging. Y por qué no en
+ * `buildTypes.release`: una sola SigningConfig para todas las variantes release
+ * es exactamente el defecto que hizo que la release de staging se firmara con
+ * el certificado de producción.
+ *
+ * Se usa `variant.signingConfig.setConfig(...)` y no la asignación Groovy
+ * `variant.signingConfig.signingConfig = ...`: esa propiedad no tiene setter
+ * público en AGP 8, y el overload de `mergedFlavor.setSigningConfig` es
+ * ambiguo en Groovy.
+ *
+ * Las variantes `debug` no se tocan: siguen con la debug key local, que es lo
+ * que permite compilar y probar en un equipo sin ningún secreto.
+ */
+androidComponents {
+    onVariants(selector().withBuildType('release')) { variant ->
+        def environmentFlavor = variant.productFlavors
+                .find { it.first == 'environment' }
+                ?.second
+        if (environmentFlavor == null) {
+            throw new GradleException(
+                    "La variante ${variant.name} no declara flavor en la dimensión 'environment'. " +
+                    "Sin flavor no hay canal ni clave: publica siempre con una variante explícita.")
+        }
+        variant.signingConfig.setConfig(
+                android.signingConfigs.getByName(environmentFlavor == 'staging' ? 'staging' : 'production'))
     }
 }
 
@@ -100,19 +259,63 @@ dependencies {
     // `kotlin-stdlib-jdk7` dejó de publicarse después de Kotlin 1.8: el JDK 7 ya
     // está dentro del stdlib. Con KGP 2.2 el stdlib lo agrega el plugin solo.
     implementation 'androidx.core:core:1.13.1'
-    // minSdk 25 no tiene canales de notificacion (nacieron en API 26) y
-    // POST_NOTIFICATIONS no existe hasta API 33: NotificationCompat es la unica
-    // forma de cubrir 25..actual con un solo camino de codigo.
+    // minSdk 33: NotificationChannel existe (nació en API 26); POST_NOTIFICATIONS
+    // pasa a permiso de runtime (API 33). NotificationCompat sigue útil para
+    // cubrir variantes, pero el piso es ahora Android 13.
     // La app no usa nada de appcompat hoy (MainActivity extiende de
     // android.app.Activity y no hay res/ ni temas), pero se conserva la
     // dependencia en vez de borrarla: quitarla es limpieza y no toolchain.
     implementation 'androidx.appcompat:appcompat:1.7.0'
+    // FASE 6.1: WebView con AndroidX WebKit para servir la UI React empaquetada.
+    implementation 'androidx.webkit:webkit:1.13.0'
     // OkHttp 3.14 es la primera linea con soporte WSS en Android 5+; Android 7.1
     // no trae cliente WebSocket en el framework. Se deja en 3.14.9 a proposito:
     // tocarlo seria cambiar el transporte, no el build.
     implementation 'com.squareup.okhttp3:okhttp:3.14.9'
+    // org.json se usa en el puente (BridgeContract) para parsear/envolver los
+    // mensajes JSON entre JavaScript y Kotlin sin reflection ni parseo manual.
+    implementation 'org.json:json:20231013'
     testImplementation 'junit:junit:4.13.2'
     // org.json viene stubbeado en el android.jar de unit tests; el artefacto real
     // hace que el parser del cliente se pruebe de verdad y no contra nulls.
     testImplementation 'org.json:json:20231013'
+}
+
+/**
+ * Builds the Android-specific React entry and packages its local assets into
+ * WebViewAssetLoader. The WebView entry is `index.android.html` under
+ * app/src/main/assets/webapp/; relative Vite assets stay inside that directory.
+ */
+def webappDir = file("${projectDir}/../webapp")
+def webappAndroidDistDir = file("${webappDir}/dist-android")
+def assetsWebappDir = file("${projectDir}/src/main/assets/webapp")
+
+tasks.register('buildWebapp', Exec) {
+    description = "Runs npm ci and the Android React build, then copies dist-android into the APK assets"
+    workingDir webappDir
+    commandLine 'cmd', '/d', '/c', 'npm ci && npm run build:android'
+    inputs.files(
+            file("${webappDir}/package.json"),
+            file("${webappDir}/package-lock.json"),
+            file("${webappDir}/.npmrc"),
+            file("${webappDir}/vite.config.android.ts"),
+            file("${webappDir}/index.android.html")
+    )
+    inputs.dir file("${webappDir}/src")
+    outputs.dir webappAndroidDistDir
+    outputs.dir assetsWebappDir
+    doLast {
+        if (!file("${webappAndroidDistDir}/index.android.html").isFile()) {
+            throw new GradleException("Android UI build did not produce dist-android/index.android.html")
+        }
+        project.copy {
+            from webappAndroidDistDir
+            into assetsWebappDir
+        }
+    }
+}
+
+// Asegura que el bundle Android se genere antes de empaquetar el APK.
+tasks.named('preBuild') {
+    dependsOn tasks.named('buildWebapp')
 }

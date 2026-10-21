@@ -674,6 +674,8 @@ pub async fn update_settings(
 pub struct AccountStatus {
     pub authenticated: bool,
     pub account_id: String,
+    pub email: String,
+    pub session_present: bool,
     pub session_valid: bool,
 }
 
@@ -693,14 +695,28 @@ pub async fn account_status(
     settings: State<'_, Mutex<AppSettings>>,
 ) -> Result<AccountStatus, String> {
     let stored = account_settings_snapshot(&settings);
-    let has_token = crate::secret_store::read_session_token()
-        .map(|token| !token.is_empty())
-        .unwrap_or(false);
+    let session_token = crate::secret_store::read_session_token()
+        .ok()
+        .filter(|token| !token.is_empty());
+    let session_present = session_token.is_some();
     let account_id = stored.account_id.trim().to_string();
+    let email = stored.account_email.trim().to_string();
+    let session_valid = match (
+        session_token.as_deref(),
+        crate::account::AccountAuthClient::from_worker_url(&stored.worker_url),
+    ) {
+        (Some(token), Some(client)) if !account_id.is_empty() => client
+            .resolve_session_account(token)
+            .map(|resolved| resolved.as_deref() == Some(account_id.as_str()))
+            .unwrap_or(false),
+        _ => false,
+    };
     Ok(AccountStatus {
-        authenticated: has_token && !account_id.is_empty(),
-        session_valid: has_token,
+        authenticated: session_valid,
         account_id,
+        email,
+        session_present,
+        session_valid,
     })
 }
 
@@ -721,12 +737,6 @@ async fn authenticate_and_enroll(
         client.login(&credentials.email, &credentials.password)
     }
     .map_err(|error| format!("{error:?}"))?;
-    // El token se guarda primero en Credential Manager; el accountId en el
-    // JSON. Si la escritura segura falla, NO se finge sesión: se falla.
-    let store_outcome = crate::secret_store::store_session_token(&issued.session_token);
-    if store_outcome != crate::secret_store::SecretStoreOutcome::Ok {
-        return Err("el almacen seguro no esta disponible".to_string());
-    }
     let device_id = if stored.installation_id.trim().is_empty() {
         format!("desktop:{}", uuid::Uuid::new_v4())
     } else {
@@ -734,18 +744,36 @@ async fn authenticate_and_enroll(
     };
     let enrolled = client
         .enroll_device(&issued.session_token, &device_id, "desktop", &device_id)
-        .unwrap_or(false);
+        .map_err(|error| match error {
+            crate::account::AccountAuthError::Unreachable => {
+                "no se pudo contactar al Worker para enrolar esta PC".to_string()
+            }
+            crate::account::AccountAuthError::SessionExpired => {
+                "el Worker rechazó la sesión; volvé a iniciar sesión".to_string()
+            }
+            _ => "el Worker no confirmó el enrolamiento de esta PC".to_string(),
+        })?;
+    if !enrolled {
+        return Err("el Worker no confirmó el enrolamiento de esta PC".to_string());
+    }
+    // No guardar una sesión si esta instalación no quedó vinculada a la cuenta.
+    let store_outcome = crate::secret_store::store_session_token(&issued.session_token);
+    if store_outcome != crate::secret_store::SecretStoreOutcome::Ok {
+        return Err("el almacen seguro no esta disponible".to_string());
+    }
     let mut updated = stored;
     updated.account_id = issued.account_id.clone();
+    updated.account_email = credentials.email.trim().to_lowercase();
     if updated.installation_id.trim().is_empty() {
         updated.installation_id = device_id;
     }
     updated.save(app).await.map_err(|e| e.to_string())?;
     *settings.lock().unwrap() = updated;
-    let _ = enrolled;
     Ok(AccountStatus {
         authenticated: true,
         account_id: issued.account_id,
+        email: credentials.email.trim().to_lowercase(),
+        session_present: true,
         session_valid: true,
     })
 }
@@ -787,11 +815,14 @@ pub async fn account_logout(
     let _ = crate::secret_store::delete_session_token();
     let mut updated = account_settings_snapshot(&settings);
     updated.account_id = String::new();
+    updated.account_email = String::new();
     updated.save(&app).await.map_err(|e| e.to_string())?;
     *settings.lock().unwrap() = updated;
     Ok(AccountStatus {
         authenticated: false,
         account_id: String::new(),
+        email: String::new(),
+        session_present: false,
         session_valid: false,
     })
 }
@@ -1046,7 +1077,6 @@ pub async fn send_text_to_cloud_core(
     settings: State<'_, std::sync::Mutex<AppSettings>>,
     text: String,
 ) -> Result<(), String> {
-    eprintln!("[text-debug] cloudcore-send text=\"{}\"", text);
     if !bridge.is_connected() {
         eprintln!("[text-debug] cloudcore-send=error not-connected");
         return Err("Apollo no está conectado al Worker (reintentando conexión). Probá de nuevo en unos segundos.".to_string());

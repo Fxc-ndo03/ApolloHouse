@@ -16,6 +16,7 @@ import com.apollo.mobile.session.reconnect.SystemReconnectScheduler
 import com.apollo.mobile.transport.ClientConfig
 import com.apollo.mobile.transport.CredentialStore
 import com.apollo.mobile.transport.OkHttpSocketFactory
+import com.apollo.mobile.updates.UpdateOwner
 import java.util.concurrent.Executors
 
 // Workaround for Kotlin 2.x bug: "scheduler" in class names causes resolution issues
@@ -83,6 +84,9 @@ class ApolloApplication : Application() {
             reconnectScheduler = SystemReconnectScheduler
         )
     }
+
+    /** Un solo estado del actualizador para UI nativa, WebView y navegación. */
+    val updateOwner: UpdateOwner by lazy { UpdateOwner.forApplication(this) }
 
     /**
      * Historial de la conversación. Vive en la `Application` y no en la Activity

@@ -66,6 +66,10 @@ pub enum AccountAuthError {
     InvalidResponse,
     /// Sin red / Worker inalcanzable.
     Unreachable,
+    /// La sesión emitida fue rechazada al enrolar este dispositivo.
+    SessionExpired,
+    /// El Worker no confirmó el enrolamiento del dispositivo.
+    EnrollmentRejected,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +100,29 @@ pub fn parse_issued_session(status: u16, body: &str) -> Result<IssuedSession, Ac
         409 => Err(AccountAuthError::EmailTaken),
         400 => Err(AccountAuthError::InvalidInput),
         _ => Err(AccountAuthError::InvalidResponse),
+    }
+}
+
+pub fn parse_enrollment_response(
+    status: u16,
+    body: &str,
+) -> Result<bool, AccountAuthError> {
+    match status {
+        200 => {
+            #[derive(Deserialize)]
+            struct EnrollmentBody {
+                ok: bool,
+            }
+            let parsed: EnrollmentBody =
+                serde_json::from_str(body).map_err(|_| AccountAuthError::InvalidResponse)?;
+            if parsed.ok {
+                Ok(true)
+            } else {
+                Err(AccountAuthError::EnrollmentRejected)
+            }
+        }
+        401 => Err(AccountAuthError::SessionExpired),
+        _ => Err(AccountAuthError::EnrollmentRejected),
     }
 }
 
@@ -200,8 +227,8 @@ impl AccountAuthClient {
             "deviceName": device_name,
         })
         .to_string();
-        let (status, _) = self.post("/api/auth/devices", &body, Some(session_token))?;
-        Ok(status == 200)
+        let (status, text) = self.post("/api/auth/devices", &body, Some(session_token))?;
+        parse_enrollment_response(status, &text)
     }
 }
 
@@ -284,6 +311,22 @@ mod tests {
         assert_eq!(
             parse_issued_session(200, r#"{"accountId":"","sessionToken":""}"#),
             Err(AccountAuthError::InvalidResponse),
+        );
+    }
+
+    #[test]
+    fn el_enrolamiento_solo_pasa_si_el_worker_lo_confirma() {
+        assert_eq!(
+            parse_enrollment_response(200, r#"{"ok":true,"accountId":"acc_test"}"#),
+            Ok(true),
+        );
+        assert_eq!(
+            parse_enrollment_response(200, r#"{"ok":false}"#),
+            Err(AccountAuthError::EnrollmentRejected),
+        );
+        assert_eq!(
+            parse_enrollment_response(401, r#"{"error":"unauthorized"}"#),
+            Err(AccountAuthError::SessionExpired),
         );
     }
 }

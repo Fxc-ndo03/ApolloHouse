@@ -72,14 +72,19 @@ class ConversationActivity : Activity() {
 
     private fun observeOwner() {
         val application = application as com.apollo.mobile.ApolloApplication
+        // El socket habla desde el hilo de OkHttp: invocar la UI ahi revienta
+        // con "Can't create handler inside thread that has not called
+        // Looper.prepare()". Toda notificacion pasa por el hilo principal.
         application.conversationOwner.stateListener = { nextState ->
-            renderStatus(nextState)
+            runOnUiThread { renderStatus(nextState) }
         }
         application.conversationOwner.turnListener = { turnList ->
-            renderHistory(force = false, turnList = turnList)
+            runOnUiThread { renderHistory(force = false, turnList = turnList) }
         }
         application.conversationOwner.noticeListener = { detail ->
-            Toast.makeText(this, detail, Toast.LENGTH_LONG).show()
+            runOnUiThread {
+                Toast.makeText(this, detail, Toast.LENGTH_LONG).show()
+            }
         }
         renderStatus(application.conversationOwner.state)
     }

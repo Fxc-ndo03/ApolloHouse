@@ -21,6 +21,16 @@ class ConversationOwner(
     private val nowMillisecondsPort: () -> Long = { System.currentTimeMillis() }
 ) {
 
+    /** Additional observers used by hosts such as the React bridge. */
+    interface Observer {
+        fun onStateChanged(state: ConversationState) = Unit
+        fun onTurnsChanged(turns: List<ConversationTurn>) = Unit
+        fun onTurnError(notice: TurnErrorNotice) = Unit
+        fun onAudioStarted(format: String?, sampleRate: Int?, channels: Int?) = Unit
+        fun onAudioChunk(payload: ByteArray) = Unit
+        fun onAudioEnded(aborted: Boolean) = Unit
+    }
+
     private var currentSession: ConversationSession? = null
     /** El host con el que se abrió la sesión actual; `null` si nunca. */
     private var hostOfCurrentSession: String? = null
@@ -28,12 +38,30 @@ class ConversationOwner(
     var stateListener: ((ConversationState) -> Unit)? = null
     var turnListener: ((List<ConversationTurn>) -> Unit)? = null
     var noticeListener: ((String) -> Unit)? = null
+    private val observers = linkedSetOf<Observer>()
 
     val state: ConversationState
         get() = currentSession?.state ?: ConversationState.DISCONNECTED
 
+    fun currentTurns(): List<ConversationTurn> = history.snapshot()
+
+    fun addObserver(observer: Observer) {
+        synchronized(observers) { observers.add(observer) }
+    }
+
+    fun removeObserver(observer: Observer) {
+        synchronized(observers) { observers.remove(observer) }
+    }
+
+    private fun publishState(nextState: ConversationState) {
+        stateListener?.invoke(nextState)
+        synchronized(observers) { observers.toList() }.forEach { it.onStateChanged(nextState) }
+    }
+
     private fun publishHistory() {
-        turnListener?.invoke(history.snapshot())
+        val snapshot = history.snapshot()
+        turnListener?.invoke(snapshot)
+        synchronized(observers) { observers.toList() }.forEach { it.onTurnsChanged(snapshot) }
     }
 
     fun start(deviceId: String, credential: DeviceCredential) {
@@ -61,11 +89,34 @@ class ConversationOwner(
             reconnectScheduler = reconnectScheduler
         )
         session.stateListener = { nextState ->
-            stateListener?.invoke(nextState)
+            publishState(nextState)
             session.rejectionReason?.let { noticeListener?.invoke(it) }
+        }
+        session.audioChunkListener = { payload ->
+            synchronized(observers) { observers.toList() }.forEach { it.onAudioChunk(payload) }
         }
         session.inboundListener = { inbound ->
             when (inbound.type) {
+                ConversationContract.INBOUND_UI_STATE -> {
+                    // FASE 3.20: el Worker envia la respuesta del turno en el
+                    // CAMPO `caption` de un frame `ui_state`, no en un frame
+                    // `caption`. Sin esta rama la respuesta llegaba por el
+                    // socket y se perdia: el turno quedaba en "enviado".
+                    val captionText = inbound.caption
+                    if (captionText != null && !isTransientCaption(captionText)) {
+                        history.add(
+                            ConversationTurn(
+                                turnId = inbound.turnId ?: nextLocalTurnId(),
+                                role = ConversationTurn.TurnRole.APOLLO,
+                                text = captionText,
+                                atMilliseconds = nowMillisecondsPort(),
+                                state = ConversationTurn.TurnState.ANSWERED
+                            )
+                        )
+                        markLastPendingAnswered()
+                        publishHistory()
+                    }
+                }
                 ConversationContract.INBOUND_CAPTION -> {
                     val captionText = inbound.caption
                     if (captionText != null) {
@@ -83,12 +134,19 @@ class ConversationOwner(
                     }
                 }
                 ConversationContract.INBOUND_TTS_END -> {
+                    synchronized(observers) { observers.toList() }.forEach { it.onAudioEnded(false) }
                     markLastPendingAnswered()
                     publishHistory()
                 }
                 ConversationContract.INBOUND_TTS_ABORTED -> {
+                    synchronized(observers) { observers.toList() }.forEach { it.onAudioEnded(true) }
                     markLastPendingAnswered(ConversationTurn.TurnState.FAILED)
                     publishHistory()
+                }
+                ConversationContract.INBOUND_TTS_START -> {
+                    synchronized(observers) { observers.toList() }.forEach {
+                        it.onAudioStarted(inbound.audioFormat, inbound.sampleRate, inbound.channels)
+                    }
                 }
                 ConversationContract.INBOUND_CONFIRM_REQUEST -> {
                     noticeListener?.invoke(
@@ -96,9 +154,10 @@ class ConversationOwner(
                     )
                 }
                 ConversationContract.INBOUND_ERROR -> {
-                    val detail = inbound.errorMessage ?: inbound.errorCode ?: "error"
+                    val notice = TurnError.describe(inbound.errorCode, inbound.errorMessage)
                     markLastPendingAnswered(ConversationTurn.TurnState.FAILED)
-                    noticeListener?.invoke("Apollo rechazo el mensaje: $detail")
+                    synchronized(observers) { observers.toList() }.forEach { it.onTurnError(notice) }
+                    noticeListener?.invoke(notice.text)
                     publishHistory()
                 }
             }
@@ -117,6 +176,9 @@ class ConversationOwner(
     }
 
     fun send(text: String): String? {
+        // A persisted token is not enough to send: the existing Apollo
+        // conversation socket must have completed its authenticated hello.
+        if (state != ConversationState.ONLINE) return null
         val session = currentSession ?: return null
         val turnId = nextLocalTurnId()
         val wasSent = session.sendText(text, clientTurnId = turnId)

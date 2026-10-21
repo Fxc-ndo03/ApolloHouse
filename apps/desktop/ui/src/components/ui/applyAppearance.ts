@@ -20,14 +20,31 @@ const UI_RADIUS: Record<Appearance['uiStyle'], { r: string; rsm: string }> = {
   crisp: { r: '8px', rsm: '5px' },
 };
 
+export type ResolvedAppearanceMode = Exclude<Appearance['mode'], 'system'>;
+
+export function resolveAppearanceMode(
+  mode: Appearance['mode'],
+  systemMode: ResolvedAppearanceMode,
+): ResolvedAppearanceMode {
+  return mode === 'system' ? systemMode : mode;
+}
+
 /**
  * Única fuente de verdad para aplicar apariencia: escribe variables CSS en
  * `:root` y el modo en `data-apollo-theme`. Todo el cambio visual sale de aquí.
  */
-export function applyAppearance(a: Appearance) {
+export function applyAppearance(
+  a: Appearance,
+  systemMode?: ResolvedAppearanceMode,
+) {
   const root = document.documentElement;
   const accent = ACCENTS[a.accent];
-  root.dataset.apolloTheme = a.mode;
+  const detectedSystemMode = systemMode ?? (
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      : 'dark'
+  );
+  root.dataset.apolloTheme = resolveAppearanceMode(a.mode, detectedSystemMode);
   root.style.setProperty('--apollo-primary', accent.primary);
   root.style.setProperty('--apollo-primary-2', accent.primary2);
   root.style.setProperty('--apollo-cyan', accent.primary2);

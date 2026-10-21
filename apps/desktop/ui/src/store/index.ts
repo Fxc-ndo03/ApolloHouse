@@ -46,12 +46,20 @@ export interface Settings {
   tts: TtsSettings;
 }
 
+export interface AccountStatus {
+  authenticated: boolean;
+  account_id: string;
+  email: string;
+  session_present: boolean;
+  session_valid: boolean;
+}
+
 export type ActiveSection = 'dashboard' | 'chat' | 'settings';
 
 export type AppearanceAccent = 'ocean' | 'cyan' | 'mint' | 'blue';
 export type AppearanceTextSize = 'small' | 'default' | 'large' | 'xl';
 export type AppearanceUiStyle = 'rounded' | 'soft' | 'crisp';
-export type AppearanceMode = 'dark' | 'light';
+export type AppearanceMode = 'system' | 'dark' | 'light';
 
 export interface Appearance {
   accent: AppearanceAccent;
@@ -64,7 +72,7 @@ export const defaultAppearance: Appearance = {
   accent: 'cyan',
   textSize: 'default',
   uiStyle: 'rounded',
-  mode: 'dark',
+  mode: 'system',
 };
 
 interface AppStore {
@@ -96,6 +104,21 @@ interface AppStore {
 
   sidecarRunning: boolean;
   setSidecarRunning: (running: boolean) => void;
+
+  account: AccountStatus | null;
+  setAccount: (account: AccountStatus | null) => void;
+
+  /**
+   * Onboarding posterior al registro: el nombre se pregunta ahí porque el
+   * backend no acepta un campo de nombre. Es un dato LOCAL de este equipo: el
+   * store lo persiste, la cuenta en la nube no lo guarda.
+   */
+  displayName: string;
+  hasCompletedOnboarding: boolean;
+  pendingOnboarding: boolean;
+  setDisplayName: (name: string) => void;
+  completeOnboarding: (name: string) => void;
+  setPendingOnboarding: (pending: boolean) => void;
 }
 
 const defaultSettings: Settings = {
@@ -184,13 +207,42 @@ export const useAppStore = create<AppStore>()(
 
       sidecarRunning: false,
       setSidecarRunning: (running) => set({ sidecarRunning: running }),
+
+      account: null,
+      setAccount: (account) => set({ account }),
+
+      displayName: '',
+      hasCompletedOnboarding: false,
+      pendingOnboarding: false,
+      setDisplayName: (name) => set({ displayName: name }),
+      completeOnboarding: (name) =>
+        set({ displayName: name, hasCompletedOnboarding: true, pendingOnboarding: false }),
+      setPendingOnboarding: (pending) => set({ pendingOnboarding: pending }),
     }),
     {
       name: 'apollo-desktop-store',
+      version: 1,
+      migrate: (persistedState, version) => {
+        const persisted = persistedState as Partial<AppStore> | undefined;
+        if (version < 1) {
+          return {
+            ...persisted,
+            appearance: {
+              ...defaultAppearance,
+              ...(persisted?.appearance ?? {}),
+              mode: 'system',
+            },
+          } as AppStore;
+        }
+        return persisted as AppStore;
+      },
       partialize: (state) => ({
         settings: state.settings,
         messages: state.messages,
         appearance: state.appearance,
+        displayName: state.displayName,
+        hasCompletedOnboarding: state.hasCompletedOnboarding,
+        pendingOnboarding: state.pendingOnboarding,
       }),
     },
   ),

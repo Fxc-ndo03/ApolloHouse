@@ -1,0 +1,375 @@
+# FASE 3.3 — publica una version de Apollo y sus manifiestos de actualizacion.
+#
+# Endpoints fijos por canal (no cambian entre publicaciones):
+#   - Staging: https://github.com/Fxc-ndo03/ApolloHouse/releases/download/staging/latest.json
+#   - Stable:  https://github.com/Fxc-ndo03/ApolloHouse/releases/latest/download/latest.json
+#
+# Stable:  etiqueta unica e inmutable "v<major>.<minor>.<patch>".
+# Staging: release rodante "staging", publicado con tags unicos
+#          "staging-v<major>.<minor>.<patch>" o workflow_dispatch; se rechazan
+#          versiones que no superen la ya publicada.
+#
+# Procedimiento de staging documentado en docs/UPDATES.md.
+
+name: Publish Apollo client release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'staging-v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Canal a publicar'
+        required: true
+        type: choice
+        options:
+          - staging
+          - stable
+      version:
+        description: 'Version semver, p.ej. 1.4.0'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  REPOSITORY_OWNER: Fxc-ndo03
+  REPOSITORY_NAME: ApolloHouse
+  STAGING_RELEASE_TAG: staging
+  APOLLO_WORKER_HOST_STAGING: apollo-staging.facupapollo.workers.dev
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolver canal, version y versionCode
+        id: meta
+        shell: pwsh
+        env:
+          GH_REF: ${{ github.ref }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $stagingTag = $env:GH_REF -match '^refs/tags/staging-v(\d+)\.(\d+)\.(\d+)$'
+          $stagingTagVersion = if ($stagingTag) { "$($Matches[1]).$($Matches[2]).$($Matches[3])" } else { $null }
+          $versionedTag = $env:GH_REF -match '^refs/tags/v(\d+)\.(\d+)\.(\d+)$'
+          $stableTagVersion = if ($versionedTag) { "$($Matches[1]).$($Matches[2]).$($Matches[3])" } else { $null }
+          $isStaging = $env:INPUT_CHANNEL -eq 'staging' -or $stagingTag
+
+          if ($stagingTag) {
+            $channel = 'staging'
+            $version = $stagingTagVersion
+            $releaseTag = $env:STAGING_RELEASE_TAG
+          } elseif ($isStaging) {
+            $channel = 'staging'
+            $version = $env:INPUT_VERSION
+            $releaseTag = $env:STAGING_RELEASE_TAG
+          } else {
+            if ($versionedTag) {
+              $version = $stableTagVersion
+            } else {
+              if ($env:GH_REF -ne 'refs/heads/main') {
+                throw "La publicacion estable manual solo se permite desde main; ref recibido '$env:GH_REF'"
+              }
+              $version = $env:INPUT_VERSION
+            }
+            $channel = 'stable'
+            $releaseTag = "v$version"
+          }
+
+          if ($version -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+            throw "Version '$version' no es semvalida de tres componentes"
+          }
+
+          $major = [int]$Matches[1]
+          $minor = [int]$Matches[2]
+          $patch = [int]$Matches[3]
+
+          # minor y patch se acotan a 99 porque cada uno ocupa dos digitos en el
+          # codigo. Sin ese limite 1.0.100 y 1.1.0 producirian el mismo codigo.
+          if ($minor -gt 99 -or $patch -gt 99) {
+            throw "minor y patch deben estar entre 0 y 99 para no colisionar; recibio $version"
+          }
+          if ($major -gt 9999) {
+            throw "major debe estar entre 0 y 9999; recibio $version"
+          }
+
+          $stableVersionCode = $major * 10000 + $minor * 100 + $patch
+          # Los builds de staging ocupan la banda alta del rango para que un cliente
+          # nunca pueda recibir un APK firmado con la clave del otro canal.
+          $versionCode = if ($isStaging) { 99900000 + $stableVersionCode } else { $stableVersionCode }
+          if ($versionCode -gt 2100000000) {
+            throw "versionCode $versionCode excede el maximo de Android"
+          }
+
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "version_code=$versionCode" >> $env:GITHUB_OUTPUT
+          "prerelease=$($isStaging.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+          Write-Host "canal=$channel release=$releaseTag version=$version versionCode=$versionCode"
+
+      - name: Impedir republicacion de una version ya publicada
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+        run: |
+          if ($env:CHANNEL -eq 'stable') {
+            gh release view $env:RELEASE_TAG --json tagName --repo "$env:REPOSITORY_OWNER/$env:REPOSITORY_NAME" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              throw "La etiqueta $env:RELEASE_TAG ya tiene una release. Las releases estables son inmutables; publica otra version."
+            }
+            exit 0
+          }
+
+          $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $currentManifestUrl = "https://github.com/$env:REPOSITORY_OWNER/$env:REPOSITORY_NAME/releases/download/$env:RELEASE_TAG/android.json?t=$cacheBuster"
+          try {
+            $response = Invoke-WebRequest -Uri $currentManifestUrl -UseBasicParsing -ErrorAction Stop
+            $published = $response.Content | ConvertFrom-Json
+          } catch {
+            Write-Host 'No hay release rodante previa; se publica la primera.'
+            exit 0
+          }
+
+          $publishedVersionCode = [int]$published.versionCode
+          $requestedVersionCode = [int]$env:VERSION_CODE
+          Write-Host "staging publicado=$publishedVersionCode solicitado=$requestedVersionCode"
+          if ($requestedVersionCode -le $publishedVersionCode) {
+            throw "Staging ya tiene la version $($published.version) (versionCode $publishedVersionCode). Se rechaza publicar $requestedVersionCode: debe ser estrictamente mayor."
+          }
+
+      - name: Verificar clave de firma de Windows
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'Falta TAURI_SIGNING_PRIVATE_KEY: sin ella Tauri no firma el instalador y el actualizador de Windows no podria validarlo. No se publica.'
+          }
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Dependencias de la interfaz Android
+        working-directory: apps/mobile/webapp
+        run: npm ci
+
+      - name: Dependencias del frontend
+        working-directory: apps/desktop/ui
+        run: bun install --frozen-lockfile
+
+      - name: Tests escritorio (Rust)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib
+
+      - name: Tests de actualizaciones compartidos
+        run: bun test apps/mobile/__tests__/updates.spec.ts
+
+      - name: Tests de interfaz de escritorio
+        working-directory: apps/desktop/ui
+        run: bun run test
+
+      - name: Tests de interfaz Android
+        working-directory: apps/mobile/webapp
+        run: npm run test:android
+
+      - name: Dependencias de pruebas del sidecar
+        working-directory: juana-client
+        run: python -m pip install -r requirements.txt
+
+      - name: Regresiones de captura y ciclo Vosk
+        working-directory: juana-client
+        run: python -m unittest juana_client.tests.test_wake_callback_lifecycle juana_client.tests.test_regression_audio_errno
+
+      - name: Tests de Android
+        working-directory: apps/mobile
+        run: ./gradlew.bat :app:testStableDebugUnitTest :app:testStagingDebugUnitTest --console=plain
+
+      - name: Build del frontend
+        working-directory: apps/desktop/ui
+        run: bun run build
+
+      - name: Bundle de Windows firmado
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APOLLO_UPDATE_CHANNEL: ${{ steps.meta.outputs.channel }}
+          APOLLO_WORKER_URL: ${{ steps.meta.outputs.channel == 'staging' && format('wss://{0}/agents/apollo/default', env.APOLLO_WORKER_HOST_STAGING) || '' }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # La version del bundle se fuerza con un archivo: pasar el JSON en la
+          # linea de comandos pierde las comillas en PowerShell.
+          $versionOverridePath = Join-Path $env:RUNNER_TEMP 'tauri-version-override.json'
+          @{ version = $env:VERSION } | ConvertTo-Json | Set-Content -Path $versionOverridePath -Encoding utf8
+          if ($env:CHANNEL -eq 'staging') {
+              $configPath = 'src-tauri/tauri.staging.conf.json'
+          } else {
+              $configPath = 'src-tauri/tauri.conf.json'
+          }
+          & '.\ui\node_modules\.bin\tauri.exe' build --config $configPath --config $versionOverridePath
+
+      - name: APK de Android firmado
+        working-directory: apps/mobile
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STAGING_KEYSTORE_BASE64: ${{ secrets.STAGING_KEYSTORE_BASE64 }}
+          STAGING_KEYSTORE_PASSWORD: ${{ secrets.STAGING_KEYSTORE_PASSWORD }}
+          STAGING_KEY_ALIAS: ${{ secrets.STAGING_KEY_ALIAS }}
+          STAGING_KEY_PASSWORD: ${{ secrets.STAGING_KEY_PASSWORD }}
+          APOLLO_VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          APOLLO_VERSION_NAME: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+        run: |
+          # FASE 3.6 — tarea explícita por canal. Nada de `assembleRelease`: con
+          # la matriz de flavors actual, ese nombre agregado puede compilar más
+          # de una variante y terminar Firmando el APK equivocado.
+          if ($env:CHANNEL -eq 'staging') {
+              .\gradlew.bat :app:assembleStagingRelease "-PapolloVersionCode=$env:APOLLO_VERSION_CODE" "-PapolloVersionName=$env:APOLLO_VERSION_NAME" --console=plain
+          } else {
+              .\gradlew.bat :app:assembleStableRelease "-PapolloVersionCode=$env:APOLLO_VERSION_CODE" "-PapolloVersionName=$env:APOLLO_VERSION_NAME" --console=plain
+          }
+
+      - name: Verificar identidad, versión y firma del APK
+        id: verify_apk
+        shell: pwsh
+        env:
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+        run: |
+          # FASE 3.6 — el manifiesto se genera desde el APK REAL, y sólo si el
+          # paquete, la versión y el canal coinciden con lo que se pidió. Un
+          # APK de staging publicado como estable sería la peor falla posible:
+          # los clientes instalarían una app de pruebas creyendo que es
+          # producción.
+          $expectedApplicationId = if ($env:CHANNEL -eq 'staging') {
+              'com.apollo.mobile.staging'
+          } else {
+              'com.apollo.mobile'
+          }
+          $apk = Get-ChildItem 'apps/mobile/app/build/outputs/apk' -Recurse -Filter '*-release.apk' |
+              Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $apk) { throw 'No se encontro el APK de release.' }
+
+          # El `versionCode` sale del APK, no del argumento: es el valor que el
+          # sistema comparará al instalar.
+          $verifyArgs = @(
+              'scripts/verify-android-apk.ts',
+              '--apk', $apk.FullName,
+              '--channel', $env:CHANNEL,
+              '--application-id', $expectedApplicationId,
+              '--version', $env:VERSION,
+              '--version-code', $env:VERSION_CODE,
+              '--print-metadata'
+          )
+          if ($env:CHANNEL -eq 'staging') {
+              # La instalación staging histórica del Moto G35 usa este
+              # certificado. Una firma distinta haría que Android rechazara la
+              # actualización aunque el APK y el manifiesto fueran válidos.
+              $verifyArgs += @(
+                  '--expect-signer-sha256',
+                  '1521135c0ccd9453e0ac5f69450e52315ec090f1c9faf086df605137290e673c'
+              )
+          }
+          $verificationOutput = & bun @verifyArgs
+          if ($LASTEXITCODE -ne 0) { throw 'La verificación del APK falló.' }
+          $metadataLine = $verificationOutput |
+              Where-Object { $_ -match '^\s*\{' } |
+              Select-Object -First 1
+          if (-not $metadataLine) { throw 'El verificador no devolvió metadata JSON.' }
+          $metadata = $metadataLine | ConvertFrom-Json
+
+          "apk_path=$($apk.FullName)" >> $env:GITHUB_OUTPUT
+          "apk_version_code=$($metadata.versionCode)" >> $env:GITHUB_OUTPUT
+          "apk_version_name=$($metadata.versionName)" >> $env:GITHUB_OUTPUT
+
+      - name: Generar manifiestos desde los artefactos reales
+        shell: pwsh
+        env:
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          VERIFIED_APK: ${{ steps.verify_apk.outputs.apk_path }}
+        run: |
+          $setupInstaller = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe' | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $setupInstaller) { throw 'No se encontro el instalador de Windows.' }
+          if (-not (Test-Path "$($setupInstaller.FullName).sig")) {
+            throw "Falta la firma del instalador: $($setupInstaller.FullName).sig"
+          }
+          # FASE 3.6 — el APK es el MISMO que se acaba de verificar, no "el
+          # .apk más reciente que aparezca": así el manifiesto no puede describir
+          # un artefacto distinto del publicado. Y el `versionCode` es el que
+          # lleva dentro, que es el que Android comparará al instalar.
+          if (-not $env:VERIFIED_APK -or -not (Test-Path $env:VERIFIED_APK)) {
+            throw "No se pudo localizar el APK verificado: '$env:VERIFIED_APK'"
+          }
+
+          bun scripts/generate-update-manifest.ts `
+            --channel $env:CHANNEL `
+            --version $env:VERSION `
+            --android-version-code $env:VERSION_CODE `
+            --windows-setup "$($setupInstaller.FullName)" `
+            --android-apk "$env:VERIFIED_APK" `
+            --min-sdk 33 `
+            --notes "Apollo $env:CHANNEL $env:VERSION" `
+            --out-latest latest.json `
+            --out-android android.json
+
+          # El manifiesto tiene que describir el mismo APK que se publica.
+          $published = Get-Content android.json -Raw | ConvertFrom-Json
+          if ($published.version -ne $env:VERSION) {
+            throw "android.json quedo con version $($published.version) y se esperaba $env:VERSION"
+          }
+          if ($published.versionCode -ne [int]$env:VERSION_CODE) {
+            throw "android.json quedo con versionCode $($published.versionCode) y se esperaba $env:VERSION_CODE"
+          }
+          if ($published.channel -ne $env:CHANNEL) {
+            throw "android.json quedo con canal $($published.channel) y se esperaba $env:CHANNEL"
+          }
+
+      - name: Publicar en el canal resuelto
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: Apollo ${{ steps.meta.outputs.channel }} ${{ steps.meta.outputs.version }}
+          body: Release generada por GitHub Actions para el canal ${{ steps.meta.outputs.channel }}.
+          files: |
+            latest.json
+            android.json
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe.sig
+            ${{ steps.verify_apk.outputs.apk_path }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
