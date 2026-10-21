@@ -144,7 +144,7 @@ jobs:
           $requestedVersionCode = [int]$env:VERSION_CODE
           Write-Host "staging publicado=$publishedVersionCode solicitado=$requestedVersionCode"
           if ($requestedVersionCode -le $publishedVersionCode) {
-            throw "Staging ya tiene la version $($published.version) (versionCode $publishedVersionCode). Se rechaza publicar $requestedVersionCode: debe ser estrictamente mayor."
+            throw "Staging ya tiene la version $($published.version) (versionCode $publishedVersionCode). Se rechaza publicar $($requestedVersionCode): debe ser estrictamente mayor."
           }
 
       - name: Verificar clave de firma de Windows
