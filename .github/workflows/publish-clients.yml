@@ -188,6 +188,16 @@ jobs:
         working-directory: apps/desktop/ui
         run: bun install --frozen-lockfile
 
+      - name: Preparar frontend y recursos del sidecar
+        working-directory: apps/desktop/ui
+        run: |
+          # `cargo test` compila el build script de Tauri, que valida los
+          # recursos declarados en bundle.resources. Hay que generarlos antes
+          # de los tests: en un checkout limpio no existen todavía.
+          bun run build
+          bun ../src-tauri/bundle-resources.mjs
+          bun ../src-tauri/bundle-python-runtime.mjs
+
       - name: Tests escritorio (Rust)
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib
@@ -214,10 +224,6 @@ jobs:
       - name: Tests de Android
         working-directory: apps/mobile
         run: ./gradlew.bat :app:testStableDebugUnitTest :app:testStagingDebugUnitTest --console=plain
-
-      - name: Build del frontend
-        working-directory: apps/desktop/ui
-        run: bun run build
 
       - name: Bundle de Windows firmado
         working-directory: apps/desktop
