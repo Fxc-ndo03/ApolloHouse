@@ -341,6 +341,20 @@ jobs:
           if (-not (Test-Path "$($setupInstaller.FullName).sig")) {
             throw "Falta la firma del instalador: $($setupInstaller.FullName).sig"
           }
+          # GitHub reemplaza espacios y elimina parentesis al subir un asset,
+          # pero el manifiesto arma la URL con el nombre local. Eso dejaria un
+          # latest.json apuntando a un archivo inexistente. Renombramos el
+          # instalador ya firmado a un nombre sin caracteres especiales antes
+          # de generar la URL; la firma cubre el contenido, no el nombre.
+          $safeBaseName = if ($env:CHANNEL -eq 'staging') {
+            "Apollo-Desktop-STAGING-$($env:VERSION)-x64-setup"
+          } else {
+            "Apollo-Desktop-$($env:VERSION)-x64-setup"
+          }
+          $safeSetupPath = Join-Path $setupInstaller.DirectoryName "$safeBaseName.exe"
+          Move-Item -LiteralPath $setupInstaller.FullName -Destination $safeSetupPath -Force
+          Move-Item -LiteralPath "$($setupInstaller.FullName).sig" -Destination "$safeSetupPath.sig" -Force
+          $setupInstaller = Get-Item -LiteralPath $safeSetupPath
           # FASE 3.6 — el APK es el MISMO que se acaba de verificar, no "el
           # .apk más reciente que aparezca": así el manifiesto no puede describir
           # un artefacto distinto del publicado. Y el `versionCode` es el que
