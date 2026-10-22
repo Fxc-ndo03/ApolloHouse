@@ -173,7 +173,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
+        with:
+          # v4 ya no pide el paquete `tools`, que Google dejó de publicar y
+          # hacía fallar `sdkmanager --licenses`. Se instalan explícitamente
+          # las versiones que usa la app para no depender de la imagen del runner.
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
 
       - name: Dependencias de la interfaz Android
         working-directory: apps/mobile/webapp
