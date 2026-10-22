@@ -124,6 +124,23 @@ function runApksigner(apksigner: string, apk: string): string {
   return execFileSync(java, ['-jar', jar, ...args], { encoding: 'utf8' });
 }
 
+/** Extrae el digest del firmante en las variantes de salida de apksigner. */
+export function parseSignerSha256(output: string): string | null {
+  const normalized = output
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/[\u2010-\u2015\u2212]/g, '-');
+  const label = /certificate\s+SHA\s*-\s*256\s+digest\s*:/i.exec(normalized);
+  if (!label) return null;
+
+  const remainder = normalized.slice(label.index + label[0].length);
+  const digest = /^\s*((?:[0-9a-f]{2}:?){32})\b/i.exec(remainder)?.[1];
+  if (!digest) return null;
+
+  const compact = digest.replace(/:/g, '');
+  return /^[0-9a-f]{64}$/i.test(compact) ? compact.toLowerCase() : null;
+}
+
 function readApkFacts(apk: string, androidHome: string): ApkFacts {
   const aapt2 = resolveBuildTool('aapt2', androidHome);
   const apksigner = resolveBuildTool('apksigner', androidHome);
@@ -146,7 +163,7 @@ function readApkFacts(apk: string, androidHome: string): ApkFacts {
     // apksigner cambia el prefijo según el esquema: "Signer #1 certificate
     // SHA-256 digest" para v1 y "V2 Signer: certificate SHA-256 digest" para
     // v2/v3. El dato que importa es el digest, no el rótulo.
-    signerSha256 = /certificate SHA-256 digest:\s*([0-9a-f]+)/i.exec(certs)?.[1] ?? null;
+    signerSha256 = parseSignerSha256(certs);
     if (signerSha256 === null) {
       signerError = `apksigner no devolvió el digest SHA-256 del firmante: ${certs.trim()}`;
     }
@@ -240,9 +257,11 @@ function main(): void {
   );
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(`verificación de APK imposible: ${(error as Error).message}`);
-  process.exit(1);
+if (import.meta.main) {
+  try {
+    main();
+  } catch (error) {
+    console.error(`verificación de APK imposible: ${(error as Error).message}`);
+    process.exit(1);
+  }
 }
