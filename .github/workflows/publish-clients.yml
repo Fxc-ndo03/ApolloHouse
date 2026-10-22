@@ -239,6 +239,10 @@ jobs:
           # linea de comandos pierde las comillas en PowerShell.
           $versionOverridePath = Join-Path $env:RUNNER_TEMP 'tauri-version-override.json'
           @{ version = $env:VERSION } | ConvertTo-Json | Set-Content -Path $versionOverridePath -Encoding utf8
+          # El secreto puede traer un salto de linea final. El firmador del
+          # bundler decodifica base64 estricto y lo rechaza; el CLI de firma lo
+          # tolera, por eso la verificacion previa no lo detecta.
+          $env:TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY.Trim()
           if ($env:CHANNEL -eq 'staging') {
               $configPath = 'src-tauri/tauri.staging.conf.json'
           } else {
