@@ -143,7 +143,10 @@ function readApkFacts(apk: string, androidHome: string): ApkFacts {
   let signerError: string | null = null;
   try {
     const certs = runApksigner(apksigner, apk);
-    signerSha256 = /Signer #1 certificate SHA-256 digest: ([0-9a-f]+)/.exec(certs)?.[1] ?? null;
+    // apksigner cambia el prefijo según el esquema: "Signer #1 certificate
+    // SHA-256 digest" para v1 y "V2 Signer: certificate SHA-256 digest" para
+    // v2/v3. El dato que importa es el digest, no el rótulo.
+    signerSha256 = /certificate SHA-256 digest:\s*([0-9a-f]+)/i.exec(certs)?.[1] ?? null;
     if (signerSha256 === null) {
       signerError = `apksigner no devolvió el digest SHA-256 del firmante: ${certs.trim()}`;
     }
