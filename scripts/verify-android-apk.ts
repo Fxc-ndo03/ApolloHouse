@@ -29,7 +29,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 type Channel = 'stable' | 'staging';
 
@@ -98,7 +98,31 @@ type ApkFacts = {
   versionName: string;
   versionCode: number;
   signerSha256: string | null;
+  signerError: string | null;
 };
+
+/**
+ * Ejecuta `apksigner`. En Windows el binario es un `.bat`, y desde Bun 1.4
+ * `execFileSync` ya no puede lanzarlo directo (EINVAL). Por eso se invoca el
+ * jar con Java, sin depender de un shell. Sin esto, un fallo al arrancar la
+ * herramienta se confundía con un APK sin firma.
+ */
+function runApksigner(apksigner: string, apk: string): string {
+  const args = ['verify', '--print-certs', apk];
+  if (process.platform !== 'win32') {
+    return execFileSync(apksigner, args, { encoding: 'utf8' });
+  }
+  // En Windows `apksigner` es un `.bat` y Bun >= 1.4 ya no lo lanza directo
+  // (EINVAL). Se ejecuta el jar con el mismo Java que usaría el `.bat`.
+  const jar = join(dirname(apksigner), 'lib', 'apksigner.jar');
+  if (!existsSync(jar)) {
+    throw new Error(`no se encontro ${jar}`);
+  }
+  const java = process.env['JAVA_HOME']
+    ? join(process.env['JAVA_HOME'], 'bin', 'java.exe')
+    : 'java';
+  return execFileSync(java, ['-jar', jar, ...args], { encoding: 'utf8' });
+}
 
 function readApkFacts(apk: string, androidHome: string): ApkFacts {
   const aapt2 = resolveBuildTool('aapt2', androidHome);
@@ -116,15 +140,23 @@ function readApkFacts(apk: string, androidHome: string): ApkFacts {
   }
 
   let signerSha256: string | null = null;
+  let signerError: string | null = null;
   try {
-    const certs = execFileSync(apksigner, ['verify', '--print-certs', apk], { encoding: 'utf8' });
+    const certs = runApksigner(apksigner, apk);
     signerSha256 = /Signer #1 certificate SHA-256 digest: ([0-9a-f]+)/.exec(certs)?.[1] ?? null;
-  } catch {
-    // Un APK sin firma no es un error de lectura: se reporta como `null` y la
-    // comparación de más abajo lo detecta si se esperaba una firma.
+    if (signerSha256 === null) {
+      signerError = `apksigner no devolvió el digest SHA-256 del firmante: ${certs.trim()}`;
+    }
+  } catch (error) {
+    // Un APK sin firma hace que apksigner salga con error. El motivo se
+    // conserva: si la herramienta no llegó a ejecutarse (por ejemplo, un
+    // `.bat` invocado sin shell) hay que distinguirlo de un APK sin firmar.
+    const failure = error as { stderr?: unknown; message?: string };
+    const stderr = failure.stderr == null ? '' : String(failure.stderr).trim();
+    signerError = stderr || failure.message || 'apksigner falló sin detalle';
   }
 
-  return { applicationId, versionName, versionCode, signerSha256 };
+  return { applicationId, versionName, versionCode, signerSha256, signerError };
 }
 
 function main(): void {
@@ -170,9 +202,13 @@ function main(): void {
   }
 
   if (options.expectSignerSha256 && facts.signerSha256 !== options.expectSignerSha256) {
+    const actual = facts.signerSha256 ?? '(sin firma)';
+    const detail = facts.signerError
+      ? `; apksigner: ${facts.signerError.replace(/\s+/g, ' ').slice(0, 300)}`
+      : '';
     problems.push(
-      `firma: el APK está firmado con ${facts.signerSha256 ?? '(sin firma)'} ` +
-        `y se esperaba ${options.expectSignerSha256}`,
+      `firma: el APK está firmado con ${actual} ` +
+        `y se esperaba ${options.expectSignerSha256}${detail}`,
     );
   }
 
