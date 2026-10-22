@@ -25,7 +25,7 @@
   },
   "bundle": {
     "targets": ["nsis"],
-    "createUpdaterArtifacts": "v1Compatible",
+    "createUpdaterArtifacts": true,
     "windows": {
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"
