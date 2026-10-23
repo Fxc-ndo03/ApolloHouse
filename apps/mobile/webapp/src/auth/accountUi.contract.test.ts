@@ -78,6 +78,16 @@ describe('onboarding del nombre', () => {
   });
 });
 
+describe('restauración de sesión', () => {
+  const authGate = sourceOf('AuthGate.tsx');
+
+  it('no muestra bienvenida cuando no se pudo verificar la sesión y ofrece reintentar', () => {
+    expect(authGate).toContain("status === 'verificationUnavailable'");
+    expect(authGate).toContain('No pudimos verificar la sesión');
+    expect(authGate).toContain('retryRestore()');
+  });
+});
+
 describe('acceso a Ajustes desde el chat', () => {
   const chatView = sourceOf('..', 'components', 'Chat', 'ChatView.tsx');
   const chatCss = sourceOf('..', 'components', 'Chat', 'Chat.css');

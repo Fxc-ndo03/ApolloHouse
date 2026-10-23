@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 
-import { useAuth } from './authStore';
+import { createAuthStore, useAuth } from './authStore';
 import { useAppStore } from '@/store';
 
 /**
@@ -75,5 +75,45 @@ describe('authStore sin Tauri disponible', () => {
     expect(useAppStore.getState().displayName).toBe('Persona Anterior');
     expect(useAppStore.getState().hasCompletedOnboarding).toBe(true);
     expect(useAppStore.getState().pendingOnboarding).toBe(false);
+  });
+
+  it('no confunde una falla al verificar la sesión con un cierre de sesión y permite reintentar', async () => {
+    let attempts = 0;
+    const auth = createAuthStore(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('network unreachable');
+      return {
+        authenticated: true,
+        account_id: 'acc_test',
+        email: 'persona@ejemplo.com',
+        session_valid: true,
+      };
+    });
+
+    await auth.getState().init();
+
+    expect(auth.getState().status).toBe('verificationUnavailable');
+    expect(auth.getState().user).toBeNull();
+    expect(auth.getState().error?.code).toBe('network');
+
+    await auth.getState().retryRestore();
+
+    expect(attempts).toBe(2);
+    expect(auth.getState().status).toBe('signedIn');
+    expect(auth.getState().user?.email).toBe('persona@ejemplo.com');
+  });
+
+  it('solo informa signedOut cuando el puente confirma que no existe sesión', async () => {
+    const auth = createAuthStore(async () => ({
+      authenticated: false,
+      account_id: '',
+      email: '',
+      session_valid: false,
+    }));
+
+    await auth.getState().init();
+
+    expect(auth.getState().status).toBe('signedOut');
+    expect(auth.getState().user).toBeNull();
   });
 });

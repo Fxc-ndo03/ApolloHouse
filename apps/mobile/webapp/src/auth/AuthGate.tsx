@@ -9,6 +9,7 @@ import './account.css';
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const status = useAuth((s) => s.status);
+  const retryRestore = useAuth((s) => s.retryRestore);
   const pendingOnboarding = useAppStore((s) => s.pendingOnboarding);
   const hasCompletedOnboarding = useAppStore((s) => s.hasCompletedOnboarding);
 
@@ -18,6 +19,23 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return (
       <div className="ac ac-splash" role="status" aria-label="Loading">
         <Sparkle size={64} />
+      </div>
+    );
+  }
+  if (status === 'verificationUnavailable') {
+    return (
+      <div className="ac" role="alert">
+        <div className="ac-blobs" aria-hidden><i /><i /><i /></div>
+        <div className="ac-screen">
+          <div className="ac-form center-col">
+            <Sparkle size={64} />
+            <h1 className="ac-h">No pudimos verificar la sesión</h1>
+            <p className="ac-sub">Revisá la conexión e intentá comprobarla de nuevo.</p>
+            <button type="button" className="ac-btn" onClick={() => void retryRestore()}>
+              Volver a intentar
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
